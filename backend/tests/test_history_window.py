@@ -14,7 +14,10 @@ from fxrobot.trading_engine.runner import history_start
 @pytest.mark.parametrize("day", range(1, 15))
 def test_history_window_covers_required_bars(day: int) -> None:
     market = SyntheticMarket(
-        seed=42, symbols=["EURUSD"], start=datetime(2026, 9, day, 1, 0, tzinfo=UTC), seconds_per_bar=0
+        seed=42,
+        symbols=["EURUSD"],
+        start=datetime(2026, 9, day, 1, 0, tzinfo=UTC),
+        seconds_per_bar=0,
     )
     now = market.now()
     for tf, bars in ((Timeframe.H1, 150), (Timeframe.H4, 415), (Timeframe.D1, 60)):

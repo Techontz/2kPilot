@@ -65,7 +65,7 @@ e2e: ## Browser end-to-end tests (real backend + production build, uses Google C
 	cd $(FRONTEND) && npm run e2e
 
 lint: ## Lint and type-check backend and frontend
-	cd $(BACKEND) && .venv/bin/ruff check src tests && .venv/bin/ruff format --check src tests && .venv/bin/mypy
+	cd $(BACKEND) && .venv/bin/ruff check src tests scripts && .venv/bin/ruff format --check src tests scripts && .venv/bin/mypy
 	cd $(FRONTEND) && npm run lint && npm run typecheck
 
 check: lint test ## Everything CI should run (plus migration drift check)

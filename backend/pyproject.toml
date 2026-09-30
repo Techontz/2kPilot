@@ -44,7 +44,7 @@ addopts = "-ra -q"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-src = ["src", "tests"]
+src = ["src", "tests", "scripts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "N"]
@@ -55,6 +55,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106"]
+"scripts/**" = ["S608"]  # database names come from the operator's own URL
 "src/fxrobot/db/migrations/**" = ["E501"]
 
 [tool.mypy]

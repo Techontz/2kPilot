@@ -22,8 +22,10 @@ def main() -> int:
     key = Fernet.generate_key().decode()
     content = example.replace("SECRET_ENCRYPTION_KEY=\n", f"SECRET_ENCRYPTION_KEY={key}\n")
     if len(sys.argv) > 1:  # optional DATABASE_URL override
-        lines = [f"DATABASE_URL={sys.argv[1]}" if ln.startswith("DATABASE_URL=") else ln
-                 for ln in content.splitlines()]
+        lines = [
+            f"DATABASE_URL={sys.argv[1]}" if ln.startswith("DATABASE_URL=") else ln
+            for ln in content.splitlines()
+        ]
         content = "\n".join(lines) + "\n"
     target.write_text(content)
     target.chmod(0o600)
