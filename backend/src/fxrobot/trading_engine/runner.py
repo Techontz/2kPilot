@@ -26,7 +26,7 @@ from fxrobot.execution_engine import journal
 from fxrobot.execution_engine.engine import ExecutionEngine
 from fxrobot.execution_engine.journal import EventType
 from fxrobot.execution_engine.reconciliation import reconcile_account, unresolved_orders
-from fxrobot.market_data.sessions import is_fx_market_open
+from fxrobot.market_data.sessions import calendar_span, is_fx_market_open
 from fxrobot.market_data.validation import bar_problem
 from fxrobot.models import (
     RiskProfile,
@@ -70,7 +70,7 @@ class _RunnerState:
 
 def history_start(now: datetime, timeframe: Timeframe, bars: int) -> datetime:
     """Start time that comfortably covers `bars` closed bars, weekends included."""
-    return now - timeframe.delta * int(bars * 1.5 + 20)
+    return now - calendar_span(timeframe.seconds, bars)
 
 
 class AccountRunner:

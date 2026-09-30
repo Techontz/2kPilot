@@ -14,7 +14,7 @@ from fxrobot.broker_engine.errors import BrokerError
 from fxrobot.core.errors import AppError, NotFoundError
 from fxrobot.domain.market import Timeframe
 from fxrobot.market_data import store
-from fxrobot.market_data.sessions import is_fx_market_open, session_at
+from fxrobot.market_data.sessions import calendar_span, is_fx_market_open, session_at
 from fxrobot.market_data.validation import validate_candles
 from fxrobot.models import Dataset, StrategyAssignment, TradingAccount
 from fxrobot.services import market_data as svc
@@ -151,7 +151,7 @@ def candles(
 ) -> dict[str, Any]:
     _, adapter = _adapter(db, manager, account_id)
     now = adapter.now()
-    start = now - timeframe.delta * int(bars * 1.5 + 20)
+    start = now - calendar_span(timeframe.seconds, bars)
     try:
         data = adapter.get_candles(symbol, timeframe, start, now)[-bars:]
     except BrokerError as exc:

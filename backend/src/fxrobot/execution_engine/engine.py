@@ -45,6 +45,11 @@ DEAL_REASON_TO_EXIT = {
 }
 
 
+def _v(value: Decimal | None) -> str:
+    """Human volume, e.g. 0.09 rather than the DB's 0.0900."""
+    return "—" if value is None else format(value.normalize(), "f")
+
+
 def _money(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"))
 
@@ -89,7 +94,7 @@ class ExecutionEngine:
         journal.record(
             db,
             EventType.ORDER_SUBMITTED,
-            f"{'PAPER ' if adapter.is_simulated else ''}{signal.side.value} {decision.volume} "
+            f"{'PAPER ' if adapter.is_simulated else ''}{signal.side.value} {_v(decision.volume)} "
             f"{signal.symbol} @ market (SL {signal.stop_loss}, TP {signal.take_profit})",
             account_id=account.id,
             signal_id=signal.id,
@@ -105,7 +110,7 @@ class ExecutionEngine:
         notify(
             db,
             "order.submitted",
-            f"{'PAPER ' if adapter.is_simulated else ''}{signal.side.value} {decision.volume} "
+            f"{'PAPER ' if adapter.is_simulated else ''}{signal.side.value} {_v(decision.volume)} "
             f"{signal.symbol} submitted.",
             account_id=account.id,
             data={"order_id": str(order.id)},
@@ -162,7 +167,7 @@ class ExecutionEngine:
         notify(
             db,
             "order.rejected",
-            f"{order.side.value} {order.volume} {order.symbol}: {exc}",
+            f"{order.side.value} {_v(order.volume)} {order.symbol}: {exc}",
             account_id=order.account_id,
         )
 
@@ -199,7 +204,8 @@ class ExecutionEngine:
         notify(
             db,
             "order.unknown",
-            f"{order.side.value} {order.volume} {order.symbol}: outcome uncertain — reconciling.",
+            f"{order.side.value} {_v(order.volume)} {order.symbol}: "
+            "outcome uncertain — reconciling.",
             account_id=order.account_id,
         )
 
@@ -317,7 +323,7 @@ class ExecutionEngine:
         journal.record(
             db,
             EventType.ORDER_FILLED,
-            f"{prefix}Filled {order.filled_volume} {order.symbol} at {fill}"
+            f"{prefix}Filled {_v(order.filled_volume)} {order.symbol} at {fill}"
             + (f" (slippage {slippage} pips)" if slippage is not None else ""),
             account_id=order.account_id,
             signal_id=order.signal_id,
@@ -328,7 +334,7 @@ class ExecutionEngine:
         journal.record(
             db,
             EventType.POSITION_OPENED,
-            f"{prefix}{order.side.value} {trade.volume} {order.symbol} opened at {fill}",
+            f"{prefix}{order.side.value} {_v(trade.volume)} {order.symbol} opened at {fill}",
             account_id=order.account_id,
             signal_id=order.signal_id,
             order_id=order.id,
@@ -338,7 +344,7 @@ class ExecutionEngine:
         notify(
             db,
             "position.opened",
-            f"{prefix}{order.side.value} {trade.volume} {order.symbol} at {fill}",
+            f"{prefix}{order.side.value} {_v(trade.volume)} {order.symbol} at {fill}",
             account_id=order.account_id,
             data={"trade_id": str(trade.id)},
         )
@@ -412,7 +418,7 @@ class ExecutionEngine:
         journal.record(
             db,
             EventType.ORDER_SUBMITTED,
-            f"Close {trade.side.value} {trade.volume} {trade.symbol} "
+            f"Close {trade.side.value} {_v(trade.volume)} {trade.symbol} "
             f"({reason.value}) {note}".strip(),
             account_id=trade.account_id,
             order_id=order.id,
@@ -528,7 +534,7 @@ class ExecutionEngine:
         journal.record(
             db,
             EventType.POSITION_CLOSED,
-            f"{prefix}{trade.side.value} {trade.volume} {trade.symbol} closed at {price} "
+            f"{prefix}{trade.side.value} {_v(trade.volume)} {trade.symbol} closed at {price} "
             f"({reason.value}), net P/L {trade.net_pnl}",
             account_id=trade.account_id,
             trade_id=trade.id,

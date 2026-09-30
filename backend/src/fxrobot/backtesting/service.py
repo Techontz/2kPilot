@@ -27,6 +27,7 @@ from fxrobot.db.types import utcnow
 from fxrobot.domain.market import Candle, SymbolInfo, Timeframe
 from fxrobot.domain.trading import BacktestKind, BacktestStatus, DataSource
 from fxrobot.market_data import store
+from fxrobot.market_data.sessions import calendar_span
 from fxrobot.market_data.synthetic import DEFAULT_SPECS
 from fxrobot.models import Backtest, BacktestTrade, Dataset, StrategyVersion, User
 from fxrobot.notifications.service import notify
@@ -97,7 +98,7 @@ def cost_model(raw: dict[str, Any]) -> CostModel:
 def _warmup(strategy_key: str, params: dict[str, Any]) -> timedelta:
     strategy = get_strategy(strategy_key)
     p = strategy.parse_params(params)
-    return max(tf.delta * int(n * 1.5 + 20) for tf, n in strategy.required_bars(p).items())
+    return max(calendar_span(tf.seconds, n) for tf, n in strategy.required_bars(p).items())
 
 
 class BacktestService:

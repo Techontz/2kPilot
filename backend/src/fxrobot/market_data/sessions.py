@@ -11,7 +11,7 @@ Labels are used by the risk engine (allowed sessions) and analytics
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 
 
@@ -45,3 +45,12 @@ def is_fx_market_open(moment: datetime) -> bool:
     if weekday == 4 and moment.hour >= 21:  # Friday after close
         return False
     return not (weekday == 6 and moment.hour < 21)  # Sunday before open
+
+
+def calendar_span(bar_seconds: int, bars: int) -> timedelta:
+    """Calendar time that contains at least `bars` trading bars.
+
+    FX trades ~5 of 7 days, so scale by 7/5 and add 3 days so that any window
+    — even one that straddles two weekends or a holiday — is long enough.
+    """
+    return timedelta(seconds=bar_seconds * bars * 7 / 5) + timedelta(days=3)

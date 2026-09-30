@@ -26,7 +26,7 @@ export function SetupProgress({ status, overview }: { status: SystemStatus; over
     { title: "Backtest the strategy", detail: "Run Trend Pullback V1 on history, then check the out-of-sample result.", done: (backtests.data ?? []).some((b) => b.status === "COMPLETED"), href: "/backtesting" },
     { title: "Assign and enable the strategy", detail: "Choose the account and symbol, give the account a risk profile, then enable.", done: assignments.some((a) => a.status === "ENABLED"), href: "/strategies" },
     { title: "Resume trading on demo/paper", detail: "Release the kill switch. The engine then trades within your risk limits.", done: !status.trading.kill_switch_engaged && status.trading.engine_state !== "offline", href: "/risk" },
-    { title: "Review the first trades", detail: "Every decision is in the journal — including rejected signals and why.", done: overview.totals.trades_today > 0 || overview.recent_events.some((e) => e.event_type === "POSITION_OPENED"), href: "/journal" },
+    { title: "Review the first trades", detail: "Every decision is in the journal — including rejected signals and why.", done: overview.totals.open_positions > 0 || overview.recent_events.some((e) => e.event_type === "POSITION_OPENED" || e.event_type === "POSITION_CLOSED"), href: "/journal" },
   ];
   const completed = steps.filter((s) => s.done).length;
   return (

@@ -11,7 +11,7 @@ import { DataTable } from "@/components/ui/DataTable";
 import { Segmented } from "@/components/ui/Fields";
 import { EmptyState, KeyValue, Loading, Notice, Pnl } from "@/components/ui/Misc";
 import { PageHeader } from "@/components/ui/PageHeader";
-import { formatMoney, formatNumber, formatPct, formatPnl, humanize } from "@/lib/format";
+import { formatMoney, formatPct, formatPnl, humanize } from "@/lib/format";
 import type { GroupStat, Metrics, Performance } from "@/lib/types";
 import { useApiResource } from "@/lib/useApiResource";
 import { MetricTiles } from "@/features/backtesting/BacktestReport";
@@ -21,15 +21,14 @@ import { useAccounts } from "@/features/shared/useAccounts";
 type Period = "7" | "30" | "90" | "all";
 type Bucket = "daily" | "weekly" | "monthly";
 
-function Group({ title, rows }: { title: string; rows: GroupStat[] | undefined }) {
+function Group({ title, rows, enumKeys = false }: { title: string; rows: GroupStat[] | undefined; enumKeys?: boolean }) {
   return (
     <Card>
       <CardHeader title={title} />
       <DataTable rows={rows ?? []} rowKey={(r) => r.key} empty="No closed trades." columns={[
-        { key: "k", header: "", cell: (r) => humanize(r.key) },
+        { key: "k", header: "", cell: (r) => (enumKeys ? humanize(r.key) : r.key) },
         { key: "t", header: "Trades", align: "right", cell: (r) => r.trades },
-        { key: "w", header: "Win rate", align: "right", hideBelow: "sm", cell: (r) => formatPct(r.win_rate, 1) },
-        { key: "pf", header: "PF", align: "right", hideBelow: "sm", cell: (r) => (r.profit_factor == null ? "—" : formatNumber(r.profit_factor)) },
+        { key: "w", header: "Win", align: "right", hideBelow: "sm", cell: (r) => formatPct(r.win_rate, 0) },
         { key: "n", header: "Net", align: "right", cell: (r) => <Pnl value={r.net_pnl}>{formatPnl(r.net_pnl)}</Pnl> },
       ]} />
     </Card>
@@ -106,7 +105,7 @@ export function AnalyticsScreen() {
           <div className="grid gap-6 lg:grid-cols-3">
             <Group title="By strategy" rows={p.by_strategy} />
             <Group title="By instrument" rows={p.by_symbol} />
-            <Group title="By session" rows={p.by_session} />
+            <Group title="By session" rows={p.by_session} enumKeys />
           </div>
           {ex && (
             <Card>
