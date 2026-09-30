@@ -1,39 +1,60 @@
 # Deployment
 
-> Phase 1 is meant for local and private use. Don't expose the system to the internet before MFA and HTTPS are in place (see [SECURITY.md](SECURITY.md)).
+> 2kFX is designed for a single operator on a private machine or VPS. Don't expose it to the internet without HTTPS, and ideally not before MFA exists.
+
+## Recommended topology
+
+```
+[your browser] ──HTTPS──► [Linux/macOS/Windows host: Next.js + FastAPI (engine) + MySQL 8]
+                                          │ Tailscale / WireGuard / TLS, HMAC
+                                          ▼
+                          [Windows PC/VPS: mt5_bridge + MetaTrader 5 terminal]
+```
+
+The whole stack can also run on the Windows VPS itself. The bridge then listens on `127.0.0.1` only.
+
+## Native (verified)
+
+```bash
+make setup && make db && make user EMAIL=… NAME=…
+make build BACKEND_PORT=8000
+cd backend && .venv/bin/uvicorn fxrobot.main:create_app --factory --no-proxy-headers --host 127.0.0.1 --port 8000
+cd frontend && npx next start -p 3000
+```
+
+Run **one** backend process. It hosts the trading engine; a database lease prevents a second engine from trading, but the event stream and login rate limiter are per-process. Put a reverse proxy (Caddy or nginx) in front of Next.js for HTTPS, then set `APP_ENV=production` and `COOKIE_SECURE=true`.
 
 ## Docker Compose
 
 ```bash
-cp .env.example backend/.env    # set SECRET_ENCRYPTION_KEY
+cp .env.example backend/.env   # set SECRET_ENCRYPTION_KEY; DATABASE_URL is overridden by compose
 docker compose up --build
 docker compose exec backend fxrobot create-user --email you@example.com --name "You"
 ```
 
-* `db`: PostgreSQL 16 with a named volume (`pgdata`).
-* `backend`: runs `alembic upgrade head`, then uvicorn on port 8000 as a non-root user. It's bound to `127.0.0.1` on the host.
-* `frontend`: a Next.js standalone server on port 3000, built with `BACKEND_URL=http://backend:8000`. Rewrites are resolved at build time.
+The stack is MySQL 8.0 (volume `mysqldata`), a backend that migrates on start and runs as a non-root user, and a Next.js standalone frontend. Ports are bound to `127.0.0.1`.
 
-> The Compose files were written for Phase 1 but **haven't been run yet**, because Docker isn't installed on the development machine. The native setup ([SETUP.md](SETUP.md)) is the verified path.
-
-With Compose, requests reach the backend from the frontend container's address. Set `TRUSTED_PROXIES` to that address (or pin a subnet) if you want real client IPs in audit logs. Otherwise the frontend container IP is recorded, which is safe but less informative.
+> Docker was not available on the development machine, so the Compose setup is **written but not run**. The native setup is the verified path.
 
 ## Health checks
 
-| Endpoint | Use |
+| Endpoint | Meaning |
 |---|---|
-| `GET /api/v1/health/live` | Liveness. The process is up |
-| `GET /api/v1/health/ready` | Readiness. The DB is reachable **and** the schema is at the latest migration. Returns 503 otherwise |
+| `GET /api/v1/health/live` | The process is up |
+| `GET /api/v1/health/ready` | The database is reachable and the schema is at the latest migration (503 otherwise) |
+| Top bar / `GET /api/v1/trading/status` | Engine heartbeat: `running` / `degraded` / `offline` |
+
+## Backups
+
+* **MySQL.** Take regular `mysqldump --single-transaction` dumps of the `fxrobot` schema, and test a restore.
+* **`SECRET_ENCRYPTION_KEY`.** Store it separately from the database backup.
+* **`mt5_bridge` journal** (`JOURNAL_PATH`, SQLite). Keep it with the bridge; it provides idempotency across restarts.
 
 ## Production checklist
 
-- [ ] `APP_ENV=production`, `COOKIE_SECURE=true`, HTTPS termination in front of Next.js
-- [ ] Unique `SECRET_ENCRYPTION_KEY` from a secret manager, and backed up
-- [ ] Strong `POSTGRES_PASSWORD`. The DB isn't publicly reachable. Automated backups with a tested restore
-- [ ] `LOG_FORMAT=json`, logs shipped to central storage
-- [ ] `LIVE_TRADING_ENABLED=false` (unchanged until Phase 10 sign-off)
-- [ ] Backend and DB not exposed publicly. Only the frontend is
-
-## MT5 hosting (from Phase 2)
-
-The MT5 adapter needs Windows. Either the whole backend runs on a Windows VPS near the broker's servers, or a Windows **MT5 bridge** runs the adapter and the backend stays on Linux. See [BROKERS.md](BROKERS.md).
+- [ ] `APP_ENV=production`, `COOKIE_SECURE=true`, HTTPS in front
+- [ ] Dedicated MySQL user, not root; automated backups
+- [ ] Encryption key in a password manager and backed up
+- [ ] Bridge on a private network or TLS, firewall rule, long `BRIDGE_SECRET`
+- [ ] `LIVE_TRADING_ENABLED=false` until the live-readiness review is signed off
+- [ ] `LOG_FORMAT=json`, logs retained

@@ -1,72 +1,60 @@
-# Database
+# Database (MySQL 8)
 
-PostgreSQL 16, SQLAlchemy 2 ORM, and Alembic migrations in `backend/src/fxrobot/db/migrations/`.
+SQLAlchemy 2 ORM, PyMySQL driver, and Alembic migrations in `backend/src/fxrobot/db/migrations/versions/`:
 
-Principles:
-* Relational models with foreign keys, constraints and indexes. JSON(B) is only for genuinely flexible data, such as strategy parameters or audit details.
-* Deterministic constraint names (`db/base.py`) keep migrations reviewable.
-* All timestamps are `timestamptz` in UTC. Money and prices will use `NUMERIC`.
-* `alembic check` runs in CI, so models and migrations can't drift apart.
-
-## Implemented (migration `0001`)
-
-### `users`
-| Column | Type | Notes |
-|---|---|---|
-| id | uuid PK | |
-| email | varchar(320) unique | CHECK `email = lower(email)` |
-| display_name | varchar(120) | |
-| password_hash | varchar(255) | Argon2id |
-| role | enum `user_role` (`owner`, `viewer`) | |
-| is_active | bool, default true | |
-| last_login_at, created_at, updated_at | timestamptz | |
-
-### `user_sessions`
-Server-side sessions, which can be revoked instantly.
-| Column | Notes |
+| Revision | Contents |
 |---|---|
-| token_hash | SHA-256 of the session token, unique. The raw token is never stored |
-| csrf_token_hash | SHA-256 of the per-session CSRF token |
-| expires_at / last_seen_at / revoked_at | absolute expiry, idle timeout, logout |
-| ip_address, user_agent | context |
+| `0001` | MySQL baseline: `users`, `user_sessions`, `audit_logs` (append-only triggers), `system_state` (seeded: DEMO, kill switch **engaged**) |
+| `0002` | Trading schema: every other table below, plus the engine lease/heartbeat columns on `system_state` |
 
-FK `user_id → users` ON DELETE CASCADE. Index `(user_id, revoked_at)`.
+## MySQL-specific choices
 
-### `audit_logs` (append-only)
-| Column | Notes |
+| Topic | Choice |
 |---|---|
-| id | bigserial |
-| occurred_at | indexed |
-| actor_user_id | FK → users ON DELETE SET NULL (history survives user deletion) |
-| actor_label | email or `system`, kept even if the user is deleted |
-| action | e.g. `trading.kill_switch.engaged`, indexed with `occurred_at` |
-| outcome | enum `success` / `failure` / `denied` |
-| target_type, target_id, ip_address, user_agent, correlation_id | context |
-| details | JSONB, masked before insert |
+| Time | `DATETIME(6)` storing **naive UTC** through the `UTCDateTime` type, which returns aware UTC datetimes. Each connection runs `SET time_zone='+00:00'` so `CURRENT_TIMESTAMP(6)` is UTC |
+| Strictness | Each connection sets `STRICT_ALL_TABLES`, `NO_ZERO_DATE` and `ERROR_FOR_DIVISION_BY_ZERO` (no silent truncation of money) |
+| Isolation | `READ COMMITTED`, so long-running engine loops always read fresh rows |
+| Enums | `VARCHAR` + `CHECK` (not native `ENUM`): portable and easy to extend |
+| JSON | MySQL `JSON` for genuinely flexible data only (strategy parameters, evaluation checks, reports, masked audit details) |
+| Money / prices / lots | `DECIMAL(20,6)` / `DECIMAL(24,10)` / `DECIMAL(16,4)` |
+| UUID keys | `CHAR(32)` |
+| Charset | `utf8mb4` / `utf8mb4_0900_ai_ci`. Lower-case email is enforced with a binary CHECK |
+| Audit log | `BEFORE UPDATE` / `BEFORE DELETE` triggers raise `SIGNAL 45000`. FK cascades don't fire triggers, so deleting a user still sets `actor_user_id` to NULL |
+| DDL | MySQL DDL is **not transactional**. Back up before migrating production; a failed migration can leave partial tables |
 
-A `BEFORE UPDATE OR DELETE` trigger (`audit_logs_append_only`) rejects any modification. The only exception is the FK's `SET NULL` of `actor_user_id`.
+## Tables
 
-### `system_state` (singleton, `CHECK id = 1`)
-| Column | Default | Notes |
-|---|---|---|
-| trading_mode | `DEMO` | enum `trading_mode`: BACKTEST, DEMO, LIVE |
-| kill_switch_engaged | **true** | a fresh install cannot trade |
-| kill_switch_reason / _changed_at / _changed_by | | |
-| mode_changed_at / mode_changed_by | | |
-
-The migration seeds the row. If it's ever missing, the service recreates it with the kill switch **engaged**.
-
-## Planned schema (by phase)
-
-| Phase | Tables |
+| Table | Purpose / key constraints |
 |---|---|
-| 2 Brokers | `broker_connections` (connector id, label, **encrypted** credentials, status), `trading_accounts` (broker account id, environment DEMO/LIVE/UNKNOWN, currency, trading_enabled) |
-| 3 Market data | `symbols` (per connection: digits, point, contract size, volume limits), `candle_sets` (metadata: symbol, timeframe, range, source, checksum). Bulk candles in a partitioned `candles` table or Parquet files, decided in Phase 3 |
-| 4 Strategies | `strategies`, `strategy_versions` (immutable params JSONB and a code version), `strategy_assignments` (strategy version × account × symbols, enabled flag) |
-| 5 Risk | `risk_profiles` (typed limit columns, not JSON), `risk_events` (violations) |
-| 5–7 Trading | `signals` (every intention, with risk decision and reason), `orders` (client_order_id **unique**, broker ids, status incl. UNKNOWN), `trades`, `positions` |
-| 6 Backtesting | `backtests` (config, data range, cost assumptions, split periods), `backtest_trades`, `performance_snapshots` |
-| 7 Notifications | `notifications` (type, severity, read_at), `notification_channels` |
-| any | `system_settings` (typed key/value for operator-level settings) |
+| `users`, `user_sessions` | Accounts (Argon2id hashes). Sessions store only SHA-256 token hashes |
+| `audit_logs` | Append-only record of security and trading actions |
+| `system_state` | Singleton (`CHECK id = 1`): mode, kill switch, engine lease/heartbeat |
+| `system_settings` | Typed key/value store for operator settings (reserved) |
+| `broker_connections` | Connector type, non-secret settings, **Fernet-encrypted credentials**, status |
+| `trading_accounts` | Broker-reported environment (PAPER/DEMO/LIVE/UNKNOWN), balances, `trading_enabled` (default off), risk profile. Unique `(connection, broker_account_id)` |
+| `account_snapshots` | Balance/equity history → equity curves and drawdown |
+| `broker_symbols` | Symbol specifications per connection |
+| `paper_states` | Persisted paper-simulator state (restart recovery) |
+| `datasets`, `candles` | Candle series metadata (source, range, gaps, checksum) + OHLCV, PK `(dataset_id, time)` |
+| `strategies`, `strategy_versions` | Immutable parameter versions |
+| `strategy_assignments` | Version × account × symbol, `PAUSED` by default. Unique `(account, strategy, symbol)` |
+| `strategy_evaluations` | Why each closed bar did or didn't produce a signal |
+| `risk_profiles` | Typed limit columns (not JSON) |
+| `signals` | Intentions + every risk check + rejection reason. **Unique `(assignment, bar_time, side)`** = duplicate-signal protection |
+| `orders` | Every broker instruction. **Unique `client_order_id`** = idempotency key. Status includes `UNKNOWN` |
+| `trades` | Position lifecycle from open to close (the unit for journal and analytics) |
+| `trade_events` | The journal timeline |
+| `backtests`, `backtest_trades` | Reproducible runs (config, data checksum, results), with parent/child runs for validation |
+| `notifications` | In-app alerts |
 
-Idempotency and reconciliation rely on `orders.client_order_id` being unique and always sent to the broker. See [RISK_ENGINE.md](RISK_ENGINE.md).
+## Adding a migration
+
+```bash
+cd backend
+.venv/bin/alembic revision --autogenerate -m "describe change" --rev-id 0003
+# REVIEW the file: server defaults, enum CHECKs (the Enum's own CHECK is enough), data migrations, downgrade
+.venv/bin/alembic upgrade head && .venv/bin/alembic downgrade -1 && .venv/bin/alembic upgrade head
+.venv/bin/alembic check
+```
+
+Autogenerate renders timestamp columns as `DT` (`DATETIME(6)` on MySQL), so migrations don't import application code.

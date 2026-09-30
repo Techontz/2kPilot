@@ -1,39 +1,59 @@
 # Backtesting
 
-> Status: **design, for Phase 6.**
+The goal is to find out honestly whether a strategy has an edge **after costs**, and to make overfitting visible.
 
-## Goal
+## Engine (`backtesting/engine.py`)
 
-Find out honestly whether a strategy has an edge **after costs**, and make overfitting visible. A beautiful equity curve is not the goal.
+* **Same code as live.** It uses the same `Strategy.evaluate` and the same `risk_engine.evaluate` (every rule, sizing included) as the trading engine.
+* **Closed bars only.** `CursorView` reveals a bar only once `open + timeframe ≤ now`. Higher timeframes are resampled from the base data and appear only after their period ends.
+* **Next-bar fills.** A signal at a bar close fills at the **next** base bar's open, plus spread and slippage. A signal on the final bar is dropped. If the price gapped past the stop before entry, the trade is skipped.
+* **Exits.** They are checked on every base bar. If a bar touches both SL and TP, the **stop** is assumed. Gaps through a stop fill at the (worse) open. Anything still open at the end closes as `END_OF_TEST`.
+* **Costs.**
+  * Spread: each bar's recorded spread, a fixed override, or a 1.0-pip fallback.
+  * Adverse slippage on entries and stop exits.
+  * Commission per lot per side.
+  * Optional swap per lot at the 21:00 UTC rollover.
+* **Currency.** USD accounts on USD pairs (EURUSD, GBPUSD, AUDUSD, USDJPY, USDCHF, USDCAD).
+* **Reproducibility.** Every run stores the strategy and code version, parameters, risk settings, cost model, dataset ID and a **data checksum**.
 
-## Flow
+Use a data timeframe equal to or finer than the strategy's entry timeframe. H1 data works for Trend Pullback, and M15 data gives more precise exits.
 
-Select strategy version → instrument(s) → timeframe(s) → date range → starting capital → risk profile → cost model (spread, commission, slippage, swap) → run.
+## Validation modes
 
-## Simulation rules (realism)
+| Mode | What it does | Report |
+|---|---|---|
+| Single | One run | Metrics, curves, breakdowns, trade list |
+| **In/out of sample** | Splits the range (default 70/30). The out-of-sample part is never used to choose anything | Side-by-side table; warns if the edge disappears or profit factor drops more than 30 % |
+| Walk-forward | Rolling windows: choose the best grid value on training months by expectancy (≥10 trades), then test on the next unseen months | Per-window table; the headline metrics are the **stitched out-of-sample** results |
+| Sensitivity | Runs a grid of ≤16 combinations over one or two parameters | Table; warns if few combinations are profitable or returns swing wildly |
 
-* **Same code path as live** for the strategy and the risk engine. Only the market-data source and the execution simulator differ.
-* **Bar-close decisions:** signals use closed bars only. Fills happen at the *next* bar's open plus spread and slippage. There's no look-ahead.
-* **Intra-bar ambiguity:** if a bar touches both the stop and the target, assume the **stop** was hit first (conservative), unless lower-timeframe data resolves it.
-* **Costs:** spread (historical per-bar spread when available, otherwise a configured value), commission per lot, slippage model, and swap for positions held overnight.
-* **Sizing:** the same position-sizing function as live, rounded to the broker volume step.
+Warnings shown on every run where they apply:
+* "SYNTHETIC data: these results say nothing about real markets."
+* "Historical results do not guarantee future performance."
+* "Only N trades — too few for statistical confidence (aim for 30+)."
+* "The maximum-drawdown limit halted trading during this test."
 
-## Results
+## Metrics (`analytics/metrics.py`, shared with live analytics)
 
-Starting and ending balance, net P/L, total return, trade count, wins and losses, win rate, average win and loss, **expectancy**, **profit factor**, **max drawdown**, R-multiple distribution, longest winning and losing streaks, equity curve, monthly returns, performance by instrument and by session, and the full trade list. Every figure shows "gross" and "after costs".
+* **Results:** net P/L, return %, trade count, wins/losses/breakeven, win rate, average win and loss, largest win and loss.
+* **Edge:** expectancy (money and R), profit factor (empty when there are no losses), average R:R.
+* **Risk:** max drawdown (amount and %), longest win and loss streaks (breakeven trades break a streak), total costs, average holding time.
+* **Curves and breakdowns:** equity and drawdown curves, monthly results, and breakdowns by symbol, session, side and strategy.
+* **Diagnostics:** how many signals were rejected, and by which risk rule.
 
-## Validation
+## Look-ahead and leakage tests (`tests/test_backtesting.py`)
 
-| Technique | Purpose |
-|---|---|
-| In-sample / out-of-sample split | Tune on one period, judge on an unseen one |
-| Walk-forward | Rolling optimise→test windows. Reports the stitched out-of-sample result |
-| Parameter sensitivity | Heat-map around chosen params. A sharp peak signals overfitting |
-| Regime breakdown | Results in trending, ranging and high/low-volatility periods |
-| Cost stress | Re-run with 1.5× and 2× spread and slippage |
+* Truncating the data at time T leaves every trade before T unchanged.
+* Spiking every candle after T leaves every decision before T unchanged.
+* Entries fill at the next bar's open, never the signal bar's close.
+* Higher-timeframe bars are visible only after they close; a stub strategy that asks for everything sees only closed bars.
+* Determinism: the same inputs give the same trades.
+* Cost monotonicity: more spread, commission or slippage always means lower net P/L.
 
-The UI shows in-sample and out-of-sample side by side, and **flags large degradation**. Every results screen states that historical performance doesn't guarantee future results.
+## Data
 
-## Reproducibility
+* **CSV import**: MT5 export format or generic OHLC, with a UTC offset for server-time exports. Bad rows are dropped and reported.
+* **MT5 download** from a connected account.
+* **Synthetic**: deterministic per seed, labelled SYNTHETIC everywhere.
 
-A backtest record stores the strategy version, parameters, a data-set checksum, the cost model, the random seeds and the code version. Re-running it must reproduce identical results.
+Every dataset gets validation: gaps (ignoring weekends), duplicates, bad OHLC and spikes.

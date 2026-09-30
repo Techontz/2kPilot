@@ -3,85 +3,83 @@
 ## System overview
 
 ```
-Browser ──► Next.js (frontend/) ──/api/v1/* rewrite──► FastAPI (backend/) ──► PostgreSQL
-             UI only, no trading logic                  services + engines
-                                                               │
-                                                               ▼
-                                                       BrokerAdapter ──► MetaTrader 5 (Phase 2)
+Browser ─► Next.js (frontend/) ─ /api/v1/* rewrite ─► FastAPI (backend/) ─► MySQL 8
+            UI only; SSE for live updates              services + engines
+                                                          │
+                                                          ├─► PaperBroker (in-process simulator)
+                                                          └─► MT5BridgeAdapter ─HTTPS/HMAC─► mt5_bridge (Windows) ─► MT5 terminal ─► broker
 ```
 
-* The browser only talks to the Next.js origin. Next.js rewrites `/api/v1/*` to the backend, so session cookies are first-party and `SameSite=Strict`, and the backend address never reaches the browser.
-* The **backend owns all business rules**. React components render state and call the API. They never decide whether a trade is allowed.
+* The browser only talks to the Next.js origin. Session cookies are first-party and `SameSite=Strict`, and the backend address never reaches the browser.
+* One backend process serves the API **and** runs the trading engine on background threads. A database lease guarantees that only one engine instance trades, even if several API processes run.
+* **All business rules live in the backend.** React renders state and calls the API.
 
-## The trading pipeline (target design)
-
-```
-Market Data ─► Strategy Engine ─► Signal ─► Risk Engine ─► Execution Engine ─► BrokerAdapter ─► Broker
-                 (proposes)                  (decides)       (idempotent submit,
-                                                              reconciliation)
-```
-
-Every hop is logged under one correlation ID, so any trade can be traced from signal to exit.
-
-| Stage | Package (planned) | Responsibility | Must never |
-|---|---|---|---|
-| Market data | `market_data` | candles, ticks, symbols, validation, staleness | fabricate data |
-| Strategy | `strategy_engine` | produce `Signal` intentions from data + params | place orders, know about MT5 |
-| Risk | `risk_engine` | approve / reject with a stored reason | be bypassed |
-| Execution | `execution_engine` | validation, idempotent submit, retries only when safe, reconciliation | assume a failed request means "not executed" |
-| Broker | `broker_engine` | translate to/from a specific broker | leak broker types upward |
-| Orchestration | `trading_engine` | schedules the pipeline per account, and honours the kill switch | run while the kill switch is engaged |
-
-## Why one Python package instead of top-level folders per engine
-
-The brief suggested top-level `trading_engine/`, `risk_engine/` and so on. Those engines are subpackages of a single installable package, `fxrobot`, instead:
-
-* One import root and one dependency set. Nothing is broken by `sys.path` hacks between sibling top-level folders.
-* Boundaries are still strict. Each engine is its own package, with its public API exported from `__init__.py`. Dependency direction is one-way, as the rules below describe.
-* An engine can later be split into its own service (for example, a Windows-hosted MT5 bridge) because it only exposes interfaces and DTOs.
-
-### Dependency rules
+## The pipeline (identical for paper, demo and — later — live)
 
 ```
-api ──► services ──► engines (risk, execution, …) ──► broker_engine ──► domain
-  └──► schemas          └──► models/db                                  ▲
-core is used by everyone; domain depends on nothing.                    │
-strategy_engine ──► domain + market-data DTOs only (never broker_engine adapters)
+                   ┌──────────────────── engine tick (every ENGINE_TICK_SECONDS) ───────────────────┐
+broker.advance() → reconcile orders & positions → sync account/snapshots → [kill switch?] →
+  for each ENABLED assignment with a newly closed entry bar:
+    candles (closed only) → validate → strategy.evaluate → StrategyEvaluation (why / why not)
+      → Signal (unique per assignment+bar+side) → risk_engine.evaluate → APPROVED / REJECTED (+reason)
+        → execution_engine.submit_entry → Order (persisted BEFORE send) → broker → fill / reject / UNKNOWN
+          → Trade (position) → … → exit detected by reconciliation → Trade closed → journal, notifications
 ```
 
-* `api/` holds routes. They validate input, call a service, and shape output. There is no business logic in them.
-* `services/` holds business rules and transactions. Every state change that matters is audited here.
-* `domain/` holds broker-agnostic enums and value types, such as `TradingMode` and `AccountEnvironment`.
-* `core/` holds infrastructure: config, logging, security, crypto and errors.
+Every step writes to the **journal** (`trade_events`) under one correlation ID. The dashboard's trade drawer shows the whole chain.
 
-## Key Phase 1 components
+## Packages (`backend/src/fxrobot/`)
 
-| Component | File | Notes |
+| Package | Responsibility | Never |
 |---|---|---|
-| App factory | `backend/src/fxrobot/main.py` | `create_app(settings)`, injectable settings for tests |
-| Config | `core/config.py` | Pydantic settings. Production refuses insecure cookies or a missing encryption key |
-| Logging | `core/logging.py` | JSON or console output. Correlation ID on every line. Sensitive keys and inline `password=` are masked |
-| Correlation IDs | `api/middleware.py` | Accepts a safe `X-Request-ID` or generates one, and echoes it in responses and in audit rows |
-| Auth | `services/auth.py` | Opaque session tokens (SHA-256 hash stored), idle and absolute expiry, CSRF token per session |
-| Trading control | `services/trading_control.py` | Kill switch and mode rules. This is the single source of `new_orders_permitted` |
-| Audit | `services/audit.py` + DB trigger | Append-only, with masked details |
-| Broker interface | `broker_engine/interface.py` | Async `BrokerAdapter` ABC. `Decimal` DTOs in `models.py` |
-| Connector registry | `broker_engine/registry.py` | Reports connection types honestly (`planned`, `unavailable` or `available`) |
+| `domain` | Broker-neutral types: modes, environments, market DTOs, lifecycle enums | depends on anything |
+| `market_data` | Sessions, conversion, pip values, resampling, validation, candle store, CSV, synthetic | fabricate data unlabelled |
+| `strategy_engine` | `Strategy` contract, indicators, views (`StaticView`, look-ahead-safe `CursorView`), Trend Pullback V1 | place orders or know the broker |
+| `risk_engine` | Pure rules + position sizing; `RiskLimits` | be bypassed |
+| `broker_engine` | `BrokerAdapter` contract, error taxonomy, registry, factory, `BrokerManager`, adapters | leak broker types upward |
+| `execution_engine` | Idempotent submission, reconciliation, journal | resend an uncertain order |
+| `trading_engine` | Per-account runner, risk-context builder, supervisor (lease, heartbeat, worker threads) | trade while the kill switch is engaged |
+| `backtesting` | Event-driven backtester (same strategy + risk code), validation service | use unclosed data |
+| `analytics` | Metrics shared by backtests and live analytics | invent numbers |
+| `notifications` | In-app notifications + `NotificationChannel` interface | break trading if a channel fails |
+| `services` | Business operations used by routes (auth, brokers, strategies, risk profiles, market data, trading ops, readiness, analytics) | — |
+| `api` | Thin routes, dependencies, serializers, SSE stream | contain business logic |
 
-## Frontend structure
+### Dependency direction
 
 ```
-src/app/(dashboard)/…     one thin page.tsx per route, rendering a feature screen
-src/features/<area>/      screen components for that area
-src/components/ui/        design-system primitives (Card, Badge, Button, Term, ConfirmDialog…)
-src/components/layout/    AppShell, Sidebar, TopBar, LiveBanner, KillSwitchButton
-src/components/providers/ SessionProvider, SystemStatusProvider
-src/lib/                  api client, types (mirroring backend schemas), glossary, pure helpers
-src/proxy.ts              optimistic redirect to /login (the real auth is the backend)
+api → services → trading_engine → execution_engine → broker_engine → domain
+                     │                 └→ risk_engine → strategy_engine → market_data → domain
+                     └→ backtesting (uses strategy_engine + risk_engine directly)
+core (config, logging, security, crypto, events) is used everywhere
 ```
 
-* **Status freshness:** `SystemStatusProvider` refetches on window focus and every 30 s. That is one lightweight endpoint, not every endpoint. When the trading engine lands (Phase 7), this is replaced by a WebSocket push channel for prices, positions, order status and risk alerts.
+## Key design decisions
 
-## Real-time updates (planned)
+| Decision | Why |
+|---|---|
+| **Synchronous adapters + worker threads** | The MetaTrader5 library, SQLAlchemy sessions and the backtester are synchronous. Each account ticks on its own thread, with a timeout |
+| **MT5 via a Windows bridge** | The MT5 Python package only runs on Windows next to the terminal. The backend stays portable, and the bridge exposes only the adapter's operations |
+| **One Python package, strict subpackages** | One import root and one dependency set. Boundaries are enforced by the dependency direction above |
+| **UTC everywhere** | MySQL `DATETIME(6)` stores naive UTC through `UTCDateTime`; sessions force `time_zone='+00:00'`. Broker server time is converted in the bridge |
+| **Decimal for money and prices** | No binary floating-point drift. Indicators use numpy floats, and results are quantized back |
+| **Server-Sent Events** for live updates | Simple, one-directional, works through the Next.js proxy with cookie auth. REST stays the source of truth |
+| **Paper time never runs ahead of real time** | Simulated timestamps stay in the past, so journals and analytics stay coherent |
+| **READ COMMITTED isolation** | Long-running engine loops always see fresh rows |
 
-A single authenticated WebSocket (`/api/v1/stream`) will carry typed events: `status`, `quote`, `position`, `order`, `risk_alert` and `broker_connection`. Clients subscribe per topic. REST remains the source of truth, and the stream only pushes changes.
+## Real-time updates
+
+`GET /api/v1/stream` (SSE) publishes these topics: `status`, `broker`, `account`, `journal`, `evaluation`, `notification` and `notification_read`. The in-process `EventBus` is thread-safe, and slow subscribers drop old events rather than block the engine. The frontend has a single `StreamProvider`, and pages refetch (debounced) when relevant topics arrive. Only the Markets price table also refreshes every 5 s.
+
+## Frontend
+
+```
+src/app/(dashboard)/<page>/page.tsx  thin route → features/<area>/*Screen.tsx
+src/features/                        screens: overview, markets, strategies, backtesting, trading,
+                                     records (positions/orders/history/journal), brokers, analytics,
+                                     risk, notifications, settings, shared (account picker, trade drawer)
+src/components/ui                    design system (Card, DataTable, Dialog, Fields, Badge, Term, Meter…)
+src/components/charts                lightweight-charts time series & candles, SVG bar chart
+src/components/providers             Session, SystemStatus, Stream
+src/lib                              typed API client, types, formatters, glossary, hooks
+```

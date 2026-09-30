@@ -1,52 +1,65 @@
 # Risk engine
 
-> Status: the **global controls are implemented** (kill switch, modes, LIVE hard lock). The per-trade risk engine is **Phase 5**.
+The risk engine is the final authority. `risk_engine.evaluate(signal, context, limits)` is a **pure function** used by live trading and by backtests alike. Every rule's result is stored on the signal (`risk_checks`). Any failure rejects the trade with a reason such as *"Trade rejected: Daily loss limit: loss 2.01% reached limit 2.00%"*. A rule that cannot be evaluated because of malformed input **fails** rather than crashing.
 
-## Authority
-
-The risk engine sits between every signal and every order. There is no other path to the execution engine. If any rule fails, the trade is **rejected**, and the reason is stored on the signal and shown in the Journal (for example, *"Trade rejected: maximum daily loss reached."*).
-
-## Implemented now: global trading gates
-
-`backend/src/fxrobot/services/trading_control.py` computes `new_orders_permitted`. This is the single answer to "may anything open a trade right now?":
+## Global gates (`services/trading_control.py`)
 
 ```
-new_orders_permitted =
-      NOT kill_switch_engaged
-  AND NOT (mode == LIVE AND live_trading_locked)
-  AND mode != BACKTEST
+new_orders_permitted = kill switch released
+                     AND engine running (fresh heartbeat)
+                     AND NOT (mode == LIVE AND LIVE_TRADING_ENABLED == false)
+                     AND mode != BACKTEST
 ```
 
-| Rule | Enforcement | Test |
+* A fresh install is **DEMO with the kill switch engaged**.
+* The kill switch is one click, idempotent and audited. It stops strategy evaluation and new orders. **It never closes positions.**
+* **Emergency stop** engages the kill switch and, *only if chosen*, closes every open position at market (audited).
+* The mode can change only while stopped. LIVE additionally needs the server hard lock off, your password, and the phrase `ENABLE LIVE TRADING`.
+* Account environment vs mode: DEMO mode allows PAPER and DEMO accounts; LIVE mode also allows LIVE accounts; UNKNOWN accounts **never** trade.
+
+## Per-trade rules (evaluated in order; all recorded)
+
+| # | Rule | Rejects when |
 |---|---|---|
-| Fresh install: kill switch **engaged**, mode DEMO | migration seed and defensive recreate | `test_fresh_install_is_demo_with_kill_switch_engaged`, `test_missing_state_row_is_recreated_with_kill_switch_engaged` |
-| STOP is always allowed (owner), idempotent, audited | service | `test_stop_is_idempotent_and_always_audited` |
-| RESUME requires explicit `confirm: true` | schema | `test_resume_requires_explicit_confirmation` |
-| Mode changes only while stopped, and never auto-resume | service | `test_mode_change_requires_trading_stopped`, `test_switch_between_backtest_and_demo` |
-| LIVE refused while `LIVE_TRADING_ENABLED=false` | service | `test_live_is_refused_while_hard_locked` |
-| LIVE also needs the password and the typed phrase `ENABLE LIVE TRADING` | service | `test_live_requires_password_and_phrase_even_when_unlocked` |
-| DB says LIVE but the lock is on → nothing trades | status computation | `test_live_state_with_lock_reengaged_blocks_orders` |
-| Viewers can't control trading | `OwnerDep` | `test_viewer_cannot_control_trading` |
+| 1 | Kill switch | engaged |
+| 2 | Operating mode | account environment not allowed in the current mode, or LIVE account while hard-locked |
+| 3 | Account trading enabled | account switched off |
+| 4 | Broker connected | disconnected |
+| 5 | Stop loss required | missing or on the wrong side (**cannot be disabled**) |
+| 6 | Market data fresh | quote older than `max_data_age_seconds`, or the signal bar closed more than half a bar ago |
+| 7 | Market open | weekend closure |
+| 8 | Trading session | session not in `allowed_sessions` (ASIA / LONDON / OVERLAP / NEW_YORK) |
+| 9 | Spread | above `max_spread_pips` |
+| 10 | Stop distance | outside `min_stop_pips … max_stop_pips` |
+| 11 | Reward/risk | below `min_reward_risk`, or no take profit when a minimum is set |
+| 12 | Daily loss limit | realised today + open P/L ≥ `max_daily_loss_pct` of start-of-day balance |
+| 13 | Weekly loss limit | same, per ISO week |
+| 14 | Max drawdown | equity ≥ `max_drawdown_pct` below its peak → **account trading is disabled** until reviewed |
+| 15 | Loss cooldown | `cooldown_after_losses` consecutive losses, paused for `cooldown_minutes` |
+| 16 | Trades per day | `max_trades_per_day` reached |
+| 17 | Open positions | `max_open_positions` or `max_positions_per_symbol` reached |
+| 18 | Position size | risk budget buys less than the broker minimum volume (never rounded **up**) |
+| 19 | Total exposure | total lots > `max_total_exposure_lots`, or total open risk > `max_total_risk_pct`, or **any open position has unknown risk** (e.g. opened outside 2kFX) |
+| 20 | Margin | estimated margin > free margin, or the base currency can't be valued |
 
-**The kill switch does not close positions.** Stopping new trading and liquidating are separate actions. A liquidation policy, if one is ever added, must be separately configured and separately audited.
+## Position sizing
 
-## Phase 5: per-trade rules
+```
+budget      = equity × risk_per_trade_pct / 100
+loss/lot    = stop distance in points × value of 1 point for 1 lot (account currency)
+volume      = floor(budget / loss_per_lot, broker volume step)  → capped by max_position_lots and broker max
+```
 
-Evaluated in order. The first failure rejects the trade.
+The point value comes from the broker (MT5 `tick_value`) or is converted from quotes (direct, inverse or USD cross). If no rate is available, the trade is rejected. Approved decisions also carry `max_slippage_points` (from `max_slippage_pips`), which is sent to the broker as the maximum deviation.
 
-1. Global gates (above), and the account's `trading_enabled` flag
-2. Account environment matches the mode (a DEMO-mode signal can't reach an account that is LIVE or UNKNOWN)
-3. Stop loss present and on the correct side of entry
-4. Data freshness (a stale quote rejects the trade) and broker connected
-5. Session restrictions and news blackout
-6. Spread ≤ max spread; slippage allowance
-7. Daily, weekly and max-drawdown loss limits (from realised and unrealised equity)
-8. Cooldown after N consecutive losses
-9. Max trades per day, max simultaneous positions, per-symbol and total exposure
-10. Position sizing: `volume = (equity × risk%) / (stop distance × pip value)`, rounded **down** to the volume step, clamped to broker min/max and the max position size. If it rounds to below the minimum, reject rather than round up
+## Uncertainty rules
 
-Each rule is a small pure function `(context) → Approve | Reject(reason)`, unit-tested in isolation, plus an integration test for the ordering.
+* An account with any order in `PENDING_SUBMIT`, `SUBMITTED` or `UNKNOWN` takes **no new entries** until reconciliation resolves it.
+* Malformed candles skip evaluation, with a notification. A missing latest bar is never evaluated late.
+* Positions opened outside 2kFX have unknown risk, so they block new entries until closed.
 
-## Uncertainty rule
+## Profiles
 
-If the execution state is uncertain (outcome unknown, broker disconnected, or equity unknown), the safest outcome wins. Reject new entries, and reconcile before retrying anything.
+`risk_profiles` hold typed limits; each account uses one. `NULL` disables an optional limit; `risk_per_trade_pct`, `max_data_age_seconds` and `allowed_sessions` are mandatory. The default profile *Conservative (default)* is 0.5 % per trade, 2 % daily, 4 % weekly, 10 % drawdown, 3 positions, 1 per symbol, spread ≤ 2.5 pips, stop 8–150 pips, RR ≥ 1.5, London/Overlap/New York sessions, and a 240-minute cooldown after 3 losses. Every change is audited.
+
+Tests: `tests/test_risk_engine.py` (100 cases, one per condition) and the pipeline and reliability suites.

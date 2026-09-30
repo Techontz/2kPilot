@@ -1,44 +1,52 @@
 # Strategies
 
-> Status: **design, for Phase 4.** No strategy code exists yet.
+## Contract (`strategy_engine/base.py`)
 
-## The contract
-
-A strategy is a pure decision function. It reads market data and its own parameters, and outputs **signals (intentions)**. It never places orders, sizes positions in money terms, or knows which broker is used.
+A strategy is a **pure decision function** over CLOSED candles:
 
 ```python
-class Strategy(Protocol):
-    id: str                      # "trend_pullback"
-    name: str
-    version: str                 # semantic version; every param/code change = new StrategyVersion
-    timeframes: tuple[Timeframe, ...]
-    parameters_schema: type[BaseModel]   # Pydantic model → validation + UI form + backtest grid
-
-    def required_history(self) -> dict[Timeframe, int]: ...
-    def on_bar(self, ctx: StrategyContext) -> list[Signal]: ...
+class Strategy(ABC):
+    key, name, code_version, description
+    Params: type[BaseModel]                          # validated, JSON-schema → UI form
+    def timeframes(params) -> (entry_tf, *context_tfs)
+    def required_bars(params) -> {Timeframe: count}
+    def evaluate(view: MarketView, params) -> Evaluation
 ```
 
-A `Signal` contains the strategy id and version, symbol, side, entry type, proposed entry, **mandatory stop-loss (invalidation) price**, take-profit, the reasons (which conditions passed), and the timestamps. The risk engine turns an approved signal into a position size, and the execution engine turns it into an order.
+`Evaluation` = outcome (`SIGNAL` / `NO_SETUP` / `INSUFFICIENT_DATA`) + summary + a list of `Check(name, passed, detail)` + an optional `SignalIntent` (side, entry reference price, **mandatory stop loss**, take profit, reasons).
 
-Pipeline: `market data → strategy → Signal → risk engine → execution engine → broker adapter`.
+Strategies **never** place orders, size positions in money, or import a broker adapter. The risk engine sizes and decides; the execution engine sends.
 
-Strategies have `enabled = false` by default, and each one is assigned per account. **Creating a strategy never makes it trade.**
+* **Live:** the runner fetches closed candles from the broker (`StaticView`) when a new entry-timeframe bar closes, and stores every evaluation in `strategy_evaluations`, so you can see why a bar did *not* signal.
+* **Backtest:** `CursorView` reveals only bars closed at the simulated time. Higher timeframes are resampled and appear only after their period ends.
+* **Determinism:** strategies use fixed look-back windows, so live and backtest compute identical indicator values from the same bars.
 
-## Trend Pullback V1 (first research strategy)
+## Trend Pullback V1 (`trend_pullback.py`)
 
-A research starting point. **It isn't claimed to be profitable.** Every rule below is a parameter, and every parameter is backtestable.
+A research starting point. **It is not claimed to be profitable.**
 
-| Stage | Default idea | Parameters |
+| Stage | Rule (defaults) | Parameters |
 |---|---|---|
-| Trend (4H) | Close above/below EMA(slow). EMA(fast) above/below EMA(slow). Optional market-structure check (higher highs/lows) | `htf=H4`, `ema_fast=50`, `ema_slow=200`, `use_structure` |
-| Pullback (1H) | Price retraces into a zone (e.g. between EMA(fast) and EMA(slow), or an ATR band) | `ltf=H1`, `pullback_zone`, `max_pullback_atr` |
-| No chasing | Skip if price is more than N×ATR from the trend EMA | `max_extension_atr` |
-| Confirmation | e.g. a close back in the trend direction, or a break of the pullback swing | `confirmation` |
-| Stop (invalidation) | Beyond the pullback swing ± buffer, or N×ATR | `stop_mode`, `stop_buffer_atr` |
-| Take profit | Fixed R multiple or structure-based | `rr_target=2.0`, `tp_mode` |
-| Sessions | Allowed trading sessions (e.g. London/NY) | `sessions` |
-| News | Optional blackout window (needs a calendar source) | `news_blackout_min` |
+| Trend (H4) | Close vs EMA200; EMA50 vs EMA200; slope of EMA200 over 10 bars; optional swing structure | `higher_timeframe`, `ema_fast`, `ema_slow`, `require_fast_above_slow`, `require_slope`, `slope_lookback`, `use_structure` |
+| Pullback (H1) | Within the last 6 bars, price came within 0.5 ATR of EMA50 | `entry_timeframe`, `pullback_lookback`, `pullback_zone_atr` |
+| Not too deep | Deepest move beyond EMA50 ≤ 2.5 ATR | `max_pullback_atr` |
+| Don't chase | Close ≤ 1.5 ATR from EMA50 | `max_extension_atr` |
+| Confirmation | Close beyond the previous bar's high/low (or trend close / engulfing) | `confirmation` |
+| Stop | Beyond the swing of the last 10 bars + 0.2 ATR (or N×ATR) | `stop_mode`, `swing_lookback`, `stop_buffer_atr`, `stop_atr_mult` |
+| Target | 2R (or N×ATR) | `take_profit_mode`, `reward_risk`, `tp_atr_mult` |
+| Direction | Long and/or short | `allow_long`, `allow_short` |
 
-## Versioning
+The risk engine then adds its own gates, including session filters, spread, minimum reward/risk and stop distance.
 
-`strategy_versions` rows are immutable. Every signal, trade and backtest references the exact version, so results stay reproducible.
+## Versions and assignments
+
+* `strategy_versions` are **immutable**. Every signal, trade and backtest records its exact version.
+* A new version is created from the UI form (generated from the parameter schema); invalid values are refused.
+* An **assignment** = version × account × symbol. It is created **PAUSED** and must be enabled deliberately (the account needs a risk profile). Switching version pauses it again.
+* Duplicate-signal protection: at most one signal per assignment, bar and side (unique constraint).
+
+## Adding a strategy
+
+1. Implement `Strategy` in `strategy_engine/<name>.py` with a Pydantic `Params` model (every threshold a field with a description).
+2. Register it in `strategy_engine/registry.py`. It's seeded into the catalogue on startup.
+3. Add tests: crafted candle series for each outcome, parameter validation, and look-ahead safety with `CursorView`.

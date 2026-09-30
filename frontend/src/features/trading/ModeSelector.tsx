@@ -100,8 +100,8 @@ export function ModeSelector({ trading }: { trading: TradingStatus }) {
         </div>
         {trading.live_trading_locked && (
           <p className="mt-4 text-xs text-fg-subtle">
-            LIVE is disabled on this server (LIVE_TRADING_ENABLED=false). It will stay locked until the
-            live-readiness review in Phase 10.
+            LIVE is disabled on this server (LIVE_TRADING_ENABLED=false). It stays locked until the
+            live-readiness review is complete — see each account&apos;s readiness checklist on the Brokers page.
           </p>
         )}
       </CardBody>

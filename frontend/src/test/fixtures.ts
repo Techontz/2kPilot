@@ -11,7 +11,7 @@ export function tradingStatus(overrides: Partial<TradingStatus> = {}): TradingSt
     live_trading_locked: true,
     new_orders_permitted: false,
     engine_state: "offline",
-    engine_detail: "Engine not built yet.",
+    engine_detail: "The trading engine is not running.",
     ...overrides,
   };
 }

@@ -3,58 +3,37 @@
 ## Quality gates
 
 ```bash
-make check
+make check        # ruff + ruff format + strict mypy + pytest (MySQL) + ESLint + tsc + Vitest + alembic check
+make e2e          # Playwright against the real backend + production build (Google Chrome)
+make bridge-test  # mt5_bridge: pytest + ruff + strict mypy
 ```
 
-This runs:
+| Suite | Count | Where |
+|---|---|---|
+| Backend unit + integration (real MySQL 8) | 700+ | `backend/tests/` |
+| MT5 bridge (fake MT5 module) | 108 | `mt5_bridge/tests/` |
+| Frontend unit (Vitest) | 35 | `frontend/src/**/*.test.ts(x)` |
+| Browser E2E (Playwright) | 11 | `frontend/e2e/` |
 
-| Check | Command |
-|---|---|
-| Python lint and format | `ruff check src tests` · `ruff format --check src tests` |
-| Python types (strict) | `mypy` |
-| Backend tests | `pytest` (real PostgreSQL, migrated from scratch) |
-| Migration drift | `alembic check`, which fails if the models and migrations disagree |
-| Frontend lint | `npm run lint` |
-| Frontend types (strict) | `npm run typecheck` (`next typegen && tsc --noEmit`) |
-| Frontend tests | `npm test` (Vitest + Testing Library) |
+Notable backend suites: `test_risk_engine` (one test per rule and condition), `test_backtesting` (look-ahead and leakage), `test_execution` and `test_reliability` (lost responses, restarts, DB outages, duplicate signals, external positions, leadership lease), `test_mt5_bridge_contract` (backend client against the real bridge app), `test_engine_pipeline` (end-to-end paper trading), and `test_api_*` (security: secrets never returned, viewer and CSRF enforcement).
 
 ## Conventions
 
-### Backend
-* **Routes are thin.** Validate, call a service, return a schema. Business rules live in `services/` or an engine package.
-* **Money and prices are `Decimal`,** never `float`, in every engine and DTO.
-* **Timestamps are timezone-aware UTC** (`DateTime(timezone=True)`).
-* **Every safety-relevant state change writes an audit record** in the same transaction.
-* **Errors:** raise `AppError` subclasses (`core/errors.py`). The client gets `{"error": {code, message, correlation_id}}` and never a stack trace.
-* **Logging:** `logger.info("msg", extra={...})`. Keys that look sensitive (`password`, `token`, `secret`, `api_key`…) are masked automatically, but don't rely on it. Never log credentials.
-* **Strategies never import `broker_engine` adapters.** They see only domain types and market-data DTOs.
+* **Routes are thin**: validate, call a service, serialize. Rules live in services and engines.
+* **Money and prices are `Decimal`**; timestamps are aware UTC (stored through `UTCDateTime`).
+* **Safety-relevant changes are audited** in the same transaction.
+* **Anything uncertain fails closed**: a risk rule that can't be evaluated rejects the trade, and an uncertain order is reconciled, never resent.
+* Strategies never import broker adapters. Adapters map every native error onto `broker_engine.errors`.
+* No asserts for runtime safety checks (they vanish under `python -O`); raise explicit errors instead.
+* Frontend: no trading logic in React; never display invented numbers (show `—` and say why); explain jargon with `<Term>`; colour is semantic (`live` is reserved for LIVE mode).
 
-### Frontend
-* **No trading logic in React.** Components display backend state and call the API through `src/lib`.
-* **Never show invented numbers.** If data doesn't exist, show `—` and explain why (see `StatCard` and `PlannedFeature`).
-* **Explain jargon** with `<Term id="…">` (definitions live in `src/lib/glossary.ts`).
-* **Colour is semantic:** `positive`/`negative` for P/L, `warning` for attention, and `live` **only** for LIVE mode.
-* `src/lib/types.ts` mirrors the backend schemas. Update both together.
+## Useful fixtures (`backend/tests/conftest.py`)
 
-## Adding a database change
+`client`, `app_factory(**settings)`, `db`, `owner`, `viewer`, `owner_client`, `login()`, `fresh_heartbeat(db)`. In `tests/paper_helpers.py`: `make_paper()` and `make_market()`. In `tests/test_engine_pipeline.py`: `setup_trading()` and `run_until()`.
 
-```bash
-# 1. edit/add models in backend/src/fxrobot/models/, export them from models/__init__.py
-cd backend
-.venv/bin/alembic revision --autogenerate -m "add signals table" --rev-id 0002
-# 2. REVIEW the generated file: server defaults, enums, data migrations, downgrade
-.venv/bin/alembic upgrade head && .venv/bin/alembic downgrade -1 && .venv/bin/alembic upgrade head
-.venv/bin/alembic check
-```
+## Adding an endpoint
 
-## Adding an API endpoint
-
-1. Add request and response models in `schemas/`.
-2. Add business logic to a service. Audit if it changes state.
-3. Add a thin route in `api/v1/<domain>.py`. Use `OwnerDep` for mutations and `CurrentUserDep` for reads.
-4. Include the router in `api/v1/__init__.py`.
-5. Add tests for auth (401/403), CSRF (403) for mutations, validation (422) and the happy path.
-
-## Test fixtures
-
-`backend/tests/conftest.py` provides `client`, `app_factory(**settings_overrides)`, `db`, `owner`, `viewer`, `owner_client`, and `login(client, email)`.
+1. Put the business logic in `services/…`, and audit if it changes state.
+2. Add a thin route in `api/v1/<domain>.py` with `OwnerDep` for mutations, then include it in `api/v1/__init__.py`.
+3. Add frontend types in `src/lib/types.ts`.
+4. Add tests: 401, viewer 403, CSRF 403, validation 4xx, and the happy path.
