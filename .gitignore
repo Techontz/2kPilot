@@ -1,0 +1,40 @@
+# ── Secrets: never commit ─────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# ── OS / editor ───────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# ── Python ────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# ── Node / Next.js ────────────────────────────────────
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+coverage/
+
+# ── Local data / logs ────────────────────────────────
+logs/
+*.log
+data/
