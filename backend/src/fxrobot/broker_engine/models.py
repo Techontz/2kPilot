@@ -1,8 +1,8 @@
 """Broker-neutral data transfer objects.
 
-Prices and money use `Decimal` to avoid binary floating-point drift. All
-timestamps are timezone-aware UTC. Adapters convert broker-native values
-into these types at the boundary.
+Market types (Timeframe, SymbolInfo, Quote, Candle, Side) live in
+`fxrobot.domain.market` so strategies can use them without importing the
+broker layer; they are re-exported here for adapters' convenience.
 """
 
 from __future__ import annotations
@@ -12,54 +12,28 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
+from fxrobot.domain.market import Candle, Quote, Side, SymbolInfo, Timeframe
 from fxrobot.domain.modes import AccountEnvironment
+from fxrobot.domain.trading import OrderStatus, OrderType
 
-
-class Timeframe(StrEnum):
-    M1 = "M1"
-    M5 = "M5"
-    M15 = "M15"
-    M30 = "M30"
-    H1 = "H1"
-    H4 = "H4"
-    D1 = "D1"
-    W1 = "W1"
-
-    @property
-    def seconds(self) -> int:
-        return _TIMEFRAME_SECONDS[self]
-
-
-_TIMEFRAME_SECONDS = {
-    Timeframe.M1: 60,
-    Timeframe.M5: 300,
-    Timeframe.M15: 900,
-    Timeframe.M30: 1800,
-    Timeframe.H1: 3600,
-    Timeframe.H4: 14400,
-    Timeframe.D1: 86400,
-    Timeframe.W1: 604800,
-}
-
-
-class Side(StrEnum):
-    BUY = "BUY"
-    SELL = "SELL"
-
-
-class OrderType(StrEnum):
-    MARKET = "MARKET"
-    LIMIT = "LIMIT"
-    STOP = "STOP"
-
-
-class OrderStatus(StrEnum):
-    PENDING = "PENDING"  # resting order at the broker
-    FILLED = "FILLED"
-    PARTIALLY_FILLED = "PARTIALLY_FILLED"
-    CANCELLED = "CANCELLED"
-    REJECTED = "REJECTED"
-    UNKNOWN = "UNKNOWN"  # outcome not confirmed — requires reconciliation
+__all__ = [
+    "AccountInfo",
+    "BrokerHealth",
+    "Candle",
+    "Deal",
+    "DealEntry",
+    "Order",
+    "OrderModification",
+    "OrderRequest",
+    "OrderResult",
+    "OrderStatus",
+    "OrderType",
+    "Position",
+    "Quote",
+    "Side",
+    "SymbolInfo",
+    "Timeframe",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,49 +50,6 @@ class AccountInfo:
     margin_level: Decimal | None = None  # percent
     leverage: int | None = None
     trade_allowed: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class SymbolInfo:
-    name: str  # broker symbol, e.g. "EURUSD" or "EURUSD.m"
-    description: str
-    base_currency: str
-    quote_currency: str
-    digits: int
-    point: Decimal  # smallest price increment
-    contract_size: Decimal  # units per 1.00 lot
-    volume_min: Decimal
-    volume_max: Decimal
-    volume_step: Decimal
-    trade_allowed: bool
-
-    @property
-    def pip_size(self) -> Decimal:
-        # 5/3-digit quotes use fractional pips: 1 pip = 10 points.
-        return self.point * 10 if self.digits in (3, 5) else self.point
-
-
-@dataclass(frozen=True, slots=True)
-class Quote:
-    symbol: str
-    bid: Decimal
-    ask: Decimal
-    time: datetime
-
-    @property
-    def spread(self) -> Decimal:
-        return self.ask - self.bid
-
-
-@dataclass(frozen=True, slots=True)
-class Candle:
-    time: datetime  # bar open time, UTC
-    open: Decimal
-    high: Decimal
-    low: Decimal
-    close: Decimal
-    tick_volume: int
-    spread_points: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +80,33 @@ class Order:
     take_profit: Decimal | None
     created_time: datetime
     client_order_id: str | None = None
+
+
+class DealEntry(StrEnum):
+    IN = "IN"
+    OUT = "OUT"
+    INOUT = "INOUT"
+
+
+@dataclass(frozen=True, slots=True)
+class Deal:
+    """An execution in the broker's trade history."""
+
+    deal_id: str
+    order_id: str | None
+    position_id: str | None
+    symbol: str
+    side: Side
+    entry: DealEntry
+    volume: Decimal
+    price: Decimal
+    time: datetime
+    profit: Decimal
+    commission: Decimal = Decimal(0)
+    swap: Decimal = Decimal(0)
+    fee: Decimal = Decimal(0)
+    client_order_id: str | None = None
+    reason: str = "OTHER"  # SL | TP | SO | CLIENT | EXPERT | OTHER
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,10 +140,20 @@ class OrderModification:
 
 @dataclass(frozen=True, slots=True)
 class OrderResult:
-    client_order_id: str
+    client_order_id: str | None
     status: OrderStatus
     broker_order_id: str | None = None
+    broker_position_id: str | None = None
     filled_volume: Decimal = Decimal(0)
     fill_price: Decimal | None = None
+    broker_code: str | None = None
     broker_message: str | None = None
+    time: datetime | None = None
     raw: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class BrokerHealth:
+    connected: bool
+    detail: str
+    latency_ms: float | None = None

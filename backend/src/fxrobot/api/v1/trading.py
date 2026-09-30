@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 from fastapi import APIRouter
+from pydantic import BaseModel, Field
 
-from fxrobot.api.deps import CurrentUserDep, DbDep, MetaDep, OwnerDep, SettingsDep
+from fxrobot.api.deps import CurrentUserDep, DbDep, ManagerDep, MetaDep, OwnerDep, SettingsDep
 from fxrobot.schemas.system import (
     ResumeTradingRequest,
     SetModeRequest,
     StopTradingRequest,
     TradingStatusOut,
 )
-from fxrobot.services import trading_control
+from fxrobot.services import trading_control, trading_ops
 
 router = APIRouter(prefix="/trading", tags=["trading"])
 
@@ -54,3 +55,29 @@ def set_trading_mode(
         confirmation_phrase=body.confirmation_phrase,
     )
     return _status(db, settings)
+
+
+class EmergencyBody(BaseModel):
+    reason: str = Field(default="Emergency stop from dashboard", min_length=1, max_length=500)
+    close_positions: bool = False
+
+
+@router.post("/emergency-stop")
+def emergency_stop(
+    body: EmergencyBody,
+    owner: OwnerDep,
+    db: DbDep,
+    meta: MetaDep,
+    manager: ManagerDep,
+    settings: SettingsDep,
+) -> dict[str, object]:
+    """Stop all trading and, only if explicitly requested, close every open position."""
+    result = trading_ops.emergency_stop(
+        db,
+        manager=manager,
+        actor=owner,
+        meta=meta,
+        close_positions=body.close_positions,
+        reason=body.reason,
+    )
+    return {"result": result, "status": _status(db, settings).model_dump(mode="json")}

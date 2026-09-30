@@ -1,19 +1,23 @@
 """The contract every broker adapter implements.
 
-Adapters are asynchronous so the trading engine can run several accounts
-concurrently; adapters wrapping blocking SDKs (e.g. the MetaTrader5 Python
-package) should run those calls in a worker thread.
+Adapters are synchronous: the MetaTrader5 package, SQLAlchemy sessions and
+the backtester are all synchronous, and the trading engine runs each
+account on its own worker thread. Every method may raise the errors in
+`broker_engine.errors`; nothing else should escape an adapter.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 
+from fxrobot.broker_engine.errors import SymbolUnavailableError
 from fxrobot.broker_engine.models import (
     AccountInfo,
+    BrokerHealth,
     Candle,
+    Deal,
     Order,
     OrderModification,
     OrderRequest,
@@ -26,73 +30,108 @@ from fxrobot.broker_engine.models import (
 
 
 class BrokerAdapter(ABC):
-    #: Stable identifier matching a `ConnectorDescriptor.id` (e.g. "mt5").
+    #: Stable identifier matching a `ConnectorType` value (e.g. "mt5_bridge").
     connector_id: str
+    #: True for internal simulators. Simulated fills are never shown as broker fills.
+    is_simulated: bool = False
+
+    # ── connection ───────────────────────────────────────────────────────
+    @abstractmethod
+    def connect(self) -> AccountInfo:
+        """Open the connection and return the account. Raises BrokerConnectionError."""
 
     @abstractmethod
-    async def connect(self) -> None:
-        """Open the connection. Raises BrokerConnectionError on failure."""
+    def disconnect(self) -> None: ...
 
-    @abstractmethod
-    async def disconnect(self) -> None: ...
-
-    @abstractmethod
-    async def test_connection(self) -> AccountInfo:
+    def test_connection(self) -> AccountInfo:
         """Connect, verify credentials, and return account details."""
+        return self.connect()
 
     @property
     @abstractmethod
     def is_connected(self) -> bool: ...
 
     @abstractmethod
-    async def get_account(self) -> AccountInfo: ...
+    def health(self) -> BrokerHealth:
+        """Cheap liveness probe used by the reconnect loop."""
 
-    async def get_balance(self) -> Decimal:
-        return (await self.get_account()).balance
+    # ── time ─────────────────────────────────────────────────────────────
+    def now(self) -> datetime:
+        """The broker's notion of 'now' (UTC). Simulators return simulated time."""
+        return datetime.now(UTC)
 
-    async def get_equity(self) -> Decimal:
-        return (await self.get_account()).equity
+    def advance(self) -> None:  # noqa: B027 (intentional optional hook)
+        """Called on every engine tick. Simulators move their market forward here."""
+
+    # ── account & market data ────────────────────────────────────────────
+    @abstractmethod
+    def get_account(self) -> AccountInfo: ...
+
+    def get_balance(self) -> Decimal:
+        return self.get_account().balance
+
+    def get_equity(self) -> Decimal:
+        return self.get_account().equity
 
     @abstractmethod
-    async def get_symbols(self) -> list[SymbolInfo]: ...
+    def get_symbols(self) -> list[SymbolInfo]: ...
+
+    def get_symbol(self, name: str) -> SymbolInfo:
+        for symbol in self.get_symbols():
+            if symbol.name == name:
+                return symbol
+        raise SymbolUnavailableError(f"Symbol {name} is not available")
 
     @abstractmethod
-    async def get_quote(self, symbol: str) -> Quote: ...
+    def get_quote(self, symbol: str) -> Quote: ...
 
     @abstractmethod
-    async def get_candles(
+    def get_candles(
         self, symbol: str, timeframe: Timeframe, start: datetime, end: datetime
     ) -> list[Candle]:
-        """Closed candles with open time in [start, end), oldest first."""
+        """CLOSED candles with open time in [start, end), oldest first."""
+
+    # ── trading state ────────────────────────────────────────────────────
+    @abstractmethod
+    def get_positions(self) -> list[Position]: ...
 
     @abstractmethod
-    async def get_positions(self) -> list[Position]: ...
-
-    @abstractmethod
-    async def get_orders(self) -> list[Order]:
+    def get_orders(self) -> list[Order]:
         """Currently pending (resting) orders."""
 
     @abstractmethod
-    async def find_order_by_client_id(self, client_order_id: str) -> OrderResult | None:
+    def get_deals(self, start: datetime, end: datetime) -> list[Deal]:
+        """Executions (trade history) in [start, end)."""
+
+    @abstractmethod
+    def find_order_by_client_id(self, client_order_id: str) -> OrderResult | None:
         """Reconciliation hook: look up an order/deal by its idempotency key.
 
         Used after an OrderOutcomeUnknownError to decide whether a retry is safe.
         """
 
+    # ── trading actions ──────────────────────────────────────────────────
     @abstractmethod
-    async def place_order(self, request: OrderRequest) -> OrderResult:
+    def place_order(self, request: OrderRequest) -> OrderResult:
         """Submit an order.
 
-        Raises OrderRejectedError when the broker refuses it, and
-        OrderOutcomeUnknownError when the outcome cannot be confirmed.
+        Raises OrderRejectedError (or a subclass) when the broker refuses it,
+        and OrderOutcomeUnknownError when the outcome cannot be confirmed.
         """
 
     @abstractmethod
-    async def modify_order(self, order_id: str, changes: OrderModification) -> OrderResult: ...
+    def modify_order(self, order_id: str, changes: OrderModification) -> OrderResult: ...
 
     @abstractmethod
-    async def close_position(self, position_id: str, volume: Decimal | None = None) -> OrderResult:
+    def modify_position(
+        self, position_id: str, stop_loss: Decimal | None, take_profit: Decimal | None
+    ) -> OrderResult: ...
+
+    @abstractmethod
+    def close_position(
+        self, position_id: str, client_order_id: str, volume: Decimal | None = None
+    ) -> OrderResult:
         """Close a position fully, or partially when `volume` is given."""
 
     @abstractmethod
-    async def cancel_order(self, order_id: str) -> OrderResult: ...
+    def cancel_order(self, order_id: str) -> OrderResult: ...

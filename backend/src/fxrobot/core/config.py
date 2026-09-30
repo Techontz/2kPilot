@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     # Hard lock: while False the system can never enter LIVE mode.
     live_trading_enabled: bool = False
 
+    # Run the automated trading engine inside this API process.
+    engine_enabled: bool = True
+    engine_tick_seconds: float = Field(default=2.0, ge=0.2, le=60)
+    # Where backtests run (thread pool size inside the API process).
+    backtest_workers: int = Field(default=1, ge=1, le=8)
+
     @field_validator("cors_origins", "trusted_proxies", mode="before")
     @classmethod
     def _split_origins(cls, value: object) -> object:

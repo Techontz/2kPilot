@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from fxrobot.domain.modes import TradingMode
 from fxrobot.models import AuditLog, SystemState, User
 from fxrobot.services.trading_control import LIVE_CONFIRMATION_PHRASE
-from tests.conftest import OWNER_PASSWORD, login
+from tests.conftest import OWNER_PASSWORD, fresh_heartbeat, login
 
 
 def _actions(db: Session) -> list[str]:
@@ -28,9 +28,11 @@ def test_system_status_requires_login(client: TestClient) -> None:
 
 
 def test_resume_then_stop(owner_client: TestClient, db: Session) -> None:
+    fresh_heartbeat(db)
     resumed = owner_client.post("/api/v1/trading/resume", json={"confirm": True}).json()
     assert resumed["kill_switch_engaged"] is False
     assert resumed["new_orders_permitted"] is True
+    assert resumed["engine_state"] == "running"
 
     stopped = owner_client.post("/api/v1/trading/stop", json={"reason": "news spike"}).json()
     assert stopped["kill_switch_engaged"] is True
@@ -139,6 +141,7 @@ def test_system_status_payload(owner_client: TestClient) -> None:
     body = owner_client.get("/api/v1/system/status").json()
     assert body["environment"] == "test"
     assert body["broker_accounts_connected"] == 0
+    assert body["broker_accounts_total"] == 0
     assert body["trading"]["trading_mode"] == "DEMO"
 
 
@@ -163,3 +166,20 @@ def test_missing_state_row_is_recreated_with_kill_switch_engaged(
     body = owner_client.get("/api/v1/trading/status").json()
     assert body["kill_switch_engaged"] is True
     assert body["new_orders_permitted"] is False
+
+
+def test_offline_engine_never_permits_orders(owner_client: TestClient) -> None:
+    body = owner_client.post("/api/v1/trading/resume", json={"confirm": True}).json()
+    assert body["kill_switch_engaged"] is False
+    assert body["engine_state"] == "offline"
+    assert body["new_orders_permitted"] is False
+
+
+def test_emergency_stop_engages_kill_switch_without_closing(
+    owner_client: TestClient, db: Session
+) -> None:
+    owner_client.post("/api/v1/trading/resume", json={"confirm": True})
+    body = owner_client.post("/api/v1/trading/emergency-stop", json={"reason": "test"}).json()
+    assert body["status"]["kill_switch_engaged"] is True
+    assert body["result"] == {"closed": 0, "failed": []}
+    assert "trading.emergency_stop" in _actions(db)

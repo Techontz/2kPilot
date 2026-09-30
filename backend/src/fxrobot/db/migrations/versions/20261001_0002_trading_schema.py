@@ -243,6 +243,7 @@ def upgrade() -> None:
             "kind",
             sa.Enum(
                 "SINGLE",
+                "SPLIT",
                 "IN_SAMPLE",
                 "OUT_OF_SAMPLE",
                 "WALK_FORWARD",

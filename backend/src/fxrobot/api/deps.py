@@ -9,6 +9,8 @@ from typing import Annotated
 from fastapi import Depends, Request
 from sqlalchemy.orm import Session
 
+from fxrobot.backtesting.service import BacktestService
+from fxrobot.broker_engine.manager import BrokerManager
 from fxrobot.core.config import Settings
 from fxrobot.core.errors import AuthenticationError, PermissionDeniedError
 from fxrobot.models import User, UserRole, UserSession
@@ -86,3 +88,17 @@ def require_owner(user: CurrentUserDep) -> User:
 
 
 OwnerDep = Annotated[User, Depends(require_owner)]
+
+
+def get_manager(request: Request) -> BrokerManager:
+    manager: BrokerManager = request.app.state.broker_manager
+    return manager
+
+
+def get_backtests(request: Request) -> BacktestService:
+    service: BacktestService = request.app.state.backtests
+    return service
+
+
+ManagerDep = Annotated[BrokerManager, Depends(get_manager)]
+BacktestsDep = Annotated[BacktestService, Depends(get_backtests)]

@@ -6,7 +6,8 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from fxrobot.domain.modes import TradingMode
-from fxrobot.services.trading_control import EngineState, TradingStatus
+from fxrobot.domain.trading import EngineState
+from fxrobot.services.trading_control import TradingStatus
 
 
 class TradingStatusOut(BaseModel):
@@ -41,9 +42,8 @@ class SystemStatusOut(BaseModel):
     version: str
     environment: str
     trading: TradingStatusOut
-    broker_accounts_connected: int = Field(
-        description="Connected broker accounts. Always 0 until the broker engine ships."
-    )
+    broker_accounts_connected: int = Field(description="Accounts whose connection is CONNECTED.")
+    broker_accounts_total: int = Field(description="All saved trading accounts.")
 
 
 class StopTradingRequest(BaseModel):

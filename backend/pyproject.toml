@@ -50,6 +50,7 @@ src = ["src", "tests"]
 select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "N"]
 ignore = [
     "B008",  # FastAPI Depends() in defaults is idiomatic
+    "RUF001", "RUF002", "RUF003",  # intentional typographic characters (→, ×, —) in messages
 ]
 
 [tool.ruff.lint.per-file-ignores]

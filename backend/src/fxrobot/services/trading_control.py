@@ -13,8 +13,8 @@ Rules enforced here (and tested in tests/test_trading_control.py):
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import StrEnum
+from dataclasses import dataclass, field
+from datetime import timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -22,18 +22,16 @@ from sqlalchemy.orm import Session
 from fxrobot.core.config import Settings
 from fxrobot.core.errors import ConflictError, PermissionDeniedError
 from fxrobot.domain.modes import TradingMode
+from fxrobot.domain.trading import EngineState
 from fxrobot.models import AuditOutcome, SystemState, User
+from fxrobot.notifications.service import notify
 from fxrobot.services import audit
 from fxrobot.services.auth import reverify_password, utcnow
 from fxrobot.services.context import RequestMeta
 
 LIVE_CONFIRMATION_PHRASE = "ENABLE LIVE TRADING"
-
-
-class EngineState(StrEnum):
-    # Only OFFLINE exists until the trading engine lands (Phase 7);
-    # RUNNING / DEGRADED will be reported by the engine's heartbeat.
-    OFFLINE = "offline"
+# The engine is considered alive if it reported within this window.
+HEARTBEAT_FRESHNESS = timedelta(seconds=30)
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +40,7 @@ class TradingStatus:
     live_trading_locked: bool
     engine_state: EngineState
     engine_detail: str
+    notes: list[str] = field(default_factory=list)
 
     @property
     def new_orders_permitted(self) -> bool:
@@ -49,6 +48,8 @@ class TradingStatus:
         if self.state.kill_switch_engaged:
             return False
         if self.state.trading_mode is TradingMode.LIVE and self.live_trading_locked:
+            return False
+        if self.engine_state is EngineState.OFFLINE:
             return False
         return self.state.trading_mode is not TradingMode.BACKTEST
 
@@ -65,13 +66,27 @@ def _load_state(db: Session, *, for_update: bool = False) -> SystemState:
     return state
 
 
+def engine_state(state: SystemState) -> tuple[EngineState, str]:
+    beat = state.engine_heartbeat_at
+    if beat is None or utcnow() - beat > HEARTBEAT_FRESHNESS:
+        return EngineState.OFFLINE, (
+            "The trading engine is not running. Start the backend with ENGINE_ENABLED=true."
+            if beat is None
+            else f"No engine heartbeat since {beat:%Y-%m-%d %H:%M:%S} UTC."
+        )
+    if state.engine_degraded:
+        return EngineState.DEGRADED, state.engine_detail or "Some accounts have problems."
+    return EngineState.RUNNING, state.engine_detail or "Running."
+
+
 def get_status(db: Session, settings: Settings) -> TradingStatus:
+    state = _load_state(db)
+    engine, detail = engine_state(state)
     return TradingStatus(
-        state=_load_state(db),
+        state=state,
         live_trading_locked=not settings.live_trading_enabled,
-        engine_state=EngineState.OFFLINE,
-        engine_detail="The automated trading engine is not built yet (Phase 7). "
-        "No strategy can place orders.",
+        engine_state=engine,
+        engine_detail=detail,
     )
 
 
@@ -93,6 +108,8 @@ def engage_kill_switch(db: Session, *, actor: User, reason: str, meta: RequestMe
         details={"reason": reason, "already_engaged": already},
     )
     db.commit()
+    if not already:
+        notify(db, "trading.stopped", f"All trading stopped by {actor.email}: {reason}")
     return state
 
 
@@ -115,6 +132,11 @@ def release_kill_switch(db: Session, *, actor: User, meta: RequestMeta) -> Syste
         details={"mode": state.trading_mode.value},
     )
     db.commit()
+    notify(
+        db,
+        "trading.resumed",
+        f"Trading resumed by {actor.email} in {state.trading_mode.value} mode.",
+    )
     return state
 
 

@@ -12,7 +12,7 @@ from fxrobot.broker_engine.models import (
     SymbolInfo,
     Timeframe,
 )
-from fxrobot.domain.modes import AccountEnvironment
+from fxrobot.domain.modes import AccountEnvironment, TradingMode, environment_permitted
 
 
 def test_incomplete_adapter_cannot_be_instantiated() -> None:
@@ -27,6 +27,23 @@ def test_unknown_account_environment_is_treated_as_real_money() -> None:
     assert AccountEnvironment.UNKNOWN.is_real_money_possible
     assert AccountEnvironment.LIVE.is_real_money_possible
     assert not AccountEnvironment.DEMO.is_real_money_possible
+    assert not AccountEnvironment.PAPER.is_real_money_possible
+
+
+@pytest.mark.parametrize(
+    ("mode", "env", "allowed"),
+    [
+        (TradingMode.DEMO, AccountEnvironment.PAPER, True),
+        (TradingMode.DEMO, AccountEnvironment.DEMO, True),
+        (TradingMode.DEMO, AccountEnvironment.LIVE, False),
+        (TradingMode.DEMO, AccountEnvironment.UNKNOWN, False),
+        (TradingMode.LIVE, AccountEnvironment.LIVE, True),
+        (TradingMode.LIVE, AccountEnvironment.UNKNOWN, False),
+        (TradingMode.BACKTEST, AccountEnvironment.PAPER, False),
+    ],
+)
+def test_environment_permitted(mode: TradingMode, env: AccountEnvironment, allowed: bool) -> None:
+    assert environment_permitted(mode, env) is allowed
 
 
 def _order(**overrides: object) -> OrderRequest:
@@ -88,14 +105,16 @@ def test_timeframe_seconds() -> None:
     assert Timeframe.H4.seconds == 4 * Timeframe.H1.seconds
 
 
-def test_no_connector_is_claimed_available_before_it_exists() -> None:
+def test_connector_catalogue() -> None:
     connectors = {c.id: c for c in list_connectors()}
-    assert connectors["mt5"].status is ConnectorStatus.PLANNED
-    password = next(f for f in connectors["mt5"].fields if f.name == "password")
-    assert password.secret
+    assert set(connectors) == {"paper", "mt5_bridge"}
+    assert connectors["paper"].environments == (AccountEnvironment.PAPER,)
+    mt5 = connectors["mt5_bridge"]
+    assert mt5.status is ConnectorStatus.AVAILABLE
+    secrets = {f.name for f in mt5.fields if f.secret}
+    assert secrets == {"password", "bridge_secret"}
 
 
 def test_connectors_endpoint(owner_client) -> None:  # type: ignore[no-untyped-def]
     body = owner_client.get("/api/v1/brokers/connectors").json()
-    assert body[0]["id"] == "mt5"
-    assert body[0]["status"] == "planned"
+    assert [c["id"] for c in body] == ["paper", "mt5_bridge"]

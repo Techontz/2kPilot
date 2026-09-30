@@ -91,6 +91,7 @@ class BacktestStatus(StrEnum):
 
 class BacktestKind(StrEnum):
     SINGLE = "SINGLE"
+    SPLIT = "SPLIT"  # parent of an in-sample / out-of-sample pair
     IN_SAMPLE = "IN_SAMPLE"
     OUT_OF_SAMPLE = "OUT_OF_SAMPLE"
     WALK_FORWARD = "WALK_FORWARD"
