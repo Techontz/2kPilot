@@ -97,7 +97,9 @@ def load_candles(
 def checksum(candles: Sequence[Candle]) -> str:
     h = hashlib.sha256()
     for c in candles:
-        h.update(f"{c.time.isoformat()}|{c.open}|{c.high}|{c.low}|{c.close}\n".encode())
+        # Normalised so "1.1" and "1.1000000000" (DB scale) hash identically.
+        prices = "|".join(format(v.normalize(), "f") for v in (c.open, c.high, c.low, c.close))
+        h.update(f"{c.time.isoformat()}|{prices}\n".encode())
     return h.hexdigest()
 
 

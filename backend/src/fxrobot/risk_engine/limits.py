@@ -6,6 +6,9 @@ from dataclasses import asdict, dataclass, fields
 from decimal import Decimal
 from typing import Any
 
+# Limits that can never be switched off (None is refused rather than crashing later).
+MANDATORY = frozenset({"risk_per_trade_pct", "allowed_sessions", "max_data_age_seconds"})
+
 
 @dataclass(frozen=True)
 class RiskLimits:
@@ -37,8 +40,12 @@ class RiskLimits:
                 continue
             raw = data[f.name]
             if raw is None:
+                if f.name in MANDATORY:
+                    raise ValueError(f"{f.name} is mandatory and cannot be disabled")
                 values[f.name] = None
             elif f.name == "allowed_sessions":
+                if isinstance(raw, str) or not isinstance(raw, list | tuple):
+                    raise ValueError("allowed_sessions must be a list of session names")
                 values[f.name] = tuple(str(s).upper() for s in raw)
             elif (
                 f.name in ("risk_per_trade_pct",)
@@ -82,7 +89,7 @@ class RiskLimits:
         out: dict[str, Any] = {}
         for key, value in asdict(self).items():
             out[key] = (
-                str(value)
+                format(value.normalize(), "f")  # "0.5", not the DB's "0.500"
                 if isinstance(value, Decimal)
                 else (list(value) if isinstance(value, tuple) else value)
             )

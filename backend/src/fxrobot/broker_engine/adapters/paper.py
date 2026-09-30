@@ -114,6 +114,7 @@ class _Account:
     pending: dict[str, _Pending] = field(default_factory=dict)
     deals: list[Deal] = field(default_factory=list)
     results: dict[str, OrderResult] = field(default_factory=dict)
+    close_ids: set[str] = field(default_factory=set)  # client ids used for closes
     next_id: int = 1
 
 
@@ -326,6 +327,10 @@ class PaperBroker(BrokerAdapter):
         with self._lock:
             existing = self._acct.results.get(request.client_order_id)
             if existing is not None:
+                if request.client_order_id in self._acct.close_ids:
+                    raise OrderRejectedError(
+                        "client_order_id was already used for a different request"
+                    )
                 return existing  # idempotent: never execute twice
             if self.faults.timeout_before_next_order:
                 self.faults.timeout_before_next_order = False
@@ -557,7 +562,9 @@ class PaperBroker(BrokerAdapter):
         with self._lock:
             existing = self._acct.results.get(client_order_id)
             if existing is not None:
-                return existing
+                if client_order_id in self._acct.close_ids:
+                    return existing  # idempotent repeat of the same close
+                raise OrderRejectedError("client_order_id was already used for a different request")
             pos = self._acct.positions.get(position_id)
             if pos is None:
                 raise NotFoundError(f"Position {position_id} not found")
@@ -580,6 +587,7 @@ class PaperBroker(BrokerAdapter):
                 time=self.market.now(),
             )
             self._acct.results[client_order_id] = result
+            self._acct.close_ids.add(client_order_id)
             self._changed()
             return result
 
@@ -649,6 +657,10 @@ class PaperBroker(BrokerAdapter):
                         time=self.market.now(),
                     )
                     changed = True
+                    # Conservative: if the same bar also reached the stop, assume it was hit.
+                    exit_ = self._bar_exit(pos, bar, spread)
+                    if exit_ is not None and exit_[1] == "SL":
+                        self._close(pos, pos.sl or exit_[0], pos.volume, "SL")
         changed |= self._stop_out()
         if changed or bars:
             self._changed(important=changed)
@@ -729,6 +741,7 @@ class PaperBroker(BrokerAdapter):
             "pending": [_pending_to_json(o) for o in a.pending.values()],
             "deals": [_deal_to_json(d) for d in a.deals[-1000:]],
             "results": {k: _result_to_json(v) for k, v in list(a.results.items())[-2000:]},
+            "close_ids": sorted(a.close_ids & set(list(a.results)[-2000:])),
         }
 
     def _restore(self, state: dict[str, Any]) -> None:
@@ -739,6 +752,7 @@ class PaperBroker(BrokerAdapter):
         a.pending = {o["id"]: _pending_from_json(o) for o in state.get("pending", [])}
         a.deals = [_deal_from_json(d) for d in state.get("deals", [])]
         a.results = {k: _result_from_json(v) for k, v in state.get("results", {}).items()}
+        a.close_ids = set(state.get("close_ids", []))
         cursor = state.get("market", {}).get("cursor")
         if cursor:
             restored = datetime.fromisoformat(cursor)

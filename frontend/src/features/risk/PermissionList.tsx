@@ -39,7 +39,7 @@ export function PermissionList({ trading }: { trading: TradingStatus }) {
         <Row
           label="Trading engine"
           detail={trading.engine_detail}
-          value={<Badge tone="neutral">{trading.engine_state}</Badge>}
+          value={<Badge tone={trading.engine_state === "running" ? "positive" : trading.engine_state === "degraded" ? "warning" : "neutral"}>{trading.engine_state}</Badge>}
         />
         <Row
           label="New orders permitted"

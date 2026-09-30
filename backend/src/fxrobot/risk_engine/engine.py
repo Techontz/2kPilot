@@ -401,8 +401,17 @@ def rule_margin(volume: Decimal, c: RiskContext) -> RuleResult:
     return RuleResult("Margin", True, f"needs {required:.2f} of {c.free_margin:.2f} free")
 
 
+def _run_rule(rule: Rule, signal: SignalIntent, ctx: RiskContext, limits: RiskLimits) -> RuleResult:
+    """A rule that cannot be evaluated (malformed input) FAILS instead of crashing."""
+    try:
+        return rule(signal, ctx, limits)
+    except (ArithmeticError, TypeError, ValueError, AttributeError) as exc:
+        name = rule.__name__.removeprefix("rule_").replace("_", " ").capitalize()
+        return RuleResult(name, False, f"could not be evaluated ({type(exc).__name__})")
+
+
 def evaluate(signal: SignalIntent, ctx: RiskContext, limits: RiskLimits) -> RiskDecision:
-    checks = [rule(signal, ctx, limits) for rule in RULES]
+    checks = [_run_rule(rule, signal, ctx, limits) for rule in RULES]
     halt = any(c.rule == "Max drawdown" and not c.passed and "reached" in c.detail for c in checks)
     if not all(c.passed for c in checks):
         return RiskDecision(False, checks, halt_account=halt)

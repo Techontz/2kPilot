@@ -35,10 +35,14 @@ def _f(value: Decimal | float | None, places: int = 2) -> float | None:
     return None if value is None else round(float(value), places)
 
 
-def _streaks(results: Sequence[bool]) -> tuple[int, int]:
+def _streaks(results: Sequence[bool | None]) -> tuple[int, int]:
+    """Longest win / loss streaks. None (a breakeven trade) ends any streak."""
     best_win = best_loss = cur = 0
     last: bool | None = None
     for won in results:
+        if won is None:
+            cur, last = 0, None
+            continue
         cur = cur + 1 if won == last else 1
         last = won
         if won:
@@ -134,7 +138,7 @@ def compute(
     avg_win = gross_profit / len(wins) if wins else None
     avg_loss = -gross_loss / len(losses) if losses else None
     rs = [t.r_multiple for t in ordered if t.r_multiple is not None]
-    best_w, best_l = _streaks([t.net_pnl > 0 for t in ordered])
+    best_w, best_l = _streaks([None if t.net_pnl == 0 else t.net_pnl > 0 for t in ordered])
     if equity_points is None:
         running = starting_balance
         equity_points = [(ordered[0].entry_time, starting_balance)] if ordered else []

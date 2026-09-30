@@ -112,7 +112,10 @@ class BacktestService:
     def create(
         self, db: Session, req: BacktestRequest, actor: User, *, run_async: bool = True
     ) -> Backtest:
-        strategy = get_strategy(req.strategy_key) if req.strategy_key else None
+        try:
+            strategy = get_strategy(req.strategy_key) if req.strategy_key else None
+        except KeyError:
+            strategy = None
         if strategy is None:
             raise BacktestRequestError("Unknown strategy")
         try:

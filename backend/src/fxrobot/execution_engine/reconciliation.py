@@ -21,7 +21,7 @@ from fxrobot.execution_engine import journal
 from fxrobot.execution_engine.engine import ExecutionEngine
 from fxrobot.execution_engine.journal import EventType
 from fxrobot.market_data.sessions import session_at
-from fxrobot.models import Order, Trade, TradingAccount
+from fxrobot.models import Order, Signal, Trade, TradingAccount
 from fxrobot.notifications.service import notify
 
 logger = logging.getLogger(__name__)
@@ -104,18 +104,31 @@ def reconcile_account(
             continue
         ours: Order | None = None
         if position.client_order_id:
-            ours = db.scalar(
-                select(Order).where(Order.client_order_id == position.client_order_id)
-            )
+            ours = db.scalar(select(Order).where(Order.client_order_id == position.client_order_id))
         if ours is not None:
             # Restart recovery: the broker holds a position from one of OUR orders.
             ours.broker_position_id = position.position_id
-            if ours.status in UNRESOLVED:
+            # FAILED was only our inference ("broker has no record"); the position proves
+            # the order executed, so correct it rather than leave a FAILED order with a trade.
+            if ours.status in UNRESOLVED or ours.status is OrderStatus.FAILED:
+                if ours.status is OrderStatus.FAILED:
+                    journal.record(
+                        db,
+                        EventType.ORDER_RECONCILED,
+                        f"Order {ours.client_order_id} was marked failed, but the broker "
+                        f"holds its position {position.position_id}: corrected to FILLED.",
+                        account_id=account.id,
+                        signal_id=ours.signal_id,
+                        order_id=ours.id,
+                    )
                 ours.status = OrderStatus.FILLED
                 ours.filled_volume = position.volume
                 ours.fill_price = position.open_price
                 ours.filled_at = position.open_time
-            execution.open_trade(db, ours, None, adapter=adapter, symbol=None, quote=None)
+            signal = db.get(Signal, ours.signal_id) if ours.signal_id else None
+            if signal is not None:
+                signal.rejection_reason = None  # the earlier "not executed" inference was wrong
+            execution.open_trade(db, ours, signal, adapter=adapter, symbol=None, quote=None)
             report.trades_recovered += 1
             continue
         trade = Trade(

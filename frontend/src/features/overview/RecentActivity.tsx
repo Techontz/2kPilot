@@ -1,49 +1,38 @@
 "use client";
 
 import Link from "next/link";
-import { Badge } from "@/components/ui/Badge";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
-import { describeAuditAction, formatRelative } from "@/lib/format";
-import type { Tone } from "@/lib/status";
-import type { AuditEntry } from "@/lib/types";
-import { useApiResource } from "@/lib/useApiResource";
+import { formatRelative, humanize } from "@/lib/format";
+import type { JournalEvent } from "@/lib/types";
+import { cn } from "@/lib/cn";
 
-const OUTCOME_TONE: Record<AuditEntry["outcome"], Tone> = {
-  success: "neutral",
-  failure: "negative",
-  denied: "warning",
+const DOT: Record<string, string> = {
+  RISK_REJECTED: "bg-warning",
+  ORDER_REJECTED: "bg-negative",
+  ORDER_FAILED: "bg-negative",
+  ORDER_UNKNOWN: "bg-warning",
+  POSITION_CLOSED: "bg-fg-subtle",
 };
 
-export function RecentActivity() {
-  const { data, error, loading } = useApiResource<AuditEntry[]>("/audit?limit=8");
+export function RecentActivity({ events }: { events: JournalEvent[] }) {
   return (
     <Card>
       <CardHeader
-        title="Recent activity"
-        description="From the tamper-resistant audit log."
-        action={
-          <Link href="/settings#audit" className="text-xs text-accent hover:underline">
-            View all
-          </Link>
-        }
+        title="Recent robot activity"
+        description="From the trading journal."
+        action={<Link href="/journal" className="text-xs text-accent hover:underline">View journal</Link>}
       />
       <CardBody className="py-2">
-        {loading && <p className="py-3 text-sm text-fg-subtle">Loading…</p>}
-        {error && <p className="py-3 text-sm text-negative">{error.message}</p>}
-        {data?.length === 0 && <p className="py-3 text-sm text-fg-subtle">No activity yet.</p>}
+        {events.length === 0 && <p className="py-3 text-sm text-fg-subtle">No robot activity yet.</p>}
         <ul className="divide-y divide-line">
-          {data?.map((entry) => (
-            <li key={entry.id} className="flex items-center justify-between gap-3 py-2.5">
-              <div className="min-w-0">
-                <p className="truncate text-sm text-fg">{describeAuditAction(entry.action)}</p>
-                <p className="truncate text-xs text-fg-subtle">{entry.actor_label}</p>
+          {events.map((e) => (
+            <li key={e.id} className="flex gap-3 py-2.5">
+              <span aria-hidden className={cn("mt-1.5 size-2 shrink-0 rounded-full", DOT[e.event_type] ?? "bg-accent")} />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm text-fg" title={e.message}>{e.message}</p>
+                <p className="text-xs text-fg-subtle">{humanize(e.event_type)}</p>
               </div>
-              <div className="flex shrink-0 items-center gap-2">
-                {entry.outcome !== "success" && <Badge tone={OUTCOME_TONE[entry.outcome]}>{entry.outcome}</Badge>}
-                <time dateTime={entry.occurred_at} className="text-xs text-fg-subtle">
-                  {formatRelative(entry.occurred_at)}
-                </time>
-              </div>
+              <time dateTime={e.occurred_at} className="shrink-0 text-xs text-fg-subtle">{formatRelative(e.occurred_at)}</time>
             </li>
           ))}
         </ul>

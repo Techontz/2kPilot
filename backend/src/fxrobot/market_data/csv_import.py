@@ -39,19 +39,22 @@ class CsvImportResult:
     detected_format: str = ""
 
 
-def _parse_time(text: str, date_part: str | None = None) -> datetime:
+def _parse_time(text: str, date_part: str | None = None) -> tuple[datetime, bool]:
+    """Returns (UTC time, whether the text carried an explicit timezone)."""
     raw = f"{date_part} {text}" if date_part else text
     raw = raw.strip().replace(".", "-") if date_part else raw.strip()
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
-            return datetime.strptime(raw, fmt).replace(tzinfo=UTC)
+            return datetime.strptime(raw, fmt).replace(tzinfo=UTC), False
         except ValueError:
             continue
     try:
         moment = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:
         raise CsvFormatError(f"unrecognised timestamp {raw!r}") from exc
-    return moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment.astimezone(UTC)
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=UTC), False
+    return moment.astimezone(UTC), True
 
 
 def parse_csv(content: str, *, utc_offset_hours: float = 0.0) -> CsvImportResult:
@@ -82,11 +85,12 @@ def parse_csv(content: str, *, utc_offset_hours: float = 0.0) -> CsvImportResult
             raise CsvFormatError(f"file exceeds {MAX_ROWS} rows")
         try:
             if mt5:
-                moment = _parse_time(row[idx["time"]], row[idx["date"]])
+                moment, explicit = _parse_time(row[idx["time"]], row[idx["date"]])
             else:
-                moment = _parse_time(row[idx["time"]])
+                moment, explicit = _parse_time(row[idx["time"]])
             candle = Candle(
-                time=moment - offset,
+                # The offset only applies to naive (server-time) stamps.
+                time=moment if explicit else moment - offset,
                 open=Decimal(row[idx["open"]]),
                 high=Decimal(row[idx["high"]]),
                 low=Decimal(row[idx["low"]]),
@@ -94,7 +98,9 @@ def parse_csv(content: str, *, utc_offset_hours: float = 0.0) -> CsvImportResult
                 tick_volume=int(float(row[idx[vol_col]])) if vol_col else 0,
                 spread_points=int(float(row[idx["spread"]])) if "spread" in idx else None,
             )
-        except (IndexError, InvalidOperation, ValueError, CsvFormatError) as exc:
+            if not all(p.is_finite() for p in (candle.open, candle.high, candle.low, candle.close)):
+                raise CsvFormatError("non-finite price")
+        except (IndexError, InvalidOperation, ValueError, OverflowError, CsvFormatError) as exc:
             dropped.append(f"line {line_no}: {exc}")
             continue
         candles.append(candle)

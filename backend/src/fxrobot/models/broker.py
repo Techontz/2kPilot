@@ -57,7 +57,11 @@ class BrokerConnection(TimestampMixin, Base):
         ForeignKey("users.id", ondelete="SET NULL")
     )
 
-    accounts: Mapped[list[TradingAccount]] = relationship(back_populates="connection")
+    # Accounts (and their history) go with the connection — the DB cascades the
+    # FKs; without this the ORM would try to NULL `connection_id` and fail.
+    accounts: Mapped[list[TradingAccount]] = relationship(
+        back_populates="connection", cascade="all, delete", passive_deletes=True
+    )
 
 
 class TradingAccount(TimestampMixin, Base):

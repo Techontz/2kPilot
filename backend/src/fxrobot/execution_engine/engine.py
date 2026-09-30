@@ -281,7 +281,9 @@ class ExecutionEngine:
             and order.fill_price is not None
         ):
             adverse = (order.fill_price - order.requested_price) * order.side.sign
-            slippage = (adverse / symbol.pip_size).quantize(Decimal("0.1"))
+            slippage = (adverse / symbol.pip_size).quantize(Decimal("0.1")) + Decimal(
+                0
+            )  # no "-0.0"
         entry_time = order.filled_at or adapter.now()
         trade = Trade(
             account_id=order.account_id,

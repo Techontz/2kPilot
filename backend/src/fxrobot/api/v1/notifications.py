@@ -6,6 +6,7 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
 from fxrobot.api.deps import CurrentUserDep, DbDep
+from fxrobot.domain.trading import NotificationSeverity
 from fxrobot.notifications import service as svc
 from fxrobot.notifications.types import TYPES
 
@@ -23,7 +24,7 @@ def list_notifications(
     limit: int = Query(default=50, ge=1, le=200),
     before_id: int | None = Query(default=None, ge=1),
     unread_only: bool = False,
-    severity: str | None = None,
+    severity: NotificationSeverity | None = None,
 ) -> dict[str, Any]:
     items = svc.list_notifications(
         db, limit=limit, before_id=before_id, unread_only=unread_only, severity=severity

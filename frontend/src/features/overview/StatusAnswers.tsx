@@ -41,6 +41,7 @@ export function StatusAnswers({ status }: { status: SystemStatus }) {
   const robot = deriveRobotStatus(status.trading);
   const mode = status.trading.trading_mode;
   const accounts = status.broker_accounts_connected;
+  const total = status.broker_accounts_total;
 
   return (
     <div className="grid gap-4 md:grid-cols-3">
@@ -74,16 +75,18 @@ export function StatusAnswers({ status }: { status: SystemStatus }) {
         href="/brokers"
         answer={
           <span className="text-sm font-semibold text-fg">
-            {accounts === 0 ? "No broker connected" : `${accounts} account${accounts > 1 ? "s" : ""} connected`}
+            {total === 0 ? "No account yet" : `${accounts} of ${total} account${total > 1 ? "s" : ""} connected`}
           </span>
         }
         detail={
-          accounts === 0 ? (
+          total === 0 ? (
             <>
-              Connect a MetaTrader 5 <Term id="demoAccount">demo account</Term> to see balance, equity and positions.
+              Add a Paper account to try the full pipeline, or a MetaTrader 5 <Term id="demoAccount">demo account</Term>.
             </>
+          ) : accounts < total ? (
+            "Some connections are down — see Brokers."
           ) : (
-            "Manage accounts on the Brokers page."
+            "All connections are up. Manage them on the Brokers page."
           )
         }
       />

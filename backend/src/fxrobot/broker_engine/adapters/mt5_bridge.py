@@ -156,6 +156,14 @@ class MT5BridgeAdapter(BrokerAdapter):
                 raise OrderOutcomeUnknownError(
                     "Bridge response signature invalid", client_order_id=client_order_id
                 )
+            if response.status_code == 401:
+                # With a wrong BRIDGE_SECRET the bridge's 401 can never verify. Nothing
+                # from the body is trusted; the error only classifies the failure (reads
+                # only — an unverifiable answer to a trade stays an unknown outcome).
+                raise BrokerAuthError(
+                    "Bridge refused our request and its reply could not be verified — "
+                    "check BRIDGE_SECRET"
+                )
             raise InvalidBrokerResponseError("Bridge response signature invalid")
         try:
             payload = response.json() if response.content else None
@@ -361,7 +369,7 @@ class MT5BridgeAdapter(BrokerAdapter):
 
     # ── trading ──────────────────────────────────────────────────────────
     def place_order(self, request: OrderRequest) -> OrderResult:
-        body = {
+        body: dict[str, Any] = {
             "client_order_id": request.client_order_id,
             "symbol": request.symbol,
             "side": request.side.value,
@@ -370,9 +378,12 @@ class MT5BridgeAdapter(BrokerAdapter):
             "price": _optstr(request.price),
             "stop_loss": _optstr(request.stop_loss),
             "take_profit": _optstr(request.take_profit),
-            "max_slippage_points": request.max_slippage_points,
             "comment": request.comment,
         }
+        # The bridge requires an integer here and rejects null (422); when no
+        # limit is set, omit the field so the bridge applies its default deviation.
+        if request.max_slippage_points is not None:
+            body["max_slippage_points"] = request.max_slippage_points
         payload = self._call(
             "POST", "/orders", body=body, trade=True, client_order_id=request.client_order_id
         )

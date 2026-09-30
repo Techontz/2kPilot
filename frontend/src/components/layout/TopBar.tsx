@@ -9,6 +9,8 @@ import { Button } from "@/components/ui/Button";
 import { deriveRobotStatus } from "@/lib/status";
 import { KillSwitchButton } from "./KillSwitchButton";
 import { ModeBadge } from "./ModeBadge";
+import { NotificationBell } from "./NotificationBell";
+import { StreamIndicator } from "./StreamIndicator";
 
 export function TopBar({ onOpenMenu }: { onOpenMenu: () => void }) {
   const { user, logout } = useSession();
@@ -42,6 +44,8 @@ export function TopBar({ onOpenMenu }: { onOpenMenu: () => void }) {
         )}
       </div>
 
+      <StreamIndicator />
+      <NotificationBell />
       <KillSwitchButton size="sm" />
 
       <div className="ml-1 hidden items-center gap-2 border-l border-line pl-3 sm:flex">

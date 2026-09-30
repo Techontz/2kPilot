@@ -17,8 +17,13 @@ const securityHeaders = [
   },
 ];
 
+// Pin the project root (a stray lockfile higher up would otherwise confuse tracing).
+const projectRoot = process.cwd();
+
 const nextConfig: NextConfig = {
   output: "standalone", // minimal self-contained server for Docker
+  outputFileTracingRoot: projectRoot,
+  turbopack: { root: projectRoot },
   poweredByHeader: false,
   async rewrites() {
     return [{ source: "/api/v1/:path*", destination: `${backendUrl}/api/v1/:path*` }];

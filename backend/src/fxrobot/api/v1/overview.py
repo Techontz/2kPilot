@@ -98,7 +98,11 @@ def overview(_: CurrentUserDep, db: DbDep, manager: ManagerDep) -> dict[str, Any
             "trades_today": int(trades_today or 0),
             "open_risk": ser.d(open_risk) if accounts else None,
             "open_risk_unknown": unknown_risk,
-            "max_drawdown_pct": max((a["drawdown_pct"] or 0 for a in per_account), default=None),
+            # Unknown (no snapshots) stays null rather than being reported as 0%.
+            "max_drawdown_pct": max(
+                (a["drawdown_pct"] for a in per_account if a["drawdown_pct"] is not None),
+                default=None,
+            ),
         },
         "active_strategies": active,
         "equity_series": equity_series,

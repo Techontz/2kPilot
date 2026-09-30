@@ -27,6 +27,7 @@ export function useApiResource<T>(path: string, options: Options = {}): ApiResou
   const controller = useRef<AbortController | null>(null);
 
   const reload = useCallback(async () => {
+    if (!enabled) return;
     controller.current?.abort();
     const ctrl = new AbortController();
     controller.current = ctrl;
@@ -40,7 +41,7 @@ export function useApiResource<T>(path: string, options: Options = {}): ApiResou
     } finally {
       if (!ctrl.signal.aborted) setLoading(false);
     }
-  }, [path]);
+  }, [path, enabled]);
 
   useEffect(() => {
     if (!enabled) return;

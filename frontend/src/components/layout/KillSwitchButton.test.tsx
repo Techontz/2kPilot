@@ -22,7 +22,7 @@ vi.mock("@/components/providers/SystemStatusProvider", () => ({
 const { KillSwitchButton } = await import("./KillSwitchButton");
 
 function withTrading(trading: TradingStatus): SystemStatus {
-  return { app_name: "2kFX", version: "0", environment: "test", broker_accounts_connected: 0, trading };
+  return { app_name: "2kFX", version: "0", environment: "test", broker_accounts_connected: 0, broker_accounts_total: 0, trading };
 }
 
 beforeEach(() => {

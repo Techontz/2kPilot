@@ -73,7 +73,8 @@ def create_paper_account(client: TestClient, **settings: Any) -> dict[str, Any]:
 def setup_trading(client: TestClient, *, risk: dict[str, Any] | None = None) -> dict[str, Any]:
     account = create_paper_account(client)
     profile = client.post(
-        "/api/v1/risk/profiles", json={"name": f"test-{uuid.uuid4().hex[:6]}", "limits": risk or LOOSE_RISK}
+        "/api/v1/risk/profiles",
+        json={"name": f"test-{uuid.uuid4().hex[:6]}", "limits": risk or LOOSE_RISK},
     )
     assert profile.status_code == 201, profile.text
     patched = client.patch(
@@ -84,11 +85,18 @@ def setup_trading(client: TestClient, *, risk: dict[str, Any] | None = None) -> 
     strategy = client.get("/api/v1/strategies").json()[0]
     version = client.post(
         f"/api/v1/strategies/{strategy['id']}/versions",
-        json={"parameters": {**strategy["versions"][0]["parameters"], **FAST_PARAMS}, "notes": "fast"},
+        json={
+            "parameters": {**strategy["versions"][0]["parameters"], **FAST_PARAMS},
+            "notes": "fast",
+        },
     ).json()
     assignment = client.post(
         "/api/v1/strategies/assignments",
-        json={"strategy_version_id": version["id"], "account_id": account["id"], "symbol": "EURUSD"},
+        json={
+            "strategy_version_id": version["id"],
+            "account_id": account["id"],
+            "symbol": "EURUSD",
+        },
     ).json()
     assert assignment["status"] == "PAUSED"  # never trades merely because it was created
     enabled = client.post(f"/api/v1/strategies/assignments/{assignment['id']}/enable")
@@ -178,7 +186,9 @@ def test_full_pipeline_produces_journaled_paper_trades(
     events = [
         e.event_type
         for e in db.scalars(
-            select(TradeEvent).where(TradeEvent.signal_id == trade.signal_id).order_by(TradeEvent.id)
+            select(TradeEvent)
+            .where(TradeEvent.signal_id == trade.signal_id)
+            .order_by(TradeEvent.id)
         )
     ]
     assert events[:5] == [
@@ -203,7 +213,7 @@ def test_full_pipeline_produces_journaled_paper_trades(
     lifecycle = owner_client.get(f"/api/v1/trades/{trade.id}").json()
     assert lifecycle["signal"]["reasons"]
     assert lifecycle["evaluation"]["checks"]
-    assert [e["event_type"] for e in lifecycle["events"]][0] == "SIGNAL_GENERATED"
+    assert lifecycle["events"][0]["event_type"] == "SIGNAL_GENERATED"
 
     perf = owner_client.get(f"/api/v1/analytics/performance?account_id={account_id}").json()
     assert perf["has_data"] is True and perf["trades"] >= 1
@@ -265,7 +275,9 @@ def test_broker_disconnect_is_detected_and_blocks_trading(
     assert "broker.reconnected" in {n.type for n in db.scalars(select(Notification))}
 
 
-def test_engine_heartbeat_reports_running(owner_client: TestClient, trading: dict[str, Any]) -> None:
+def test_engine_heartbeat_reports_running(
+    owner_client: TestClient, trading: dict[str, Any]
+) -> None:
     engine_for(owner_client).tick_once()
     status = owner_client.get("/api/v1/trading/status").json()
     assert status["engine_state"] == "running"

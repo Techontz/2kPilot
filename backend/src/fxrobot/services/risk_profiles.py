@@ -108,9 +108,18 @@ def update_profile(
     if profile is None:
         raise NotFoundError("Risk profile not found")
     before = limits_of(profile).as_json()
+    if name is not None:
+        name = name.strip()[:120]
+        if not name:
+            raise RiskProfileError("Name is required")
+        clash = db.scalar(
+            select(RiskProfile.id).where(RiskProfile.name == name, RiskProfile.id != profile.id)
+        )
+        if clash is not None:
+            raise ConflictError("A risk profile with this name already exists")
     _apply(profile, values)
     if name:
-        profile.name = name.strip()[:120]
+        profile.name = name
     after = limits_of(profile).as_json()
     audit.record(
         db,

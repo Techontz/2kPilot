@@ -2,6 +2,7 @@
 
 import { useSession } from "@/components/providers/SessionProvider";
 import { useSystemStatus } from "@/components/providers/SystemStatusProvider";
+import { useApiResource } from "@/lib/useApiResource";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { formatDateTime } from "@/lib/format";
@@ -19,6 +20,8 @@ function Field({ label, value }: { label: string; value: React.ReactNode }) {
 export function SettingsScreen() {
   const { user, isOwner } = useSession();
   const { status } = useSystemStatus();
+  const settings = useApiResource<Record<string, string | number | boolean>>("/settings", { refetchOnFocus: false });
+  const s = settings.data;
 
   return (
     <>
@@ -37,12 +40,17 @@ export function SettingsScreen() {
             </CardBody>
           </Card>
           <Card>
-            <CardHeader title="System" />
+            <CardHeader title="System" description="Server settings are changed in backend/.env, not from the dashboard." />
             <CardBody>
               <dl className="divide-y divide-line">
                 <Field label="Version" value={<span className="num">{status?.version ?? "—"}</span>} />
                 <Field label="Environment" value={status?.environment ?? "—"} />
                 <Field label="Live trading hard lock" value={status?.trading.live_trading_locked ? "Locked" : "Unlocked"} />
+                <Field label="Trading engine" value={s ? (s.engine_enabled ? `Enabled · tick ${s.engine_tick_seconds}s` : "Disabled (ENGINE_ENABLED=false)") : "—"} />
+                <Field label="Database" value={<span className="num text-xs">{s ? String(s.database) : "—"}</span>} />
+                <Field label="Credential encryption key" value={s ? (s.encryption_key_configured ? "Configured" : "Missing — MT5 accounts cannot be saved") : "—"} />
+                <Field label="Secure cookies (HTTPS)" value={s ? (s.cookie_secure ? "On" : "Off (development)") : "—"} />
+                <Field label="Session length / idle timeout" value={s ? `${s.session_ttl_minutes} / ${s.session_idle_timeout_minutes} min` : "—"} />
               </dl>
             </CardBody>
           </Card>

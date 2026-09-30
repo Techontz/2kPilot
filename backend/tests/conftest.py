@@ -160,6 +160,10 @@ def owner_client(client: TestClient, owner: User) -> TestClient:
 
 def fresh_heartbeat(db: Session) -> None:
     """Pretend a trading engine is alive (for status/permission tests)."""
-    db.execute(text("UPDATE system_state SET engine_heartbeat_at = UTC_TIMESTAMP(6), "
-                    "engine_degraded = 0 WHERE id = 1"))
+    db.execute(
+        text(
+            "UPDATE system_state SET engine_heartbeat_at = UTC_TIMESTAMP(6), "
+            "engine_degraded = 0 WHERE id = 1"
+        )
+    )
     db.commit()

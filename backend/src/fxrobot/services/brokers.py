@@ -47,6 +47,7 @@ from fxrobot.models import (
     AuditOutcome,
     BrokerConnection,
     BrokerSymbol,
+    Order,
     RiskProfile,
     Trade,
     TradingAccount,
@@ -305,9 +306,24 @@ def delete_connection(
     if open_trades is not None:
         raise ConflictError("Close all open positions on this account before removing it")
     manager.evict(connection_id)
+    has_history = bool(account_ids) and (
+        db.scalar(select(Trade.id).where(Trade.account_id.in_(account_ids)).limit(1)) is not None
+        or db.scalar(select(Order.id).where(Order.account_id.in_(account_ids)).limit(1)) is not None
+    )
+    if has_history:
+        # Never erase trading history: archive instead. Secrets are wiped.
+        connection.is_enabled = False
+        connection.credentials_encrypted = None
+        connection.status = ConnectionStatus.DISCONNECTED
+        connection.status_detail = "Archived — trading history kept, credentials deleted"
+        for account in connection.accounts:
+            account.trading_enabled = False
+        action = "broker.archived"
+    else:
+        action = "broker.removed"
     audit.record(
         db,
-        action="broker.removed",
+        action=action,
         outcome=AuditOutcome.SUCCESS,
         actor=actor,
         meta=meta,
@@ -315,7 +331,8 @@ def delete_connection(
         target_id=str(connection_id),
         details={"label": connection.label},
     )
-    db.delete(connection)
+    if not has_history:
+        db.delete(connection)
     db.commit()
 
 

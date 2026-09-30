@@ -2,6 +2,7 @@
 
 import { createContext, type ReactNode, useContext } from "react";
 import type { ApiError } from "@/lib/api";
+import { useLiveRefresh } from "./StreamProvider";
 import type { SystemStatus, TradingStatus } from "@/lib/types";
 import { useApiResource } from "@/lib/useApiResource";
 
@@ -15,12 +16,13 @@ interface SystemStatusValue {
 
 const SystemStatusContext = createContext<SystemStatusValue | null>(null);
 
-// The kill switch can be flipped from another session, so status is refreshed
-// on focus and every 30s. Replaced by server push once the engine exists.
+// Status is pushed via the event stream; a slow 30s refresh is only a fallback
+// (e.g. if the stream is interrupted by a proxy).
 const STATUS_REFRESH_MS = 30_000;
 
 export function SystemStatusProvider({ children }: { children: ReactNode }) {
   const resource = useApiResource<SystemStatus>("/system/status", { intervalMs: STATUS_REFRESH_MS });
+  useLiveRefresh(["status", "broker"], () => void resource.reload(), 1500);
 
   const value: SystemStatusValue = {
     status: resource.data,
