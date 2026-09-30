@@ -1,8 +1,8 @@
-"""foundation: users, sessions, audit log, system trading state
+"""MySQL baseline: users, sessions, append-only audit log, system trading state
 
 Revision ID: 0001
 Revises:
-Create Date: 2026-09-30
+Create Date: 2026-10-01
 """
 
 from __future__ import annotations
@@ -11,37 +11,25 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects import mysql
 
 revision: str = "0001"
 down_revision: str | None = None
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+# Naive UTC DATETIME(6) on MySQL (see fxrobot.db.types.UTCDateTime).
+DT = sa.DateTime().with_variant(mysql.DATETIME(fsp=6), "mysql")
 
-# audit_logs is append-only. The only permitted UPDATE is the FK's
-# ON DELETE SET NULL of actor_user_id when a user is removed.
-AUDIT_APPEND_ONLY_FN = """
-CREATE FUNCTION audit_logs_append_only() RETURNS trigger AS $$
-BEGIN
-    IF TG_OP = 'DELETE' THEN
-        RAISE EXCEPTION 'audit_logs is append-only';
-    END IF;
-    IF NEW.actor_user_id IS NOT NULL
-       OR (NEW.id, NEW.occurred_at, NEW.actor_label, NEW.action, NEW.outcome,
-           NEW.target_type, NEW.target_id, NEW.ip_address, NEW.user_agent,
-           NEW.correlation_id, NEW.details)
-          IS DISTINCT FROM
-          (OLD.id, OLD.occurred_at, OLD.actor_label, OLD.action, OLD.outcome,
-           OLD.target_type, OLD.target_id, OLD.ip_address, OLD.user_agent,
-           OLD.correlation_id, OLD.details)
-    THEN
-        RAISE EXCEPTION 'audit_logs is append-only';
-    END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-"""
+
+# audit_logs is append-only. MySQL does not fire triggers for FK cascade
+# actions, so ON DELETE SET NULL of actor_user_id still works.
+AUDIT_TRIGGERS = (
+    "CREATE TRIGGER audit_logs_no_update BEFORE UPDATE ON audit_logs FOR EACH ROW "
+    "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'audit_logs is append-only'",
+    "CREATE TRIGGER audit_logs_no_delete BEFORE DELETE ON audit_logs FOR EACH ROW "
+    "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'audit_logs is append-only'",
+)
 
 
 def upgrade() -> None:
@@ -51,22 +39,26 @@ def upgrade() -> None:
         sa.Column("email", sa.String(length=320), nullable=False),
         sa.Column("display_name", sa.String(length=120), nullable=False),
         sa.Column("password_hash", sa.String(length=255), nullable=False),
-        sa.Column("role", sa.Enum("owner", "viewer", name="user_role"), nullable=False),
-        sa.Column("is_active", sa.Boolean(), server_default=sa.true(), nullable=False),
-        sa.Column("last_login_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
+            "role",
+            sa.Enum(
+                "owner",
+                "viewer",
+                name="user_role",
+                native_enum=False,
+                create_constraint=True,
+                length=16,
+            ),
             nullable=False,
         ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
+        sa.Column("is_active", sa.Boolean(), server_default=sa.text("true"), nullable=False),
+        sa.Column("last_login_at", DT, nullable=True),
+        sa.Column("created_at", DT, server_default=sa.text("CURRENT_TIMESTAMP(6)"), nullable=False),
+        sa.Column("updated_at", DT, server_default=sa.text("CURRENT_TIMESTAMP(6)"), nullable=False),
+        sa.CheckConstraint(
+            "CAST(email AS BINARY) = CAST(LOWER(email) AS BINARY)",
+            name=op.f("ck_users_email_lowercase"),
         ),
-        sa.CheckConstraint("email = lower(email)", name=op.f("ck_users_email_lowercase")),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_users")),
         sa.UniqueConstraint("email", name=op.f("uq_users_email")),
     )
@@ -74,28 +66,30 @@ def upgrade() -> None:
         "audit_logs",
         sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
         sa.Column(
-            "occurred_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
+            "occurred_at", DT, server_default=sa.text("CURRENT_TIMESTAMP(6)"), nullable=False
         ),
         sa.Column("actor_user_id", sa.Uuid(), nullable=True),
         sa.Column("actor_label", sa.String(length=320), nullable=False),
         sa.Column("action", sa.String(length=100), nullable=False),
         sa.Column(
-            "outcome", sa.Enum("success", "failure", "denied", name="audit_outcome"), nullable=False
+            "outcome",
+            sa.Enum(
+                "success",
+                "failure",
+                "denied",
+                name="audit_outcome",
+                native_enum=False,
+                create_constraint=True,
+                length=16,
+            ),
+            nullable=False,
         ),
         sa.Column("target_type", sa.String(length=60), nullable=True),
         sa.Column("target_id", sa.String(length=100), nullable=True),
         sa.Column("ip_address", sa.String(length=64), nullable=True),
         sa.Column("user_agent", sa.String(length=512), nullable=True),
         sa.Column("correlation_id", sa.String(length=64), nullable=True),
-        sa.Column(
-            "details",
-            postgresql.JSONB(astext_type=sa.Text()),
-            server_default=sa.text("'{}'::jsonb"),
-            nullable=False,
-        ),
+        sa.Column("details", sa.JSON(), nullable=False),
         sa.ForeignKeyConstraint(
             ["actor_user_id"],
             ["users.id"],
@@ -109,33 +103,32 @@ def upgrade() -> None:
     )
     op.create_index("ix_audit_logs_actor_user_id", "audit_logs", ["actor_user_id"], unique=False)
     op.create_index("ix_audit_logs_occurred_at", "audit_logs", ["occurred_at"], unique=False)
-    op.execute(AUDIT_APPEND_ONLY_FN)
-    op.execute(
-        "CREATE TRIGGER audit_logs_append_only BEFORE UPDATE OR DELETE ON audit_logs "
-        "FOR EACH ROW EXECUTE FUNCTION audit_logs_append_only()"
-    )
-
     op.create_table(
         "system_state",
-        sa.Column("id", sa.SmallInteger(), nullable=False),
+        sa.Column("id", sa.SmallInteger(), autoincrement=False, nullable=False),
         sa.Column(
             "trading_mode",
-            sa.Enum("BACKTEST", "DEMO", "LIVE", name="trading_mode"),
+            sa.Enum(
+                "BACKTEST",
+                "DEMO",
+                "LIVE",
+                name="trading_mode",
+                native_enum=False,
+                create_constraint=True,
+                length=16,
+            ),
             server_default=sa.text("'DEMO'"),
             nullable=False,
         ),
-        sa.Column("kill_switch_engaged", sa.Boolean(), server_default=sa.true(), nullable=False),
-        sa.Column("kill_switch_reason", sa.Text(), nullable=True),
-        sa.Column("kill_switch_changed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("kill_switch_changed_by", sa.Uuid(), nullable=True),
-        sa.Column("mode_changed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("mode_changed_by", sa.Uuid(), nullable=True),
         sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
+            "kill_switch_engaged", sa.Boolean(), server_default=sa.text("true"), nullable=False
         ),
+        sa.Column("kill_switch_reason", sa.Text(), nullable=True),
+        sa.Column("kill_switch_changed_at", DT, nullable=True),
+        sa.Column("kill_switch_changed_by", sa.Uuid(), nullable=True),
+        sa.Column("mode_changed_at", DT, nullable=True),
+        sa.Column("mode_changed_by", sa.Uuid(), nullable=True),
+        sa.Column("updated_at", DT, server_default=sa.text("CURRENT_TIMESTAMP(6)"), nullable=False),
         sa.CheckConstraint("id = 1", name=op.f("ck_system_state_singleton")),
         sa.ForeignKeyConstraint(
             ["kill_switch_changed_by"],
@@ -151,32 +144,18 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_system_state")),
     )
-    # Fresh installs start in DEMO with the kill switch ENGAGED.
-    op.execute(
-        "INSERT INTO system_state (id, trading_mode, kill_switch_engaged, kill_switch_reason) "
-        "VALUES (1, 'DEMO', true, 'Initial state: trading has never been started')"
-    )
-
     op.create_table(
         "user_sessions",
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("user_id", sa.Uuid(), nullable=False),
         sa.Column("token_hash", sa.String(length=64), nullable=False),
         sa.Column("csrf_token_hash", sa.String(length=64), nullable=False),
+        sa.Column("created_at", DT, server_default=sa.text("CURRENT_TIMESTAMP(6)"), nullable=False),
         sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
+            "last_seen_at", DT, server_default=sa.text("CURRENT_TIMESTAMP(6)"), nullable=False
         ),
-        sa.Column(
-            "last_seen_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("expires_at", DT, nullable=False),
+        sa.Column("revoked_at", DT, nullable=True),
         sa.Column("ip_address", sa.String(length=64), nullable=True),
         sa.Column("user_agent", sa.String(length=512), nullable=True),
         sa.ForeignKeyConstraint(
@@ -191,18 +170,19 @@ def upgrade() -> None:
     op.create_index(
         "ix_user_sessions_user_id_active", "user_sessions", ["user_id", "revoked_at"], unique=False
     )
+    for statement in AUDIT_TRIGGERS:
+        op.execute(statement)
+    # Fresh installs start in DEMO with the kill switch ENGAGED.
+    op.execute(
+        "INSERT INTO system_state (id, trading_mode, kill_switch_engaged, kill_switch_reason) "
+        "VALUES (1, 'DEMO', true, 'Initial state: trading has never been started')"
+    )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_user_sessions_user_id_active", table_name="user_sessions")
+    op.execute("DROP TRIGGER IF EXISTS audit_logs_no_delete")
+    op.execute("DROP TRIGGER IF EXISTS audit_logs_no_update")
     op.drop_table("user_sessions")
     op.drop_table("system_state")
-    op.execute("DROP TRIGGER IF EXISTS audit_logs_append_only ON audit_logs")
-    op.execute("DROP FUNCTION IF EXISTS audit_logs_append_only()")
-    op.drop_index("ix_audit_logs_occurred_at", table_name="audit_logs")
-    op.drop_index("ix_audit_logs_actor_user_id", table_name="audit_logs")
-    op.drop_index("ix_audit_logs_action_occurred_at", table_name="audit_logs")
     op.drop_table("audit_logs")
     op.drop_table("users")
-    for enum_name in ("trading_mode", "audit_outcome", "user_role"):
-        op.execute(f"DROP TYPE IF EXISTS {enum_name}")

@@ -2,23 +2,25 @@
 # Usage: docker compose up --build
 services:
   db:
-    image: postgres:16-alpine
+    image: mysql:8.0
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
     environment:
-      POSTGRES_DB: fxrobot
-      POSTGRES_USER: fxrobot
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fxrobot-local-only}
+      MYSQL_DATABASE: fxrobot
+      MYSQL_USER: fxrobot
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-fxrobot-local-only}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-fxrobot-root-local-only}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - mysqldata:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fxrobot -d fxrobot"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
       interval: 5s
-      retries: 10
+      retries: 20
 
   backend:
     build: ./backend
     env_file: ./backend/.env
     environment:
-      DATABASE_URL: postgresql+psycopg://fxrobot:${POSTGRES_PASSWORD:-fxrobot-local-only}@db:5432/fxrobot
+      DATABASE_URL: mysql+pymysql://fxrobot:${MYSQL_PASSWORD:-fxrobot-local-only}@db:3306/fxrobot?charset=utf8mb4
       LOG_FORMAT: json
       # The frontend container is the only proxy; its address is on the compose network.
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
@@ -39,4 +41,4 @@ services:
       - "127.0.0.1:3000:3000"
 
 volumes:
-  pgdata:
+  mysqldata:

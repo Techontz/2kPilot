@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, ClassVar
 
-from sqlalchemy import DateTime, MetaData, func
+from sqlalchemy import MetaData
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from fxrobot.db.types import NOW_DEFAULT, UTCDateTime, utcnow
 
 # Deterministic constraint names keep Alembic migrations reviewable.
 NAMING_CONVENTION = {
@@ -18,9 +20,11 @@ NAMING_CONVENTION = {
 
 class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
-    type_annotation_map: ClassVar[dict[Any, Any]] = {datetime: DateTime(timezone=True)}
+    type_annotation_map: ClassVar[dict[Any, Any]] = {datetime: UTCDateTime()}
 
 
 class TimestampMixin:
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
+    created_at: Mapped[datetime] = mapped_column(default=utcnow, server_default=NOW_DEFAULT)
+    updated_at: Mapped[datetime] = mapped_column(
+        default=utcnow, onupdate=utcnow, server_default=NOW_DEFAULT
+    )

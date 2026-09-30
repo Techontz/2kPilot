@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: LogFormat = LogFormat.JSON
 
-    database_url: str = "postgresql+psycopg://localhost:5432/fxrobot"
+    database_url: str = "mysql+pymysql://root@127.0.0.1:3306/fxrobot?charset=utf8mb4"
     db_pool_size: int = Field(default=5, ge=1)
     db_max_overflow: int = Field(default=5, ge=0)
 

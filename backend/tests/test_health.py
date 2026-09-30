@@ -14,7 +14,7 @@ def test_readiness_checks_database_and_migrations(client: TestClient) -> None:
 
 
 def test_readiness_reports_unavailable_database(app_factory) -> None:  # type: ignore[no-untyped-def]
-    client = app_factory(database_url="postgresql+psycopg://localhost:1/nope")
+    client = app_factory(database_url="mysql+pymysql://root@127.0.0.1:1/nope")
     response = client.get("/api/v1/health/ready")
     assert response.status_code == 503
     assert response.json()["checks"]["database"] == "unavailable"
