@@ -1,6 +1,6 @@
 # Strategies
 
-## Contract (`strategy_engine/base.py`)
+## Contract (`trading-engine/src/fxrobot/strategy_engine/base.py`)
 
 A strategy is a **pure decision function** over CLOSED candles:
 
@@ -41,12 +41,12 @@ The risk engine then adds its own gates, including session filters, spread, mini
 ## Versions and assignments
 
 * `strategy_versions` are **immutable**. Every signal, trade and backtest records its exact version.
-* A new version is created from the UI form (generated from the parameter schema); invalid values are refused.
+* A new version is created from the UI form (generated from the parameter schema the engine publishes at `/internal/strategies`); Laravel asks the engine to validate the values and refuses invalid ones.
 * An **assignment** = version × account × symbol. It is created **PAUSED** and must be enabled deliberately (the account needs a risk profile). Switching version pauses it again.
 * Duplicate-signal protection: at most one signal per assignment, bar and side (unique constraint).
 
 ## Adding a strategy
 
 1. Implement `Strategy` in `strategy_engine/<name>.py` with a Pydantic `Params` model (every threshold a field with a description).
-2. Register it in `strategy_engine/registry.py`. It's seeded into the catalogue on startup.
+2. Register it in `strategy_engine/registry.py`. The engine adds it to the catalogue (with version 1 = defaults) on startup, and it appears on the Strategies page.
 3. Add tests: crafted candle series for each outcome, parameter validation, and look-ahead safety with `CursorView`.

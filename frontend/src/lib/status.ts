@@ -31,9 +31,12 @@ export function deriveRobotStatus(status: TradingStatus): RobotStatus {
     };
   }
   if (status.engine_state === "offline") {
-    return { label: "Robot offline", tone: "neutral", detail: status.engine_detail, running: false };
+    return { label: "Engine offline", tone: "negative", detail: status.engine_detail, running: false };
   }
-  return { label: "Running", tone: "positive", detail: "Strategies may place orders.", running: true };
+  if (status.engine_state === "degraded") {
+    return { label: "Running · attention", tone: "warning", detail: status.engine_detail, running: true };
+  }
+  return { label: "Running", tone: "positive", detail: "Strategies may open trades. Every order passes the risk engine.", running: true };
 }
 
 export const MODE_INFO: Record<TradingMode, { label: string; tone: Tone; explanation: string }> = {

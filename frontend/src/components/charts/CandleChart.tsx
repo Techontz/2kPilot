@@ -8,7 +8,7 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 import { useEffect, useRef, useState } from "react";
-import type { CandlePoint } from "@/lib/types";
+import type { Candle as CandlePoint } from "@/lib/types";
 import { chartColors } from "./theme";
 
 interface OHLC {

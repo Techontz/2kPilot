@@ -1,6 +1,7 @@
-.venv
+vendor
 .env
-**/__pycache__
-.pytest_cache
-.mypy_cache
-.ruff_cache
+storage/logs/*
+storage/framework/sessions/*
+storage/framework/cache/*
+storage/framework/views/*
+tests

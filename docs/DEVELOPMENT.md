@@ -1,39 +1,33 @@
 # Development
 
-## Quality gates
-
-```bash
-make check        # ruff + ruff format + strict mypy + pytest (MySQL) + ESLint + tsc + Vitest + alembic check
-make e2e          # Playwright against the real backend + production build (Google Chrome)
-make bridge-test  # mt5_bridge: pytest + ruff + strict mypy
+```
+frontend/        Next.js 16 + TypeScript + Tailwind v4 — src/app (routes), src/features (screens),
+                 src/components (ui, layout, charts, providers), src/lib (api client, hooks, types)
+backend/         Laravel 13 — app/Http/Controllers/Api, app/Services, app/Policies, app/Jobs,
+                 app/Console/Commands, config/fx.php, config/brokers.php, database/migrations, tests/
+trading-engine/  Python package `fxrobot` — internal/ (API for Laravel), broker_engine, strategy_engine,
+                 risk_engine, execution_engine, trading_engine, backtesting, market_data, services, tests/
+mt5_bridge/      Windows MT5 bridge
 ```
 
-| Suite | Count | Where |
-|---|---|---|
-| Backend unit + integration (real MySQL 8) | 700+ | `backend/tests/` |
-| MT5 bridge (fake MT5 module) | 108 | `mt5_bridge/tests/` |
-| Frontend unit (Vitest) | 35 | `frontend/src/**/*.test.ts(x)` |
-| Browser E2E (Playwright) | 11 | `frontend/e2e/` |
+## Commands
 
-Notable backend suites: `test_risk_engine` (one test per rule and condition), `test_backtesting` (look-ahead and leakage), `test_execution` and `test_reliability` (lost responses, restarts, DB outages, duplicate signals, external positions, leadership lease), `test_mt5_bridge_contract` (backend client against the real bridge app), `test_engine_pipeline` (end-to-end paper trading), and `test_api_*` (security: secrets never returned, viewer and CSRF enforcement).
+```bash
+make dev            # everything
+make test           # Laravel + engine + frontend unit tests
+make lint           # Pint, ruff, mypy (strict), ESLint, TypeScript
+make migrate-check  # migrations from scratch + rollback
+make e2e            # browser tests: real Laravel + engine + MySQL + production build in Chrome
+make bridge-test    # MT5 bridge tests
+make check          # lint + test + migrate-check
+```
 
-## Conventions
+Test databases (MySQL on `127.0.0.1:3308` by default — adjust `phpunit.xml`, `TEST_DATABASE_URL`, `E2E_DB_PORT`): `twokfx_test` (Laravel), `twokfx_engine_test` (engine), `twokfx_e2e` (browser tests, recreated each run).
 
-* **Routes are thin**: validate, call a service, serialize. Rules live in services and engines.
-* **Money and prices are `Decimal`**; timestamps are aware UTC (stored through `UTCDateTime`).
-* **Safety-relevant changes are audited** in the same transaction.
-* **Anything uncertain fails closed**: a risk rule that can't be evaluated rejects the trade, and an uncertain order is reconciled, never resent.
-* Strategies never import broker adapters. Adapters map every native error onto `broker_engine.errors`.
-* No asserts for runtime safety checks (they vanish under `python -O`); raise explicit errors instead.
-* Frontend: no trading logic in React; never display invented numbers (show `—` and say why); explain jargon with `<Term>`; colour is semantic (`live` is reserved for LIVE mode).
+## Rules of thumb
 
-## Useful fixtures (`backend/tests/conftest.py`)
-
-`client`, `app_factory(**settings)`, `db`, `owner`, `viewer`, `owner_client`, `login()`, `fresh_heartbeat(db)`. In `tests/paper_helpers.py`: `make_paper()` and `make_market()`. In `tests/test_engine_pipeline.py`: `setup_trading()` and `run_until()`.
-
-## Adding an endpoint
-
-1. Put the business logic in `services/…`, and audit if it changes state.
-2. Add a thin route in `api/v1/<domain>.py` with `OwnerDep` for mutations, then include it in `api/v1/__init__.py`.
-3. Add frontend types in `src/lib/types.ts`.
-4. Add tests: 401, viewer 403, CSRF 403, validation 4xx, and the happy path.
+* Business rules live in Laravel (accounts, permissions, workflow) or the engine (trading math and broker I/O) — never in React.
+* Strategies never import broker code. The risk engine is never skipped.
+* Anything that changes money or settings is audited.
+* Money/prices are decimal strings in the API; format only for display.
+* Laravel ↔ engine calls go through `App\Services\Engine\EngineClient` (signed).

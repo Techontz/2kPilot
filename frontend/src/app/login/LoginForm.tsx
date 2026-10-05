@@ -1,69 +1,79 @@
 "use client";
 
+import { ShieldCheck } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { type FormEvent, useState } from "react";
+import { useState } from "react";
 import { Button } from "@/components/ui/Button";
-import { inputClass } from "@/components/ui/inputClass";
-import { ApiError, apiRequest } from "@/lib/api";
-import { safeNextPath } from "@/lib/redirect";
-import type { SessionInfo } from "@/lib/types";
+import { Field, TextInput } from "@/components/ui/Fields";
+import { api, ensureCsrf } from "@/lib/api";
+import { useAction } from "@/lib/hooks";
 
+/** Only same-site, absolute paths are accepted as a post-login destination. */
+export function safeNext(next: string | null): string {
+  return next && next.startsWith("/") && !next.startsWith("//") ? next : "/";
+}
 
 export function LoginForm() {
   const router = useRouter();
   const params = useSearchParams();
+  const [step, setStep] = useState<"password" | "mfa">("password");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(
-    params.get("expired") ? "Your session expired. Please sign in again." : null,
-  );
-  const [busy, setBusy] = useState(false);
+  const [code, setCode] = useState("");
+  const action = useAction();
 
-  const onSubmit = async (e: FormEvent) => {
+  const done = () => router.replace(safeNext(params.get("next")));
+
+  const submitPassword = async (e: React.FormEvent) => {
     e.preventDefault();
-    setBusy(true);
-    setError(null);
-    try {
-      await apiRequest<SessionInfo>("/auth/login", { method: "POST", body: { email, password } });
-      router.replace(safeNextPath(params.get("next")));
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Sign-in failed");
-      setBusy(false);
-    }
+    await ensureCsrf(true);
+    const result = await action.run(() => api<{ mfa_required?: boolean }>("/auth/login", { method: "POST", body: { email, password } }));
+    if (result === null) return;
+    setPassword("");
+    if (result.mfa_required) setStep("mfa");
+    else done();
   };
 
+  const submitCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const result = await action.run(() => api("/auth/mfa", { method: "POST", body: { code } }));
+    if (result !== null) done();
+  };
+
+  if (step === "mfa") {
+    return (
+      <form onSubmit={submitCode} className="space-y-5">
+        <div>
+          <h1 className="flex items-center gap-2 text-xl font-semibold"><ShieldCheck className="size-5 text-accent" aria-hidden /> Two-step sign-in</h1>
+          <p className="mt-1 text-sm text-fg-muted">Enter the 6-digit code from your authenticator app, or a recovery code.</p>
+        </div>
+        <Field label="Code" error={action.error}>
+          <TextInput value={code} onChange={(e) => setCode(e.target.value)} autoFocus autoComplete="one-time-code" inputMode="text" required maxLength={20} className="num tracking-widest" />
+        </Field>
+        <Button type="submit" variant="primary" className="w-full" disabled={action.busy || code.length < 6}>
+          {action.busy ? "Checking…" : "Verify and sign in"}
+        </Button>
+        <button type="button" className="text-sm text-fg-muted hover:text-fg" onClick={() => { setStep("password"); setCode(""); action.reset(); }}>
+          ← Use a different account
+        </button>
+      </form>
+    );
+  }
+
   return (
-    <form onSubmit={onSubmit} className="rounded-xl border border-line bg-surface p-6">
-      <h1 className="text-base font-semibold">Sign in</h1>
-      <label className="mt-5 block text-sm text-fg-muted">
-        Email
-        <input
-          className={inputClass}
-          type="email"
-          autoComplete="username"
-          required
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-        />
-      </label>
-      <label className="mt-4 block text-sm text-fg-muted">
-        Password
-        <input
-          className={inputClass}
-          type="password"
-          autoComplete="current-password"
-          required
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-        />
-      </label>
-      {error && (
-        <p role="alert" className="mt-4 rounded-lg bg-negative-soft px-3 py-2 text-sm text-negative">
-          {error}
-        </p>
-      )}
-      <Button type="submit" variant="primary" className="mt-5 w-full" disabled={busy}>
-        {busy ? "Signing in…" : "Sign in"}
+    <form onSubmit={submitPassword} className="space-y-5">
+      <div>
+        <h1 className="text-xl font-semibold">Sign in</h1>
+        <p className="mt-1 text-sm text-fg-muted">Welcome back. Your robot keeps running while you are away.</p>
+      </div>
+      <Field label="Email">
+        <TextInput type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" required autoFocus />
+      </Field>
+      <Field label="Password" error={action.error}>
+        <TextInput type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" required />
+      </Field>
+      <Button type="submit" variant="primary" className="w-full" disabled={action.busy}>
+        {action.busy ? "Signing in…" : "Sign in"}
       </Button>
     </form>
   );

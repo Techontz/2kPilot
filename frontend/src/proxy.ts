@@ -1,12 +1,14 @@
 import { type NextRequest, NextResponse } from "next/server";
 
+export const SESSION_COOKIE = "twokfx_session";
+
 /**
- * Optimistic auth redirect only: if there is no session cookie, send the
- * user to /login. Real authentication is enforced by the backend on every
- * API call — a forged cookie gets nothing but 401s.
+ * Optimistic redirect only: without a session cookie, go to /login. Real
+ * authentication is enforced by Laravel on every API call — a forged cookie
+ * gets nothing but 401s.
  */
 export function proxy(request: NextRequest) {
-  const hasSession = request.cookies.has("fx_session");
+  const hasSession = request.cookies.has(SESSION_COOKIE);
   const isLogin = request.nextUrl.pathname === "/login";
   if (!hasSession && !isLogin) {
     const url = new URL("/login", request.url);
@@ -17,6 +19,6 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-  // Everything except the API proxy, Next internals and static files.
-  matcher: ["/((?!api/|_next/|favicon.ico|.*\\.[a-zA-Z0-9]+$).*)"],
+  // Everything except the API/Sanctum proxy, Next internals and static files.
+  matcher: ["/((?!api/|sanctum/|_next/|favicon.ico|.*\\.[a-zA-Z0-9]+$).*)"],
 };

@@ -1,29 +1,34 @@
 /**
- * Minimal typed client for the 2kFX API.
+ * Typed transport to the Laravel API.
  *
- * - Same-origin requests to /api/v1 (proxied by Next.js), cookies included.
- * - Echoes the CSRF cookie in X-CSRF-Token on state-changing requests.
- * - Normalises the backend error envelope into ApiError.
- * No business logic lives here — only transport.
+ * - Same-origin requests to /api/* (Next.js proxies them to Laravel), so the
+ *   session cookie stays first-party and the backend address never reaches
+ *   the browser.
+ * - CSRF: Laravel sets the XSRF-TOKEN cookie (GET /sanctum/csrf-cookie); it is
+ *   echoed in the X-XSRF-TOKEN header on every state-changing request.
+ * - Errors are normalised into ApiError {status, code, message, fieldErrors}.
  */
 
-export const API_BASE = "/api/v1";
-const CSRF_COOKIE = "fx_csrf";
-const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+const SAFE_METHODS = new Set(["GET", "HEAD"]);
 
 export class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
     message: string,
-    readonly correlationId: string | null = null,
+    readonly fieldErrors: Record<string, string[]> = {},
   ) {
     super(message);
     this.name = "ApiError";
   }
+
+  /** First validation message for a field, if any. */
+  field(name: string): string | null {
+    return this.fieldErrors[name]?.[0] ?? null;
+  }
 }
 
-export function readCookie(name: string, cookieString: string = document.cookie): string | null {
+export function readCookie(name: string, cookieString: string = typeof document === "undefined" ? "" : document.cookie): string | null {
   for (const part of cookieString.split(";")) {
     const [key, ...rest] = part.trim().split("=");
     if (key === name) return decodeURIComponent(rest.join("="));
@@ -31,58 +36,79 @@ export function readCookie(name: string, cookieString: string = document.cookie)
   return null;
 }
 
-interface RequestOptions {
+let unauthorizedHandler: (() => void) | null = null;
+export function onUnauthorized(handler: (() => void) | null): void {
+  unauthorizedHandler = handler;
+}
+
+let csrfReady: Promise<void> | null = null;
+export function ensureCsrf(force = false): Promise<void> {
+  if (force || !readCookie("XSRF-TOKEN")) csrfReady = null;
+  csrfReady ??= fetch("/sanctum/csrf-cookie", { credentials: "same-origin", cache: "no-store" }).then(() => undefined);
+  return csrfReady;
+}
+
+interface Options {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
+  query?: Record<string, string | number | boolean | null | undefined>;
   signal?: AbortSignal;
 }
 
-type UnauthorizedHandler = () => void;
-let onUnauthorized: UnauthorizedHandler | null = null;
-
-/** Called when an authenticated request gets 401 (session expired/revoked). */
-export function setUnauthorizedHandler(handler: UnauthorizedHandler | null): void {
-  onUnauthorized = handler;
+export function buildUrl(path: string, query?: Options["query"]): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query ?? {})) {
+    if (value !== null && value !== undefined && value !== "") params.set(key, String(value));
+  }
+  const qs = params.toString();
+  return `/api${path}${qs ? `?${qs}` : ""}`;
 }
 
-export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
+export async function api<T>(path: string, options: Options = {}): Promise<T> {
   const method = options.method ?? "GET";
-  const headers: Record<string, string> = { Accept: "application/json" };
-  if (options.body !== undefined) headers["Content-Type"] = "application/json";
+  const headers: Record<string, string> = { Accept: "application/json", "X-Requested-With": "XMLHttpRequest" };
+  const isForm = typeof FormData !== "undefined" && options.body instanceof FormData;
+  if (options.body !== undefined && !isForm) headers["Content-Type"] = "application/json";
   if (!SAFE_METHODS.has(method)) {
-    const csrf = readCookie(CSRF_COOKIE);
-    if (csrf) headers["X-CSRF-Token"] = csrf;
+    await ensureCsrf();
+    const token = readCookie("XSRF-TOKEN");
+    if (token) headers["X-XSRF-TOKEN"] = token;
   }
-
   let response: Response;
   try {
-    response = await fetch(`${API_BASE}${path}`, {
+    response = await fetch(buildUrl(path, options.query), {
       method,
       headers,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      body: options.body === undefined ? undefined : isForm ? (options.body as FormData) : JSON.stringify(options.body),
       credentials: "same-origin",
       cache: "no-store",
       signal: options.signal,
     });
-  } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") throw err;
-    throw new ApiError(0, "network_error", "Cannot reach the 2kFX server. Check that it is running.");
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    throw new ApiError(0, "network_error", "Cannot reach the 2kFX server. Check that it is running (make dev).");
   }
-
   if (response.status === 204) return undefined as T;
-
-  const payload: unknown = await response.json().catch(() => null);
+  const payload = (await response.json().catch(() => null)) as
+    | { message?: string; code?: string; errors?: Record<string, string[]> }
+    | null;
   if (!response.ok) {
-    const envelope = (payload as { error?: { code?: string; message?: string; correlation_id?: string } } | null)
-      ?.error;
+    if (response.status === 419) csrfReady = null; // token expired: refresh next time
     const error = new ApiError(
       response.status,
-      envelope?.code ?? "http_error",
-      envelope?.message ?? `Request failed (${response.status})`,
-      envelope?.correlation_id ?? null,
+      payload?.code ?? (response.status === 422 ? "validation_error" : "http_error"),
+      payload?.message ?? `Request failed (${response.status})`,
+      payload?.errors ?? {},
     );
-    if (response.status === 401 && path !== "/auth/login") onUnauthorized?.();
+    if (response.status === 401 && !path.startsWith("/auth/")) unauthorizedHandler?.();
     throw error;
   }
   return payload as T;
+}
+
+/** A random key so a confirmed ticket can never be executed twice. */
+export function idempotencyKey(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return `t-${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
 }

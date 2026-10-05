@@ -1,85 +1,98 @@
 # Architecture
 
-## System overview
+## The big picture
 
 ```
-Browser ─► Next.js (frontend/) ─ /api/v1/* rewrite ─► FastAPI (backend/) ─► MySQL 8
-            UI only; SSE for live updates              services + engines
-                                                          │
-                                                          ├─► PaperBroker (in-process simulator)
-                                                          └─► MT5BridgeAdapter ─HTTPS/HMAC─► mt5_bridge (Windows) ─► MT5 terminal ─► broker
+                    ┌──────────────────────────── your computer ────────────────────────────┐
+Browser ──────────► │ Next.js dashboard (frontend/)                                          │
+ (only talks to     │   /api/*, /sanctum/*  ──proxy──►  Laravel (backend/)                   │
+  this origin)      │                                     • login, MFA, sessions, policies   │
+                    │                                     • REST API, validation, audit log  │
+                    │                                     • Broker Center, risk profiles,    │
+                    │                                       strategies, analytics, journal   │
+                    │                                     • queue jobs (backtests)           │
+                    │                                     • scheduler (engine watchdog …)    │
+                    │                                            │ HMAC-signed, 127.0.0.1     │
+                    │                                            ▼                            │
+                    │                                   Trading engine (trading-engine/)     │
+                    │                                     • Broker Manager + adapters        │
+                    │                                     • strategies → risk → execution     │
+                    │                                     • reconciliation, backtester       │
+                    │                                            │                            │
+                    │                    MySQL 8  ◄──────────────┴──── both read/write ──────│
+                    └──────────────────────────────────────┬─────────────────────────────────┘
+                                                           │
+                       ┌───────────────────────────────────┼─────────────────────────────┐
+                       ▼                                   ▼                             ▼
+                 Paper simulator                 Deriv API (api.derivws.com)    mt5_bridge (Windows) → MT5 → broker
+                 (inside the engine)             REST + OTP WebSocket            HTTPS + HMAC
 ```
 
-* The browser only talks to the Next.js origin. Session cookies are first-party and `SameSite=Strict`, and the backend address never reaches the browser.
-* One backend process serves the API **and** runs the trading engine on background threads. A database lease guarantees that only one engine instance trades, even if several API processes run.
-* **All business rules live in the backend.** React renders state and calls the API.
-
-## The pipeline (identical for paper, demo and — later — live)
-
-```
-                   ┌──────────────────── engine tick (every ENGINE_TICK_SECONDS) ───────────────────┐
-broker.advance() → reconcile orders & positions → sync account/snapshots → [kill switch?] →
-  for each ENABLED assignment with a newly closed entry bar:
-    candles (closed only) → validate → strategy.evaluate → StrategyEvaluation (why / why not)
-      → Signal (unique per assignment+bar+side) → risk_engine.evaluate → APPROVED / REJECTED (+reason)
-        → execution_engine.submit_entry → Order (persisted BEFORE send) → broker → fill / reject / UNKNOWN
-          → Trade (position) → … → exit detected by reconciliation → Trade closed → journal, notifications
-```
-
-Every step writes to the **journal** (`trade_events`) under one correlation ID. The dashboard's trade drawer shows the whole chain.
-
-## Packages (`backend/src/fxrobot/`)
-
-| Package | Responsibility | Never |
+| Part | Technology | Responsibility |
 |---|---|---|
-| `domain` | Broker-neutral types: modes, environments, market DTOs, lifecycle enums | depends on anything |
-| `market_data` | Sessions, conversion, pip values, resampling, validation, candle store, CSV, synthetic | fabricate data unlabelled |
-| `strategy_engine` | `Strategy` contract, indicators, views (`StaticView`, look-ahead-safe `CursorView`), Trend Pullback V1 | place orders or know the broker |
-| `risk_engine` | Pure rules + position sizing; `RiskLimits` | be bypassed |
-| `broker_engine` | `BrokerAdapter` contract, error taxonomy, registry, factory, `BrokerManager`, adapters | leak broker types upward |
-| `execution_engine` | Idempotent submission, reconciliation, journal | resend an uncertain order |
-| `trading_engine` | Per-account runner, risk-context builder, supervisor (lease, heartbeat, worker threads) | trade while the kill switch is engaged |
-| `backtesting` | Event-driven backtester (same strategy + risk code), validation service | use unclosed data |
-| `analytics` | Metrics shared by backtests and live analytics | invent numbers |
-| `notifications` | In-app notifications + `NotificationChannel` interface | break trading if a channel fails |
-| `services` | Business operations used by routes (auth, brokers, strategies, risk profiles, market data, trading ops, readiness, analytics) | — |
-| `api` | Thin routes, dependencies, serializers, SSE stream | contain business logic |
+| `frontend/` | Next.js 16, TypeScript, Tailwind v4 | The user interface only. No business rules. Polls the API for live data. |
+| `backend/` | Laravel 13, PHP 8.4, Sanctum | The primary application: authentication + MFA, authorization (policies), validation, REST API, audit log, Broker Center, encrypted credentials, risk profiles, strategy versions/assignments, analytics, journal, notifications, queue jobs, scheduler. **Owns the MySQL schema** (migrations). |
+| `trading-engine/` | Python 3.11, FastAPI (internal), SQLAlchemy | Everything quantitative and broker-facing: broker adapters, Broker Manager, market data, strategies, risk engine, execution engine, reconciliation, paper simulator, backtester. |
+| `mt5_bridge/` | Python on Windows | Runs beside the MetaTrader 5 terminal (the MT5 library only works on Windows). |
+| MySQL 8 | | The single database. |
 
-### Dependency direction
+### Why the trading engine stays in Python
+
+The engines (risk rules, idempotent execution, reconciliation, paper simulator, look-ahead-safe backtester) were already implemented and covered by 500+ tests. Rewriting them in PHP would add risk without benefit: numeric work (numpy, Decimal), long-running broker connections (Deriv WebSocket with a reader thread) and the MT5 bridge client fit a long-running Python process, whereas PHP requests are short-lived. So Laravel is the primary backend and orchestrator, and the engine is an isolated internal service that **only Laravel can call** (127.0.0.1 + HMAC signature + timestamp + nonce).
+
+## The trading pipeline (identical for paper, demo and live)
 
 ```
-api → services → trading_engine → execution_engine → broker_engine → domain
-                     │                 └→ risk_engine → strategy_engine → market_data → domain
-                     └→ backtesting (uses strategy_engine + risk_engine directly)
-core (config, logging, security, crypto, events) is used everywhere
+market data → strategy → signal → risk engine → execution engine → broker adapter → broker
+                                     ▲
+                manual ticket ───────┘   (Trade page: same risk engine, same execution engine)
 ```
 
-## Key design decisions
+Every engine tick (2 s): `advance → reconcile orders & positions → sync account & snapshots →
+[STOP TRADING engaged? stop here] → [unresolved order? no new entries] → evaluate enabled strategies on newly closed bars`.
 
-| Decision | Why |
+* **Strategies never call a broker.** They return a `SignalIntent` (side, entry, mandatory stop loss, take profit, reasons).
+* **The risk engine decides** (19 rules + sizing + exposure + margin). Every rule's result is stored on the signal.
+* **The execution engine** writes the order (with a unique `client_order_id`) **before** sending it. An uncertain outcome becomes `UNKNOWN` and is reconciled with the broker — it is never re-sent.
+* Everything is journaled (`trade_events`) under one correlation id: *market condition → signal → risk decision → order → broker response → position → exit → P/L*.
+
+## Broker architecture
+
+```
+2kFX → Broker Manager → Broker Adapter → Broker API / Bridge → Trading Account
+```
+
+`BrokerAdapter` (`trading-engine/src/fxrobot/broker_engine/interface.py`) is the one contract. Every adapter normalises: authentication/connect, account (id, environment, currency, balance, equity, margin), symbols, quotes, candles, positions, pending orders, place/modify/close/cancel, trade history (deals), health, a reconciliation lookup, and **capabilities** (pending orders? partial close? volume unit?). Errors map onto one taxonomy where *rejected* (nothing happened) is distinct from *outcome unknown* (may have happened).
+
+| Adapter | How | Notes |
+|---|---|---|
+| `PaperBroker` | In-process simulator | SYNTHETIC or replayed prices, margin, SL/TP, gaps, stop-out, fault injection |
+| `DerivAdapter` | Deriv REST (accounts, one-time passwords) + trading WebSocket | Multiplier contracts; SL/TP prices ↔ money amounts; market orders only |
+| `MT5BridgeAdapter` | HTTPS + HMAC to `mt5_bridge` | Contract-tested against the bridge app |
+
+The `BrokerManager` holds one adapter per connection, connects lazily, reconnects with exponential back-off, writes CONNECTED / RECONNECTING / ERROR / DISCONNECTED to the database, and raises notifications. Adding a broker = one adapter class + one catalogue entry (`backend/config/brokers.php`); strategies never change.
+
+## Data ownership
+
+| Written by Laravel | Written by the engine |
 |---|---|
-| **Synchronous adapters + worker threads** | The MetaTrader5 library, SQLAlchemy sessions and the backtester are synchronous. Each account ticks on its own thread, with a timeout |
-| **MT5 via a Windows bridge** | The MT5 Python package only runs on Windows next to the terminal. The backend stays portable, and the bridge exposes only the adapter's operations |
-| **One Python package, strict subpackages** | One import root and one dependency set. Boundaries are enforced by the dependency direction above |
-| **UTC everywhere** | MySQL `DATETIME(6)` stores naive UTC through `UTCDateTime`; sessions force `time_zone='+00:00'`. Broker server time is converted in the bridge |
-| **Decimal for money and prices** | No binary floating-point drift. Indicators use numpy floats, and results are quantized back |
-| **Server-Sent Events** for live updates | Simple, one-directional, works through the Next.js proxy with cookie auth. REST stays the source of truth |
-| **Paper time never runs ahead of real time** | Simulated timestamps stay in the past, so journals and analytics stay coherent |
-| **READ COMMITTED isolation** | Long-running engine loops always see fresh rows |
+| users, sessions, audit_logs, broker_connections (+ encrypted credentials), trading_accounts (settings), risk_profiles, strategy_versions, strategy_assignments, system_state (kill switch, mode), notifications (Laravel events) | connection status, account balances, account_snapshots, broker_symbols, paper_states, strategies (catalogue), strategy_evaluations, signals, orders, trades, trade_events, backtests results, datasets/candles, notifications, engine heartbeat & lease |
+
+The engine reads the kill switch and the operating mode from `system_state` on every tick, so STOP TRADING takes effect within one tick even if Laravel is down.
+
+## Secrets
+
+Broker credentials are encrypted by Laravel with AES-256-GCM using `BROKER_CREDENTIALS_KEY` (separate from `APP_KEY`), stored in `broker_connections.credentials_encrypted`, decrypted only inside the engine when it connects, and never returned to the browser. See [SECURITY.md](SECURITY.md).
 
 ## Real-time updates
 
-`GET /api/v1/stream` (SSE) publishes these topics: `status`, `broker`, `account`, `journal`, `evaluation`, `notification` and `notification_read`. The in-process `EventBus` is thread-safe, and slow subscribers drop old events rather than block the engine. The frontend has a single `StreamProvider`, and pages refetch (debounced) when relevant topics arrive. Only the Markets price table also refreshes every 5 s.
+The dashboard polls: trading status every 5 s, positions every 3 s, quotes every 2–3 s, overview every 5 s (only while the tab is visible). REST is the single source of truth.
 
-## Frontend
+## Laravel jobs and scheduler
 
-```
-src/app/(dashboard)/<page>/page.tsx  thin route → features/<area>/*Screen.tsx
-src/features/                        screens: overview, markets, strategies, backtesting, trading,
-                                     records (positions/orders/history/journal), brokers, analytics,
-                                     risk, notifications, settings, shared (account picker, trade drawer)
-src/components/ui                    design system (Card, DataTable, Dialog, Fields, Badge, Term, Meter…)
-src/components/charts                lightweight-charts time series & candles, SVG bar chart
-src/components/providers             Session, SystemStatus, Stream
-src/lib                              typed API client, types, formatters, glossary, hooks
-```
+| What | Where | Why |
+|---|---|---|
+| `RunBacktest` (queue) | `app/Jobs/RunBacktest.php` | Backtests take minutes; the request returns immediately |
+| `fx:engine-watchdog` (every minute) | scheduler | If the engine dies it cannot warn anyone — Laravel notifies once per outage |
+| `fx:daily-summary` (21:05 UTC) | scheduler | One P/L summary per account that traded |
+| `fx:prune` (daily) | scheduler | Old "no setup" evaluations and read notifications only — trades, orders, journal and audit are never pruned |

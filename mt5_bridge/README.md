@@ -1,9 +1,9 @@
 # 2kFX MT5 bridge
 
-A small, authenticated HTTP service that runs on **Windows** beside the MetaTrader 5 terminal. It exposes the operations in [`docs/MT5_BRIDGE_PROTOCOL.md`](../docs/MT5_BRIDGE_PROTOCOL.md) (protocol v1) to the 2kFX backend.
+A small, authenticated HTTP service that runs on **Windows** beside the MetaTrader 5 terminal. It exposes the operations in [`docs/MT5_BRIDGE_PROTOCOL.md`](../docs/MT5_BRIDGE_PROTOCOL.md) (protocol v1) to the 2kFX trading engine.
 
 ```
-2kFX backend ──HTTPS/HMAC──► mt5_bridge (Windows) ──IPC──► MetaTrader 5 terminal ──► Broker
+2kFX trading engine ──HTTPS/HMAC──► mt5_bridge (Windows) ──IPC──► MetaTrader 5 terminal ──► Broker
 ```
 
 What the bridge does:
@@ -67,8 +67,8 @@ notepad .env
 
 | Variable | Default | Notes |
 |---|---|---|
-| `BRIDGE_SECRET` | *(required)* | 32 characters or more. The backend must use the **same** value. |
-| `BRIDGE_HOST` | `127.0.0.1` | Bind address. Use the Tailscale/WireGuard IP (or `0.0.0.0` together with a firewall rule and TLS) when the backend runs on another machine. |
+| `BRIDGE_SECRET` | *(required)* | 32 characters or more. The 2kFX trading engine must use the **same** value (entered in Add Broker). |
+| `BRIDGE_HOST` | `127.0.0.1` | Bind address. Use the Tailscale/WireGuard IP (or `0.0.0.0` together with a firewall rule and TLS) when 2kFX runs on another machine. |
 | `BRIDGE_PORT` | `8710` | |
 | `BRIDGE_ALLOWED_IPS` | *(empty = any)* | Comma-separated IPs or CIDRs, e.g. `100.64.0.7,10.8.0.0/24`. |
 | `BRIDGE_SSL_CERTFILE` / `BRIDGE_SSL_KEYFILE` | | Enables HTTPS. You can also pass `--ssl-certfile` / `--ssl-keyfile`. |
@@ -111,26 +111,26 @@ A healthy result prints `HTTP 200  response signature: valid` and shows `"initia
 
 Recommended, in this order:
 
-1. **Private network (best).** Install [Tailscale](https://tailscale.com/) or WireGuard on both the Windows host and the backend host. Set `BRIDGE_HOST` to the Windows host's tailnet IP (for example `100.64.0.5`) and `BRIDGE_ALLOWED_IPS` to the backend's tailnet IP. Traffic is encrypted by the tunnel, and nothing is exposed to the internet.
-2. **HTTPS with a self-signed certificate.** Generate the certificate with OpenSSL, which is available through Git for Windows or on the backend host:
+1. **Private network (best).** Install [Tailscale](https://tailscale.com/) or WireGuard on both the Windows host and the 2kFX host. Set `BRIDGE_HOST` to the Windows host's tailnet IP (for example `100.64.0.5`) and `BRIDGE_ALLOWED_IPS` to the 2kFX host's tailnet IP. Traffic is encrypted by the tunnel, and nothing is exposed to the internet.
+2. **HTTPS with a self-signed certificate.** Generate the certificate with OpenSSL, which is available through Git for Windows or on the 2kFX host:
    ```bash
    openssl req -x509 -newkey rsa:3072 -sha256 -days 825 -nodes \
      -keyout bridge.key -out bridge.crt -subj "/CN=mt5-bridge" \
      -addext "subjectAltName=IP:203.0.113.10,DNS:mt5-bridge"
    ```
-   Copy both files to `C:\mt5_bridge\certs\`, set `BRIDGE_SSL_CERTFILE` and `BRIDGE_SSL_KEYFILE`, and give the backend `bridge.crt` as its trusted CA. Do not skip verification.
-3. **SSH tunnel.** Keep `BRIDGE_HOST=127.0.0.1` and forward the port from the backend with `ssh -L 8710:127.0.0.1:8710 user@windows-host`.
+   Copy both files to `C:\mt5_bridge\certs\`, set `BRIDGE_SSL_CERTFILE` and `BRIDGE_SSL_KEYFILE`, and give the 2kFX trading engine `bridge.crt` as its trusted CA. Do not skip verification.
+3. **SSH tunnel.** Keep `BRIDGE_HOST=127.0.0.1` and forward the port from the 2kFX host with `ssh -L 8710:127.0.0.1:8710 user@windows-host`.
 
 Plain HTTP is acceptable only on `127.0.0.1` or inside one of these tunnels.
 
-**Firewall.** Open the port only for the backend's IP, from an elevated PowerShell:
+**Firewall.** Open the port only for the 2kFX host's IP, from an elevated PowerShell:
 
 ```powershell
 New-NetFirewallRule -DisplayName "2kFX MT5 bridge" -Direction Inbound -Protocol TCP `
   -LocalPort 8710 -RemoteAddress 203.0.113.20 -Action Allow -Profile Any
 ```
 
-Replace `203.0.113.20` with the backend's IP, and set `BRIDGE_ALLOWED_IPS` to the same address for defence in depth.
+Replace `203.0.113.20` with the 2kFX host's IP, and set `BRIDGE_ALLOWED_IPS` to the same address for defence in depth.
 
 ---
 

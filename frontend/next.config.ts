@@ -1,15 +1,16 @@
 import type { NextConfig } from "next";
 
-// Server-side only (not NEXT_PUBLIC_): the browser never learns the backend address.
+// Server-side only (not NEXT_PUBLIC_): the browser never learns the Laravel address.
 // Rewrites are resolved at BUILD time, so set BACKEND_URL before `next build`.
-// All API calls go same-origin to /api/v1/* and are proxied here, so session
-// cookies stay first-party, SameSite=Strict, and no CORS is needed.
-const backendUrl = process.env.BACKEND_URL ?? "http://127.0.0.1:8000";
+// The browser calls /api/* and /sanctum/* on this origin; Next.js proxies them
+// to Laravel, so session cookies stay first-party and no CORS is needed.
+const backendUrl = process.env.BACKEND_URL ?? "http://127.0.0.1:8421";
 
 const securityHeaders = [
   { key: "X-Frame-Options", value: "DENY" },
   { key: "X-Content-Type-Options", value: "nosniff" },
-  { key: "Referrer-Policy", value: "no-referrer" },
+  // same-origin: Laravel (Sanctum) checks the Referer/Origin of dashboard requests.
+  { key: "Referrer-Policy", value: "same-origin" },
   { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
   {
     key: "Content-Security-Policy",
@@ -26,7 +27,10 @@ const nextConfig: NextConfig = {
   turbopack: { root: projectRoot },
   poweredByHeader: false,
   async rewrites() {
-    return [{ source: "/api/v1/:path*", destination: `${backendUrl}/api/v1/:path*` }];
+    return [
+      { source: "/api/:path*", destination: `${backendUrl}/api/:path*` },
+      { source: "/sanctum/:path*", destination: `${backendUrl}/sanctum/:path*` },
+    ];
   },
   async headers() {
     return [{ source: "/:path*", headers: securityHeaders }];

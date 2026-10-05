@@ -1,16 +1,26 @@
-# Local full-stack environment. Secrets come from ./backend/.env (never committed).
-# Usage: docker compose up --build
+# Local full-stack environment: MySQL + Laravel (API, queue worker, scheduler)
+# + trading engine + Next.js. Secrets come from backend/.env and
+# trading-engine/.env (never committed; run `php artisan fx:keys` first).
+# Usage: docker compose up --build   →   http://127.0.0.1:3000
+x-db: &db-env
+  DB_CONNECTION: mysql
+  DB_HOST: db
+  DB_PORT: "3306"
+  DB_DATABASE: twokfx
+  DB_USERNAME: twokfx
+  DB_PASSWORD: ${MYSQL_PASSWORD:-twokfx-local-only}
+  ENGINE_URL: http://engine:8431
+
 services:
   db:
     image: mysql:8.0
     command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
     environment:
-      MYSQL_DATABASE: fxrobot
-      MYSQL_USER: fxrobot
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-fxrobot-local-only}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-fxrobot-root-local-only}
-    volumes:
-      - mysqldata:/var/lib/mysql
+      MYSQL_DATABASE: twokfx
+      MYSQL_USER: twokfx
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-twokfx-local-only}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-twokfx-root-local-only}
+    volumes: [mysqldata:/var/lib/mysql]
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
       interval: 5s
@@ -19,26 +29,38 @@ services:
   backend:
     build: ./backend
     env_file: ./backend/.env
+    environment: *db-env
+    depends_on: { db: { condition: service_healthy } }
+    ports: ["127.0.0.1:8421:8421"]
+
+  worker:
+    build: ./backend
+    env_file: ./backend/.env
+    environment: *db-env
+    command: ["php", "artisan", "queue:work", "--tries=1", "--timeout=1800"]
+    depends_on: [backend]
+
+  scheduler:
+    build: ./backend
+    env_file: ./backend/.env
+    environment: *db-env
+    command: ["php", "artisan", "schedule:work"]
+    depends_on: [backend]
+
+  engine:
+    build: ./trading-engine
+    env_file: ./trading-engine/.env
     environment:
-      DATABASE_URL: mysql+pymysql://fxrobot:${MYSQL_PASSWORD:-fxrobot-local-only}@db:3306/fxrobot?charset=utf8mb4
+      DATABASE_URL: mysql+pymysql://twokfx:${MYSQL_PASSWORD:-twokfx-local-only}@db:3306/twokfx?charset=utf8mb4
       LOG_FORMAT: json
-      # The frontend container is the only proxy; its address is on the compose network.
-      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
-    depends_on:
-      db:
-        condition: service_healthy
-    ports:
-      - "127.0.0.1:8000:8000"
+    depends_on: [backend] # backend runs the migrations
 
   frontend:
     build:
       context: ./frontend
-      args:
-        BACKEND_URL: http://backend:8000
-    depends_on:
-      - backend
-    ports:
-      - "127.0.0.1:3000:3000"
+      args: { BACKEND_URL: "http://backend:8421" }
+    depends_on: [backend]
+    ports: ["127.0.0.1:3000:3000"]
 
 volumes:
   mysqldata:

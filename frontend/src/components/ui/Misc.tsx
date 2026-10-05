@@ -31,6 +31,18 @@ const CONN = {
   ERROR: { tone: "negative", label: "Error" },
 } as const;
 
+const DOT_TONE = { CONNECTED: "bg-positive", DISCONNECTED: "bg-fg-subtle", RECONNECTING: "bg-warning", ERROR: "bg-negative" } as const;
+
+/** Small status dot with an accessible label. */
+export function ConnectionDot({ status }: { status: ConnectionStatus }) {
+  return (
+    <span className="relative flex size-2.5 shrink-0" role="img" aria-label={CONN[status].label}>
+      {status === "CONNECTED" && <span className="absolute inline-flex size-full animate-ping rounded-full bg-positive opacity-30" />}
+      <span className={cn("relative inline-flex size-2.5 rounded-full", DOT_TONE[status])} />
+    </span>
+  );
+}
+
 export function ConnectionBadge({ status }: { status: ConnectionStatus }) {
   const c = CONN[status];
   return (

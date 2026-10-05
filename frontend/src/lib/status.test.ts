@@ -16,6 +16,11 @@ describe("deriveRobotStatus", () => {
 
   it("reports an offline engine as not running", () => {
     const robot = deriveRobotStatus(tradingStatus({ kill_switch_engaged: false }));
-    expect(robot).toMatchObject({ label: "Robot offline", running: false });
+    expect(robot).toMatchObject({ label: "Engine offline", tone: "negative", running: false });
+  });
+
+  it("reports running and degraded engines", () => {
+    expect(deriveRobotStatus(tradingStatus({ kill_switch_engaged: false, engine_state: "running" }))).toMatchObject({ label: "Running", running: true });
+    expect(deriveRobotStatus(tradingStatus({ kill_switch_engaged: false, engine_state: "degraded" })).tone).toBe("warning");
   });
 });

@@ -1,14 +1,14 @@
 # Connecting MetaTrader 5 (demo first)
 
 ```
-2kFX backend (Mac/Linux/Windows) ──HTTPS or private tunnel, HMAC-signed──► mt5_bridge (Windows) ──► MT5 terminal ──► broker
+2kFX trading engine (Mac/Linux/Windows) ──HTTPS or private tunnel, HMAC-signed──► mt5_bridge (Windows) ──► MT5 terminal ──► broker
 ```
 
 The `MetaTrader5` Python package only works on **Windows**, next to a running MT5 terminal. You need:
 
 * A Windows PC or Windows VPS (a VPS close to your broker's servers is ideal) with the MT5 terminal installed and **logged in** to a **demo** account.
 * Python 3.11 (64-bit) on that machine.
-* Network reachability from the 2kFX backend to the bridge. **Tailscale or WireGuard is strongly recommended.** Otherwise use HTTPS with a certificate and a firewall rule limited to the backend's IP.
+* Network reachability from the 2kFX trading engine to the bridge. **Tailscale or WireGuard is strongly recommended.** Otherwise use HTTPS with a certificate and a firewall rule limited to the 2kFX machine's IP.
 
 ## 1. On the Windows machine
 
@@ -27,19 +27,19 @@ copy .env.example .env      # set BRIDGE_SECRET (≥32 random chars), BRIDGE_HOS
 
 ## 2. In 2kFX
 
-1. **Brokers → Add broker → MetaTrader 5 (via 2kFX MT5 Bridge) → DEMO**.
+1. **Brokers → Add broker → MetaTrader 5 → DEMO**.
 2. Enter these values:
-   * **Bridge URL**, e.g. `https://100.64.0.12:8710` (Tailscale IP) or `http://127.0.0.1:8710` if the backend runs on the same Windows machine.
+   * **Bridge URL**, e.g. `https://100.64.0.12:8710` (Tailscale IP) or `http://127.0.0.1:8710` if 2kFX runs on the same Windows machine.
    * **Bridge secret**: the same `BRIDGE_SECRET`. It is encrypted and never shown again.
    * **MT5 account number**, **password** (encrypted) and **server**, exactly as MT5 shows it (e.g. `ICMarketsSC-Demo`).
-3. **Test connection**. 2kFX logs in through the bridge and reads the account. It refuses to continue unless the **broker reports DEMO**.
+3. **Test connection**, then **Verify account**. 2kFX logs in through the bridge and reads the account. It refuses to continue unless the **broker reports DEMO**.
 4. Choose a risk profile and **Save**. The account is saved with trading **disabled**.
-5. **Markets → From MT5** downloads real history for backtests. **Strategies → Assign** runs a strategy on the demo account.
+5. **Backtesting → Manage data** can download real history (API: `POST /api/datasets/download`). **Strategies → Assign** runs a strategy on the demo account.
 
 ## What 2kFX does on your MT5 account
 
 * Market orders with a stop loss, a take profit and a maximum deviation (slippage), tagged with the 2kFX client order ID in the comment.
-* Position modifications and closes that you trigger, or the emergency stop with "close all".
+* Position modifications and closes that you trigger, or the separate "Close positions" emergency action.
 * Reconciliation reads positions, orders and 7 days of deal history so it can detect SL/TP exits and outcomes that were uncertain.
 
 ## Troubleshooting
@@ -57,7 +57,7 @@ copy .env.example .env      # set BRIDGE_SECRET (≥32 random chars), BRIDGE_HOS
 ## What has been verified without Windows
 
 * The bridge's full test suite (108 tests) runs against a realistic fake `MetaTrader5` module.
-* The backend client is tested against the real bridge app (contract tests).
+* The engine's MT5 client is tested against the real bridge app (contract tests).
 * A live server check of `/v1/health` with signed requests and responses.
 
 **Not yet verified:** a real MT5 terminal and a real broker demo account. That is your first step (see [ROADMAP.md](ROADMAP.md)).

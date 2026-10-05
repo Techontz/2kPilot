@@ -34,6 +34,13 @@ out/
 next-env.d.ts
 coverage/
 
+# ── PHP / Laravel (also see backend/.gitignore) ───────
+vendor/
+
+# ── Playwright ────────────────────────────────────────
+test-results/
+playwright-report/
+
 # ── Local data / logs ────────────────────────────────
 logs/
 *.log

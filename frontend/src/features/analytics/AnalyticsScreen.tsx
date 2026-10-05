@@ -3,133 +3,94 @@
 import { BarChart3 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { BarChart } from "@/components/charts/BarChart";
-import { TimeSeriesChart } from "@/components/charts/TimeSeriesChart";
-import { toSeries } from "@/components/charts/theme";
-import { useLiveRefresh } from "@/components/providers/StreamProvider";
+import { useAppData } from "@/components/providers/AppDataProvider";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { DataTable } from "@/components/ui/DataTable";
-import { Segmented } from "@/components/ui/Fields";
-import { EmptyState, KeyValue, Loading, Notice, Pnl } from "@/components/ui/Misc";
+import { Segmented, Select } from "@/components/ui/Fields";
+import { EmptyState, EnvBadge, KeyValue, Loading, Notice, Pnl } from "@/components/ui/Misc";
 import { PageHeader } from "@/components/ui/PageHeader";
-import { formatMoney, formatPct, formatPnl, humanize } from "@/lib/format";
+import { formatNumber, formatPct, formatPnl } from "@/lib/format";
+import { useApi } from "@/lib/hooks";
 import type { GroupStat, Metrics, Performance } from "@/lib/types";
-import { useApiResource } from "@/lib/useApiResource";
-import { MetricTiles } from "@/features/backtesting/BacktestReport";
-import { AccountPicker } from "@/features/shared/AccountPicker";
-import { useAccounts } from "@/features/shared/useAccounts";
+import { MetricsView } from "../backtesting/BacktestReport";
 
-type Period = "7" | "30" | "90" | "all";
-type Bucket = "daily" | "weekly" | "monthly";
+type Period = "7d" | "30d" | "90d" | "365d" | "all";
 
-function Group({ title, rows, enumKeys = false }: { title: string; rows: GroupStat[] | undefined; enumKeys?: boolean }) {
+/** Performance from stored trades only. PAPER and real results are never mixed. */
+export function AnalyticsScreen() {
+  const { account, accounts } = useAppData();
+  const [scope, setScope] = useState<string>("account");
+  const [period, setPeriod] = useState<Period>("all");
+  const [grain, setGrain] = useState<"daily" | "weekly">("daily");
+  const query = scope === "account" ? { account_id: account?.id, period } : { environment: scope, period };
+  const perf = useApi<Performance>(scope !== "account" || account ? "/analytics/performance" : null, query, 30000);
+  const environments = useMemo(() => Array.from(new Set((accounts ?? []).map((a) => a.environment))), [accounts]);
+  const p = perf.data;
+  const series = (grain === "daily" ? p?.daily : p?.weekly) ?? [];
+
   return (
-    <Card>
-      <CardHeader title={title} />
-      <DataTable rows={rows ?? []} rowKey={(r) => r.key} empty="No closed trades." columns={[
-        { key: "k", header: "", cell: (r) => (enumKeys ? humanize(r.key) : r.key) },
-        { key: "t", header: "Trades", align: "right", cell: (r) => r.trades },
-        { key: "w", header: "Win", align: "right", hideBelow: "sm", cell: (r) => formatPct(r.win_rate, 0) },
-        { key: "n", header: "Net", align: "right", cell: (r) => <Pnl value={r.net_pnl}>{formatPnl(r.net_pnl)}</Pnl> },
-      ]} />
-    </Card>
+    <div className="space-y-6">
+      <PageHeader title="Analytics" description="Calculated only from closed trades and broker balance snapshots. Simulated (PAPER) results are kept separate from broker accounts."
+        actions={<>
+          <Select aria-label="Scope" className="w-56" value={scope} onChange={(e) => setScope(e.target.value)}>
+            <option value="account">This account{account ? ` — ${account.label}` : ""}</option>
+            {environments.map((env) => <option key={env} value={env}>All {env} accounts</option>)}
+          </Select>
+          <Segmented size="sm" label="Period" value={period} onChange={setPeriod} options={[{ value: "7d", label: "7D" }, { value: "30d", label: "30D" }, { value: "90d", label: "90D" }, { value: "365d", label: "1Y" }, { value: "all", label: "All" }]} />
+        </>} />
+      {!p ? (perf.error ? <Notice tone="danger">{perf.error}</Notice> : <Loading />) : !p.has_data ? (
+        <Card><EmptyState icon={BarChart3} title="No results yet">Analytics appear after the first closed trades and balance snapshots for {p.scope.label ?? "this scope"}.</EmptyState></Card>
+      ) : (
+        <>
+          <div className="flex items-center gap-2 text-sm text-fg-muted">{p.scope.environment && <EnvBadge env={p.scope.environment} />} {p.scope.label}{p.simulated && " · simulated results"}</div>
+          <MetricsView m={p as Metrics} />
+          <div className="grid gap-6 xl:grid-cols-2">
+            <Card>
+              <CardHeader title={grain === "daily" ? "Daily P/L" : "Weekly P/L"} action={<Segmented size="sm" label="Grain" value={grain} onChange={setGrain} options={[{ value: "daily", label: "Daily" }, { value: "weekly", label: "Weekly" }]} />} />
+              <CardBody>{series.length ? <BarChart bars={series.slice(-60).map((d) => ({ label: d.period, value: d.net_pnl, detail: `${d.trades} trades` }))} format={(v) => formatPnl(v)} label="Net P/L per period" /> : <p className="text-sm text-fg-muted">No closed trades in this period.</p>}</CardBody>
+            </Card>
+            <Card>
+              <CardHeader title="Execution quality" description="How orders were filled — and why signals were rejected" />
+              <CardBody className="space-y-4">
+                <KeyValue items={[
+                  ["Orders", String(p.execution?.orders ?? 0)],
+                  ["Fill rate", formatPct(p.execution?.fill_rate, 1)],
+                  ["Average slippage", p.execution?.avg_slippage_pips === null || p.execution?.avg_slippage_pips === undefined ? "—" : `${formatNumber(p.execution.avg_slippage_pips)} pips`],
+                  ["Worst slippage", p.execution?.worst_slippage_pips === null || p.execution?.worst_slippage_pips === undefined ? "—" : `${formatNumber(p.execution.worst_slippage_pips)} pips`],
+                  ["Average fill time", p.execution?.avg_fill_seconds === null || p.execution?.avg_fill_seconds === undefined ? "—" : `${formatNumber(p.execution.avg_fill_seconds)} s`],
+                  ["Unresolved orders", String(p.execution?.unresolved_orders ?? 0)],
+                ]} />
+                {p.execution?.top_rejections.length ? (
+                  <div>
+                    <p className="mb-2 text-xs font-medium text-fg-subtle">Most common rejection reasons</p>
+                    <ul className="space-y-1 text-sm">{p.execution.top_rejections.map((r) => <li key={r.reason} className="flex justify-between gap-3"><span className="truncate text-fg-muted">{r.reason}</span><span className="num text-fg">{r.count}</span></li>)}</ul>
+                  </div>
+                ) : null}
+              </CardBody>
+            </Card>
+          </div>
+          <div className="grid gap-6 xl:grid-cols-3">
+            <Breakdown title="By symbol" rows={p.by_symbol ?? []} />
+            <Breakdown title="By strategy" rows={p.by_strategy ?? []} />
+            <Breakdown title="By session" rows={p.by_session ?? []} />
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
-export function AnalyticsScreen() {
-  const acc = useAccounts({ allowAll: true });
-  const [period, setPeriod] = useState<Period>("30");
-  const [bucket, setBucket] = useState<Bucket>("daily");
-  const params = new URLSearchParams();
-  if (acc.selected) params.set("account_id", acc.selected);
-  if (period !== "all") params.set("days", period);
-  const perf = useApiResource<Performance>(`/analytics/performance?${params.toString()}`);
-  useLiveRefresh(["journal"], () => void perf.reload(), 2000);
-  const p = perf.data;
-  const equity = useMemo(() => toSeries(p?.balance_history ?? [], (x) => x.t, (x) => x.equity), [p?.balance_history]);
-  const balance = useMemo(() => toSeries(p?.balance_history ?? [], (x) => x.t, (x) => x.balance), [p?.balance_history]);
-  const dd = useMemo(() => toSeries(p?.drawdown_curve ?? [], (x) => x.t, (x) => x.dd), [p?.drawdown_curve]);
-  const [curve, setCurve] = useState<"equity" | "balance" | "drawdown">("equity");
-  const bars = bucket === "monthly"
-    ? (p?.monthly ?? []).map((m) => ({ label: m.month, value: m.net_pnl ?? 0, detail: `${m.trades} trades` }))
-    : (p?.[bucket] ?? []).map((d) => ({ label: d.period, value: d.net_pnl, detail: `${d.trades} trades` }));
-  const fmtMoney = useMemo(() => (v: number) => formatMoney(v), []);
-  const fmtPct = useMemo(() => (v: number) => formatPct(v), []);
-  const ex = p?.execution;
-
+function Breakdown({ title, rows }: { title: string; rows: GroupStat[] }) {
   return (
-    <>
-      <PageHeader
-        title="Analytics"
-        description="Performance measured from the robot's own stored records. Nothing here is estimated or sample data."
-        actions={
-          <div className="flex flex-wrap gap-2">
-            {acc.accounts.length > 1 && <AccountPicker accounts={acc.accounts} value={acc.selected} onChange={acc.setSelected} allowAll />}
-            <Segmented label="Period" value={period} onChange={setPeriod} options={[{ value: "7", label: "7d" }, { value: "30", label: "30d" }, { value: "90", label: "90d" }, { value: "all", label: "All" }]} />
-          </div>
-        }
-      />
-      {!p && !perf.error && <Loading />}
-      {perf.error && <Notice tone="danger">{perf.error.message}</Notice>}
-      {p && !p.has_data && (
-        <Card>
-          <EmptyState icon={BarChart3} title="No trading records yet">
-            Analytics fill in automatically once an account is connected and the robot starts recording snapshots and trades. For research on
-            history, use Backtesting.
-          </EmptyState>
-        </Card>
-      )}
-      {p && p.has_data && (
-        <div className="space-y-6">
-          {p.simulated && <Notice tone="info" title="PAPER / SIMULATION">These results come from simulated trading. They show that the pipeline works — not that the strategy has an edge.</Notice>}
-          <MetricTiles m={p as Metrics} />
-          <div className="grid gap-6 lg:grid-cols-5">
-            <Card className="lg:col-span-3">
-              <CardHeader title={curve === "drawdown" ? "Drawdown" : curve === "equity" ? "Equity" : "Balance"}
-                description={curve === "equity" ? "Includes open P/L" : curve === "balance" ? "Closed trades only" : "Fall from the running peak"}
-                action={<Segmented size="sm" label="Curve" value={curve} onChange={setCurve} options={[{ value: "equity", label: "Equity" }, { value: "balance", label: "Balance" }, { value: "drawdown", label: "Drawdown" }]} />} />
-              <CardBody>
-                {(curve === "drawdown" ? dd : curve === "equity" ? equity : balance).length > 1 ? (
-                  curve === "drawdown"
-                    ? <TimeSeriesChart data={dd} label="Drawdown" variant="drawdown" format={fmtPct} />
-                    : <TimeSeriesChart data={curve === "equity" ? equity : balance} label={curve} format={fmtMoney} variant={curve === "balance" ? "line" : "area"} />
-                ) : <p className="py-12 text-center text-sm text-fg-subtle">Not enough snapshots in this period yet.</p>}
-              </CardBody>
-            </Card>
-            <Card className="lg:col-span-2">
-              <CardHeader title="Results by period" action={<Segmented size="sm" label="Bucket" value={bucket} onChange={setBucket} options={[{ value: "daily", label: "Day" }, { value: "weekly", label: "Week" }, { value: "monthly", label: "Month" }]} />} />
-              <CardBody>
-                {bars.length ? <BarChart bars={bars.slice(-40)} label={`${bucket} net P/L`} format={(v) => formatPnl(v)} /> : <p className="py-12 text-center text-sm text-fg-subtle">No closed trades in this period.</p>}
-              </CardBody>
-            </Card>
-          </div>
-          <div className="grid gap-6 lg:grid-cols-3">
-            <Group title="By strategy" rows={p.by_strategy} />
-            <Group title="By instrument" rows={p.by_symbol} />
-            <Group title="By session" rows={p.by_session} enumKeys />
-          </div>
-          {ex && (
-            <Card>
-              <CardHeader title="Execution quality" description="How well orders are filled — slippage and failures cost money the backtest may not show." />
-              <CardBody className="grid gap-6 md:grid-cols-2">
-                <KeyValue items={[
-                  ["Entry orders", ex.orders],
-                  ["Fill rate", formatPct(ex.fill_rate, 1)],
-                  ["Avg / worst slippage", `${ex.avg_slippage_pips ?? "—"} / ${ex.worst_slippage_pips ?? "—"} pips`],
-                  ["Avg time to fill", ex.avg_fill_seconds !== null ? `${ex.avg_fill_seconds}s` : "—"],
-                  ["Unresolved orders", <span key="u" className={ex.unresolved_orders ? "text-warning" : undefined}>{ex.unresolved_orders}</span>],
-                  ["Unrealised P/L now", <Pnl key="o" value={p.unrealized_pnl}>{formatPnl(p.unrealized_pnl)}</Pnl>],
-                ]} />
-                <div>
-                  <p className="mb-2 text-xs font-medium tracking-wide text-fg-subtle uppercase">Most common rejection reasons</p>
-                  {ex.top_rejections.length === 0 ? <p className="text-sm text-fg-subtle">None.</p> : (
-                    <KeyValue items={ex.top_rejections.map((r) => [<span key={r.reason} className="text-xs">{r.reason.replace("Trade rejected: ", "")}</span>, r.count])} />
-                  )}
-                </div>
-              </CardBody>
-            </Card>
-          )}
-        </div>
-      )}
-    </>
+    <Card>
+      <CardHeader title={title} />
+      <DataTable caption={title} rows={rows} rowKey={(r) => r.key} columns={[
+        { key: "k", header: "", cell: (r) => <span className="font-medium">{r.key}</span> },
+        { key: "t", header: "Trades", align: "right", cell: (r) => r.trades },
+        { key: "w", header: "Win %", align: "right", cell: (r) => formatPct(r.win_rate, 0) },
+        { key: "pf", header: "PF", align: "right", cell: (r) => (r.profit_factor === null ? "—" : formatNumber(r.profit_factor)) },
+        { key: "p", header: "Net", align: "right", cell: (r) => <Pnl value={r.net_pnl}>{formatPnl(r.net_pnl)}</Pnl> },
+      ]} />
+    </Card>
   );
 }

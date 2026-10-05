@@ -2,7 +2,11 @@
 
 The goal is to find out honestly whether a strategy has an edge **after costs**, and to make overfitting visible.
 
-## Engine (`backtesting/engine.py`)
+## How a run happens
+
+Backtesting page → Laravel validates and asks the engine to create the run (`QUEUED`) → a Laravel **queue job** (`RunBacktest`) asks the engine to execute it → results are stored in `backtests` / `backtest_trades` and shown on the report page (which refreshes while it runs).
+
+## Engine (`trading-engine/src/fxrobot/backtesting/engine.py`)
 
 * **Same code as live.** It uses the same `Strategy.evaluate` and the same `risk_engine.evaluate` (every rule, sizing included) as the trading engine.
 * **Closed bars only.** `CursorView` reveals a bar only once `open + timeframe ≤ now`. Higher timeframes are resampled from the base data and appear only after their period ends.
@@ -41,7 +45,7 @@ Warnings shown on every run where they apply:
 * **Curves and breakdowns:** equity and drawdown curves, monthly results, and breakdowns by symbol, session, side and strategy.
 * **Diagnostics:** how many signals were rejected, and by which risk rule.
 
-## Look-ahead and leakage tests (`tests/test_backtesting.py`)
+## Look-ahead and leakage tests (`trading-engine/tests/test_backtesting.py`)
 
 * Truncating the data at time T leaves every trade before T unchanged.
 * Spiking every candle after T leaves every decision before T unchanged.
