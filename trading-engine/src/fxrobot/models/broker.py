@@ -34,6 +34,7 @@ class BrokerConnection(TimestampMixin, Base):
     __tablename__ = "broker_connections"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     label: Mapped[str] = mapped_column(String(120))
     connector_type: Mapped[ConnectorType] = mapped_column(
         str_enum(ConnectorType, "connector_type", 24)
@@ -53,9 +54,6 @@ class BrokerConnection(TimestampMixin, Base):
     is_enabled: Mapped[bool] = mapped_column(default=True, server_default=true())
     last_connected_at: Mapped[datetime | None]
     last_error_at: Mapped[datetime | None]
-    created_by: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL")
-    )
 
     # Accounts (and their history) go with the connection — the DB cascades the
     # FKs; without this the ORM would try to NULL `connection_id` and fail.
@@ -76,6 +74,8 @@ class TradingAccount(TimestampMixin, Base):
     connection_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("broker_connections.id", ondelete="CASCADE")
     )
+    # The connection's owner, repeated here because nearly every query filters by it.
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     broker_account_id: Mapped[str] = mapped_column(String(64))
     label: Mapped[str] = mapped_column(String(120))
     name: Mapped[str] = mapped_column(String(200), default="")

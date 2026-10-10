@@ -132,6 +132,7 @@ def test_same_idempotency_key_never_opens_a_second_position(
     ("change", "rule"),
     [
         ("kill_switch", "Kill switch"),
+        ("platform_halt", "Kill switch"),
         ("disabled", "Account trading enabled"),
         ("wrong_stop", "Stop loss required"),
         ("live_account", "Operating mode"),
@@ -144,6 +145,8 @@ def test_risk_rejections_send_nothing(
     account = setup["account"]
     if change == "kill_switch":
         factories.stop_trading(db)
+    elif change == "platform_halt":
+        factories.halt_platform(db)
     elif change == "disabled":
         db.refresh(account)
         account.trading_enabled = False
@@ -220,7 +223,10 @@ def test_close_modify_and_close_all(
     )
     assert again.status_code == 409
     client.post("/internal/orders", json=ticket(setup))
-    summary = client.post("/internal/positions/close-all", json={"actor_label": "owner"}).json()
+    summary = client.post(
+        "/internal/positions/close-all",
+        json={"actor_label": "owner", "account_ids": [str(setup["account"].id)]},
+    ).json()
     assert summary == {"closed": 1, "failed": []}
     db.expire_all()
     assert (
@@ -229,3 +235,60 @@ def test_close_modify_and_close_all(
     )
     signal = db.scalars(select(Signal).where(Signal.status == SignalStatus.EXECUTED)).first()
     assert signal is not None
+
+
+def other_users_setup(client: SignedClient, db: Session) -> dict[str, Any]:
+    """A second user with their own trading paper account and STOP switch."""
+    other = factories.make_user(db)
+    account = factories.paper_account(db, owner=other)
+    factories.enable_account(db, account, factories.risk_profile(db, owner=other, **LOOSE_RISK))
+    factories.resume_trading(db, other)
+    broker = paper_broker(client, str(account.connection_id))
+    step_until_open(broker)
+    return {"account": account, "broker": broker, "owner": other}
+
+
+def test_one_users_stop_never_blocks_another_users_tickets(
+    client: SignedClient, db: Session, setup: dict[str, Any]
+) -> None:
+    other = other_users_setup(client, db)
+    factories.stop_trading(db)  # the default user stops
+    mine = client.post("/internal/orders", json=ticket(setup)).json()
+    theirs = client.post("/internal/orders", json=ticket(other)).json()
+    assert mine["status"] == "REJECTED" and "Kill switch" in mine["rejection_reason"]
+    assert theirs["status"] == "EXECUTED", theirs["rejection_reason"]
+
+
+def test_idempotency_keys_are_scoped_to_the_account(
+    client: SignedClient, db: Session, setup: dict[str, Any]
+) -> None:
+    """Another tenant's key never returns their signal/order: keys are per account."""
+    other = other_users_setup(client, db)
+    key = secrets.token_hex(16)
+    theirs = client.post("/internal/orders", json=ticket(other, idempotency_key=key)).json()
+    mine = client.post("/internal/orders", json=ticket(setup, idempotency_key=key)).json()
+    assert theirs["status"] == "EXECUTED", theirs["rejection_reason"]
+    assert mine["status"] == "EXECUTED", mine["rejection_reason"]
+    assert mine["signal_id"] != theirs["signal_id"]
+    signal = db.get(Signal, uuid.UUID(mine["signal_id"]))
+    assert signal is not None and signal.account_id == setup["account"].id
+    assert count(db, Order) == 2 and count(db, Trade) == 2
+
+
+def test_close_all_closes_only_the_given_users_accounts(
+    client: SignedClient, db: Session, setup: dict[str, Any]
+) -> None:
+    other = other_users_setup(client, db)
+    assert client.post("/internal/orders", json=ticket(setup)).json()["status"] == "EXECUTED"
+    assert client.post("/internal/orders", json=ticket(other)).json()["status"] == "EXECUTED"
+    summary = client.post(
+        "/internal/positions/close-all",
+        json={"actor_label": "owner", "account_ids": [str(setup["account"].id)]},
+    ).json()
+    assert summary == {"closed": 1, "failed": []}
+    db.expire_all()
+    still_open = list(db.scalars(select(Trade).where(Trade.status == TradeStatus.OPEN)))
+    assert [t.account_id for t in still_open] == [other["account"].id]
+    assert client.post(
+        "/internal/positions/close-all", json={"actor_label": "x", "account_ids": []}
+    ).json() == {"closed": 0, "failed": []}

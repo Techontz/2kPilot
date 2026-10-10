@@ -24,7 +24,7 @@ class TwoFactorService
     {
         $secret = $this->google2fa->generateSecretKey(32);
         $user->forceFill(['two_factor_secret' => $secret, 'two_factor_confirmed_at' => null])->save();
-        $uri = $this->google2fa->getQRCodeUrl((string) config('fx.mfa.issuer'), $user->email, $secret);
+        $uri = $this->google2fa->getQRCodeUrl((string) config('tradepilot.mfa.issuer'), $user->email, $secret);
         $svg = (new Writer(new ImageRenderer(new RendererStyle(192, 1), new SvgImageBackEnd)))->writeString($uri);
 
         return ['secret' => $secret, 'otpauth_url' => $uri, 'qr_svg' => $svg];
@@ -113,7 +113,7 @@ class TwoFactorService
     {
         return array_map(
             fn () => strtoupper(Str::random(5).'-'.Str::random(5)),
-            range(1, (int) config('fx.mfa.recovery_codes', 8)),
+            range(1, (int) config('tradepilot.mfa.recovery_codes', 8)),
         );
     }
 }

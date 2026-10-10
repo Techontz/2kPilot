@@ -1,7 +1,7 @@
 """The contract every broker adapter implements.
 
-Adapters are synchronous: the MetaTrader5 package, SQLAlchemy sessions and
-the backtester are all synchronous, and the trading engine runs each
+Adapters are synchronous: SQLAlchemy sessions and the backtester are
+synchronous (Deriv's WebSocket runs on its own reader thread), and the trading engine runs each
 account on its own worker thread. Every method may raise the errors in
 `broker_engine.errors`; nothing else should escape an adapter.
 """
@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from fxrobot.broker_engine.errors import SymbolUnavailableError
+from fxrobot.broker_engine.errors import OrderRejectedError, SymbolUnavailableError
 from fxrobot.broker_engine.models import (
     AccountInfo,
     BrokerCapabilities,
@@ -29,10 +29,11 @@ from fxrobot.broker_engine.models import (
     SymbolInfo,
     Timeframe,
 )
+from fxrobot.domain.contracts import ContractCapabilities, ContractOrder, StakeQuote
 
 
 class BrokerAdapter(ABC):
-    #: Stable identifier matching a `ConnectorType` value (e.g. "mt5_bridge").
+    #: Stable identifier matching a `ConnectorType` value (e.g. "deriv").
     connector_id: str
     #: True for internal simulators. Simulated fills are never shown as broker fills.
     is_simulated: bool = False
@@ -64,8 +65,9 @@ class BrokerAdapter(ABC):
         """The broker's notion of 'now' (UTC). Simulators return simulated time."""
         return datetime.now(UTC)
 
-    def advance(self) -> None:  # noqa: B027 (intentional optional hook)
-        """Called on every engine tick. Simulators move their market forward here."""
+    def advance(self, until: datetime | None = None) -> None:  # noqa: B027 (optional hook)
+        """Called on every engine tick. Simulators move their market forward here,
+        never past `until` (the next close of the finest timeframe a strategy watches)."""
 
     # ── account & market data ────────────────────────────────────────────
     @abstractmethod
@@ -94,6 +96,17 @@ class BrokerAdapter(ABC):
         self, symbol: str, timeframe: Timeframe, start: datetime, end: datetime
     ) -> list[Candle]:
         """CLOSED candles with open time in [start, end), oldest first."""
+
+    # ── contracts (Rise/Fall, Multipliers) ───────────────────────────────
+    def contract_capabilities(self, symbol: str) -> ContractCapabilities:
+        """Which contract families/durations/multipliers this broker offers on `symbol`."""
+        info = self.get_symbol(symbol)
+        return ContractCapabilities(symbol=info.name, spot=True, market_open=info.market_open)
+
+    def quote_contract(self, symbol: str, contract: ContractOrder) -> StakeQuote:
+        """Price a contract without buying it (stake limits, payout). Brokers that
+        trade no contracts refuse."""
+        raise OrderRejectedError(f"{self.connector_id} does not trade contracts")
 
     # ── trading state ────────────────────────────────────────────────────
     @abstractmethod

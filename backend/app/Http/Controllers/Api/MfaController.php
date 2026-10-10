@@ -8,6 +8,7 @@ use App\Http\Controllers\Controller;
 use App\Services\Audit\AuditLogger;
 use App\Services\Mfa\TwoFactorService;
 use App\Services\Notifier;
+use App\Services\Trading\TradingControl;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
@@ -19,6 +20,7 @@ class MfaController extends Controller
         private readonly TwoFactorService $mfa,
         private readonly AuditLogger $audit,
         private readonly Notifier $notifier,
+        private readonly TradingControl $control,
     ) {}
 
     public function setup(Request $request): JsonResponse
@@ -45,7 +47,7 @@ class MfaController extends Controller
             return response()->json(['message' => 'That code is not valid. Check the time on your phone and try again.', 'code' => 'invalid_code'], 422);
         }
         $this->audit->record('auth.mfa.enabled', actor: $user);
-        $this->notifier->notify('security.mfa', "Two-factor authentication turned on for {$user->email}.");
+        $this->notifier->notify('security.mfa', "Two-factor authentication turned on for {$user->email}.", $user->id);
 
         return response()->json(['recovery_codes' => $codes]);
     }
@@ -62,7 +64,8 @@ class MfaController extends Controller
         }
         $this->mfa->disable($user);
         $this->audit->record('auth.mfa.disabled', actor: $user);
-        $this->notifier->notify('security.mfa', "Two-factor authentication turned OFF for {$user->email}.");
+        $this->notifier->notify('security.mfa', "Two-factor authentication turned OFF for {$user->email}.", $user->id);
+        $this->control->revokeLiveIf($user->id, $user, 'two-factor authentication was turned off', fn () => true);
 
         return response()->json(['ok' => true]);
     }

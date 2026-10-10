@@ -3,12 +3,13 @@
 namespace App\Models;
 
 use App\Enums\BacktestStatus;
+use App\Models\Concerns\BelongsToUser;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Backtest extends BaseModel
 {
-    use HasUuids;
+    use BelongsToUser, HasUuids;
 
     const UPDATED_AT = null;
 

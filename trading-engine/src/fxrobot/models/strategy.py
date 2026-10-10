@@ -2,23 +2,49 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, ForeignKey, Index, String, Text, UniqueConstraint, text
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    ForeignKey,
+    Index,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from fxrobot.db.base import Base, TimestampMixin
 from fxrobot.db.types import NOW_DEFAULT, str_enum, utcnow
+from fxrobot.domain.contracts import ContractFamily, ContractSpec
 from fxrobot.domain.trading import AssignmentStatus
 
 
 class Strategy(TimestampMixin, Base):
+    """A strategy. `user_id` NULL = built-in template registered by the engine (shared)."""
+
     __tablename__ = "strategies"
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_strategies_user_name"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     key: Mapped[str] = mapped_column(String(60))  # implementation id, e.g. "trend_pullback"
-    name: Mapped[str] = mapped_column(String(120), unique=True)
+    name: Mapped[str] = mapped_column(String(120))
     description: Mapped[str] = mapped_column(Text, default="")
+    slug: Mapped[str | None] = mapped_column(String(80))  # stable id of a built-in template
+    # template | builder | ai | import | copy
+    source: Mapped[str] = mapped_column(String(16), default="builder")
+    summary: Mapped[str] = mapped_column(String(300), default="")
+    # how_it_works, struggles, suggested_timeframe/symbols/contract, difficulty
+    details: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    copied_from_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("strategies.id", ondelete="SET NULL")
+    )
+    archived_at: Mapped[datetime | None]
 
     versions: Mapped[list[StrategyVersion]] = relationship(
         back_populates="strategy", order_by="StrategyVersion.version"
@@ -36,6 +62,7 @@ class StrategyVersion(Base):
     version: Mapped[int]
     code_version: Mapped[str] = mapped_column(String(20))  # implementation semver
     parameters: Mapped[dict[str, Any]] = mapped_column(JSON)
+    rules_text: Mapped[str | None] = mapped_column(Text)  # plain-English summary (rules)
     notes: Mapped[str] = mapped_column(String(500), default="")
     created_at: Mapped[datetime] = mapped_column(default=utcnow, server_default=NOW_DEFAULT)
     created_by: Mapped[uuid.UUID | None] = mapped_column(
@@ -70,6 +97,34 @@ class StrategyAssignment(TimestampMixin, Base):
     status_reason: Mapped[str | None] = mapped_column(String(300))
     last_bar_evaluated: Mapped[datetime | None]
     last_signal_at: Mapped[datetime | None]
+    # Contract specification (see fxrobot.domain.contracts); SPOT = lots.
+    contract_family: Mapped[ContractFamily] = mapped_column(
+        str_enum(ContractFamily, "assignment_contract_family", 16),
+        default=ContractFamily.SPOT,
+        server_default=text("'SPOT'"),
+    )
+    duration: Mapped[int | None]
+    duration_unit: Mapped[str | None] = mapped_column(String(1))
+    allow_equals: Mapped[bool] = mapped_column(default=False, server_default=text("0"))
+    stake: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    multiplier: Mapped[int | None]
+    take_profit_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    stop_loss_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+
+    def contract_spec(self) -> ContractSpec:
+        """The stored settings, validated (raises ValueError if they are inconsistent)."""
+        return ContractSpec.parse(
+            {
+                "contract_family": self.contract_family.value,
+                "duration": self.duration,
+                "duration_unit": self.duration_unit,
+                "allow_equals": bool(self.allow_equals) or None,
+                "stake": self.stake,
+                "multiplier": self.multiplier,
+                "take_profit_amount": self.take_profit_amount,
+                "stop_loss_amount": self.stop_loss_amount,
+            }
+        )
 
 
 class StrategyEvaluation(Base):

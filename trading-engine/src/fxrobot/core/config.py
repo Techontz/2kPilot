@@ -28,15 +28,16 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    app_name: str = "2kFX trading engine"
+    app_name: str = "2kPilot trading engine"
     app_env: AppEnv = AppEnv.DEVELOPMENT
     log_level: str = "INFO"
     log_format: LogFormat = LogFormat.CONSOLE
 
     # Same MySQL database as the Laravel backend (Laravel owns the schema).
-    database_url: str = "mysql+pymysql://root@127.0.0.1:3306/twokfx?charset=utf8mb4"
+    database_url: str = "mysql+pymysql://root@127.0.0.1:3306/tradepilot?charset=utf8mb4"
     db_pool_size: int = Field(default=10, ge=1)
-    db_max_overflow: int = Field(default=5, ge=0)
+    # Each account tick holds two connections (its session + its account lock).
+    db_max_overflow: int = Field(default=15, ge=0)
 
     # Internal API (called only by Laravel). Bind to loopback.
     engine_host: str = "127.0.0.1"
@@ -57,6 +58,15 @@ class Settings(BaseSettings):
     # Deriv: App ID registered at developers.deriv.com (sent as Deriv-App-ID).
     deriv_app_id: str = ""
     deriv_api_url: str = "https://api.derivws.com"
+
+    # Optional: plain-English strategy drafting with Claude (Anthropic API).
+    # Unset = the feature is switched off (the builder and templates still work).
+    anthropic_api_key: SecretStr = SecretStr("")
+    anthropic_model: str = "claude-opus-5-5"
+
+    @property
+    def ai_drafting_available(self) -> bool:
+        return bool(self.anthropic_api_key.get_secret_value().strip())
 
     @field_validator("log_level")
     @classmethod

@@ -28,6 +28,11 @@ FIELDS = [
     "cooldown_after_losses",
     "cooldown_minutes",
     "max_data_age_seconds",
+    "stake_amount",
+    "max_stake_amount",
+    "max_daily_loss_amount",
+    "max_consecutive_losses",
+    "daily_profit_target_amount",
 ]
 
 

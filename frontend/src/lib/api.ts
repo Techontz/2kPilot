@@ -17,6 +17,10 @@ export class ApiError extends Error {
     readonly code: string,
     message: string,
     readonly fieldErrors: Record<string, string[]> = {},
+    /** Plain-English problems from the trading engine (e.g. an invalid rule set). */
+    readonly problems: string[] = [],
+    /** Seconds from the Retry-After header (429 responses), if any. */
+    readonly retryAfter: number | null = null,
   ) {
     super(message);
     this.name = "ApiError";
@@ -86,11 +90,11 @@ export async function api<T>(path: string, options: Options = {}): Promise<T> {
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") throw error;
-    throw new ApiError(0, "network_error", "Cannot reach the 2kFX server. Check that it is running (make dev).");
+    throw new ApiError(0, "network_error", "Cannot reach the 2kPilot server. Check that it is running (make dev).");
   }
   if (response.status === 204) return undefined as T;
   const payload = (await response.json().catch(() => null)) as
-    | { message?: string; code?: string; errors?: Record<string, string[]> }
+    | { message?: string; code?: string; errors?: Record<string, string[]>; problems?: unknown }
     | null;
   if (!response.ok) {
     if (response.status === 419) csrfReady = null; // token expired: refresh next time
@@ -99,11 +103,22 @@ export async function api<T>(path: string, options: Options = {}): Promise<T> {
       payload?.code ?? (response.status === 422 ? "validation_error" : "http_error"),
       payload?.message ?? `Request failed (${response.status})`,
       payload?.errors ?? {},
+      Array.isArray(payload?.problems) ? payload.problems.map(String) : [],
+      parseRetryAfter(response.headers.get("Retry-After")),
     );
     if (response.status === 401 && !path.startsWith("/auth/")) unauthorizedHandler?.();
     throw error;
   }
   return payload as T;
+}
+
+/** Retry-After as seconds (it may also be an HTTP date); null when absent or unreadable. */
+export function parseRetryAfter(value: string | null, now: number = Date.now()): number | null {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds);
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? null : Math.max(0, Math.ceil((at - now) / 1000));
 }
 
 /** A random key so a confirmed ticket can never be executed twice. */

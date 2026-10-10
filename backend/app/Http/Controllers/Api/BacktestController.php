@@ -7,9 +7,11 @@ use App\Exceptions\DomainException;
 use App\Http\Controllers\Controller;
 use App\Jobs\RunBacktest;
 use App\Models\Backtest;
+use App\Models\Dataset;
 use App\Models\StrategyVersion;
 use App\Services\Audit\AuditLogger;
 use App\Services\Engine\EngineClient;
+use App\Support\ContractSpec;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
@@ -17,17 +19,19 @@ use Illuminate\Validation\Rule;
 /**
  * Backtests: the same strategy and risk code as live trading, fills at the
  * next bar's open (no look-ahead), with spread, commission, slippage and swap.
+ * Contract backtests (Rise/Fall, Multipliers) settle with an ESTIMATED payout
+ * ratio and commission; the default is SPOT (no account, so no Deriv default).
  */
 class BacktestController extends Controller
 {
     public function __construct(private readonly EngineClient $engine, private readonly AuditLogger $audit) {}
 
-    public function index(): JsonResponse
+    public function index(Request $request): JsonResponse
     {
         $this->authorize('viewAny', Backtest::class);
 
-        return response()->json(Backtest::query()->whereNull('parent_id')->latest('created_at')->limit(100)
-            ->get(['id', 'name', 'kind', 'status', 'strategy_key', 'symbol', 'timeframe', 'data_source', 'start', 'end', 'initial_capital', 'progress', 'metrics', 'error', 'created_at', 'finished_at']));
+        return response()->json(Backtest::query()->ownedBy($request->user())->whereNull('parent_id')->latest('created_at')->limit(100)
+            ->get(['id', 'name', 'kind', 'status', 'strategy_key', 'symbol', 'timeframe', 'data_source', 'start', 'end', 'initial_capital', 'progress', 'metrics', 'config', 'error', 'created_at', 'finished_at']));
     }
 
     public function store(Request $request): JsonResponse
@@ -51,13 +55,24 @@ class BacktestController extends Controller
             'train_months' => ['nullable', 'integer', 'between:1,36'],
             'test_months' => ['nullable', 'integer', 'between:1,12'],
             'grid' => ['nullable', 'array'],
-        ]);
-        $version = StrategyVersion::query()->with('strategy')->findOrFail($data['strategy_version_id']);
+            'contract' => ['nullable', 'array'],
+            'payout_ratio' => ['nullable', 'numeric', 'between:0.01,2'],
+            'commission_pct' => ['nullable', 'numeric', 'between:0,10'],
+        ] + ContractSpec::rules('contract.'));
+        $contract = ContractSpec::validate($data, null, 'contract.');
+        // Only strategies and datasets this user can see (their own, or shared).
+        $version = StrategyVersion::query()->with('strategy')
+            ->whereHas('strategy', fn ($q) => $q->visibleTo($request->user()))->findOrFail($data['strategy_version_id']);
+        Dataset::query()->visibleTo($request->user())->findOrFail($data['dataset_id']);
         $created = $this->engine->post('/internal/backtests', array_filter([
             'mode' => $data['mode'],
             'strategy_key' => $version->strategy->key,
             'strategy_version_id' => $version->id,
-            'parameters' => (object) array_merge($version->parameters, $data['parameters'] ?? []),
+            // Without overrides, forward the stored JSON as-is: decoding it into PHP arrays turns empty
+            // objects (e.g. a rule operand's `"params": {}`) into lists, which the engine refuses.
+            'parameters' => empty($data['parameters'])
+                ? json_decode((string) $version->getRawOriginal('parameters'))
+                : (object) array_merge($version->parameters, $data['parameters']),
             'dataset_id' => $data['dataset_id'],
             'start' => $data['start'],
             'end' => $data['end'],
@@ -69,11 +84,14 @@ class BacktestController extends Controller
             'train_months' => $data['train_months'] ?? null,
             'test_months' => $data['test_months'] ?? null,
             'grid' => isset($data['grid']) ? (object) $data['grid'] : null,
+            'contract' => isset($data['contract']) ? (object) $contract : null,
+            'payout_ratio' => (string) ($data['payout_ratio'] ?? '0.95'),
+            'commission_pct' => (string) ($data['commission_pct'] ?? '0'),
             'actor_id' => $request->user()->id,
         ], fn ($v) => $v !== null));
         RunBacktest::dispatch($created['id']);
         $this->audit->record('backtest.started', actor: $request->user(), targetType: 'backtest', targetId: $created['id'],
-            details: ['mode' => $data['mode'], 'strategy' => $version->strategy->key, 'version' => $version->version]);
+            details: ['mode' => $data['mode'], 'strategy' => $version->strategy->key, 'version' => $version->version, 'contract' => $contract['contract_family']]);
 
         return response()->json(Backtest::query()->findOrFail($created['id']), 202);
     }

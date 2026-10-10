@@ -7,12 +7,15 @@ use Database\Factories\UserFactory;
 use Illuminate\Database\Eloquent\Attributes\Hidden;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Laravel\Sanctum\HasApiTokens;
 
 /**
- * A dashboard user. Created from the command line (`php artisan fx:user`).
- * MFA secret and recovery codes are encrypted at rest (cast `encrypted`).
+ * A 2kPilot user. Signs up at /signup or is created with `php artisan tp:user`
+ * (both go through UserProvisioner). Owns their brokers, accounts, risk
+ * profiles, strategies and backtests. MFA secret and recovery codes are
+ * encrypted at rest (cast `encrypted`).
  */
 #[Hidden(['password', 'remember_token', 'two_factor_secret', 'two_factor_recovery_codes'])]
 class User extends Authenticatable
@@ -37,9 +40,14 @@ class User extends Authenticatable
         ];
     }
 
-    public function isOwner(): bool
+    public function isAdmin(): bool
     {
-        return $this->role === UserRole::Owner;
+        return $this->role === UserRole::Admin;
+    }
+
+    public function tradingState(): HasOne
+    {
+        return $this->hasOne(UserTradingState::class);
     }
 
     public function hasMfa(): bool

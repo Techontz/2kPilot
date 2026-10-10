@@ -8,6 +8,7 @@ use App\Enums\ConnectionStatus;
 use App\Enums\ConnectorType;
 use App\Exceptions\DomainException;
 use App\Models\BrokerConnection;
+use App\Models\Dataset;
 use App\Models\Order;
 use App\Models\RiskProfile;
 use App\Models\Trade;
@@ -18,10 +19,13 @@ use App\Services\Engine\EngineClient;
 use App\Services\Engine\EngineException;
 use App\Services\Notifier;
 use App\Services\Security\BrokerVault;
+use App\Services\Trading\TradingControl;
 use Illuminate\Support\Facades\DB;
 
 /**
- * The Broker Center: 2kFX → Broker Manager → Broker Adapter → Broker → Account.
+ * The Broker Center: 2kPilot → Broker Manager → Broker Adapter → Broker → Account.
+ *
+ * Every connection and account belongs to the user who added it.
  *
  * Laravel owns the wizard, the stored connections and the encrypted secrets.
  * The trading engine proves a connection works (test) and keeps it alive.
@@ -42,6 +46,7 @@ class BrokerService
         private readonly BrokerVault $vault,
         private readonly AuditLogger $audit,
         private readonly Notifier $notifier,
+        private readonly TradingControl $control,
     ) {}
 
     /** The connector catalogue for the wizard, with setup status. */
@@ -51,7 +56,7 @@ class BrokerService
         foreach (config('brokers') as $id => $entry) {
             $status = 'available';
             $detail = null;
-            if ($id === 'deriv' && ! config('fx.deriv.app_id')) {
+            if ($id === 'deriv' && ! config('tradepilot.deriv.app_id')) {
                 $status = 'needs_setup';
                 $detail = 'Add your Deriv App ID (DERIV_APP_ID) to backend/.env and trading-engine/.env. Register an app at developers.deriv.com.';
             }
@@ -78,10 +83,11 @@ class BrokerService
     /**
      * Split submitted values into non-secret settings and secrets, using the
      * catalogue's `secret` flags. Secrets are encrypted immediately.
+     * A paper "replay" may only use datasets the user can see.
      *
      * @return array{0: array<string, mixed>, 1: string|null}
      */
-    public function prepare(ConnectorType $type, array $values, ?array $oauthCredentials = null): array
+    public function prepare(ConnectorType $type, array $values, ?array $oauthCredentials = null, ?User $owner = null): array
     {
         $settings = [];
         $secrets = [];
@@ -100,6 +106,10 @@ class BrokerService
             if (array_key_exists($extra, $values)) {
                 $settings[$extra] = $values[$extra];
             }
+        }
+        $replay = array_values((array) ($settings['dataset_symbol_map'] ?? []));
+        if ($replay && ($owner === null || Dataset::query()->visibleTo($owner)->whereKey($replay)->count() !== count(array_unique($replay)))) {
+            throw new DomainException('Dataset not found.', 404, 'not_found');
         }
         if ($type === ConnectorType::Deriv) {
             $secrets = $oauthCredentials ?? ['token' => (string) ($secrets['token'] ?? ''), 'token_kind' => 'pat'];
@@ -142,7 +152,7 @@ class BrokerService
         if ($expected === AccountEnvironment::Live && ! $acknowledgeLive) {
             throw DomainException::forbidden('Adding a LIVE (real-money) account requires explicit acknowledgement.', 'live_ack_required');
         }
-        if ($riskProfileId !== null && ! RiskProfile::query()->whereKey($riskProfileId)->exists()) {
+        if ($riskProfileId !== null && ! RiskProfile::query()->ownedBy($actor)->whereKey($riskProfileId)->exists()) {
             throw new DomainException('Risk profile not found.', 404, 'not_found');
         }
         try {
@@ -166,11 +176,11 @@ class BrokerService
         $label = trim($label) ?: match ($type) {
             ConnectorType::Paper => 'Paper account',
             ConnectorType::Deriv => 'Deriv '.$info['account_id'],
-            ConnectorType::Mt5Bridge => 'MT5 '.$info['account_id'],
         };
 
         $account = DB::transaction(function () use ($actor, $type, $expected, $label, $outcome, $sealed, $info, $riskProfileId) {
             $connection = BrokerConnection::query()->create([
+                'user_id' => $actor->id,
                 'label' => mb_substr($label, 0, 120),
                 'connector_type' => $type,
                 'expected_environment' => $expected,
@@ -178,7 +188,6 @@ class BrokerService
                 'credentials_encrypted' => $sealed,
                 'status' => ConnectionStatus::Disconnected,
                 'status_detail' => 'Verified — connecting…',
-                'created_by' => $actor->id,
             ]);
             $brokerAccountId = $type === ConnectorType::Paper
                 ? 'PAPER-'.strtoupper(substr(str_replace('-', '', $connection->id), -8))
@@ -186,6 +195,7 @@ class BrokerService
 
             return TradingAccount::query()->create([
                 'connection_id' => $connection->id,
+                'user_id' => $actor->id,
                 'broker_account_id' => $brokerAccountId,
                 'label' => mb_substr($label, 0, 120),
                 'name' => mb_substr((string) ($info['name'] ?? ''), 0, 200),
@@ -208,7 +218,10 @@ class BrokerService
             details: ['type' => $type->value, 'environment' => $account->environment->value, 'account' => $account->broker_account_id]);
         $this->notifier->notify('broker.connected',
             "{$account->label} ({$account->environment->value}) verified and saved. Trading is disabled until you enable it.",
-            $account->id);
+            $account->user_id, $account->id);
+        if ($account->environment === AccountEnvironment::Live) { // LIVE authorisation never stretches to a new real-money account
+            $this->control->revokeLiveIf($actor->id, $actor, "a new LIVE account \"{$account->label}\" was added", fn () => true);
+        }
         $this->connect($account->connection, $actor, audit: false);
 
         return $account->fresh();
@@ -253,7 +266,7 @@ class BrokerService
         }
         $connection->forceFill(['status' => ConnectionStatus::Disconnected, 'status_detail' => 'Disconnected by '.$actor->email])->save();
         $this->audit->record('broker.disconnected', actor: $actor, targetType: 'broker_connection', targetId: $connection->id);
-        $this->notifier->notify('broker.disconnected', "{$connection->label} disconnected by {$actor->email}. Trading on it is disabled.");
+        $this->notifier->notify('broker.disconnected', "{$connection->label} disconnected by {$actor->email}. Trading on it is disabled.", $connection->user_id);
     }
 
     /** Remove a connection. With trading history it is archived instead (history is never erased). */
@@ -295,11 +308,16 @@ class BrokerService
     public function updateAccount(TradingAccount $account, User $actor, array $changes): TradingAccount
     {
         $applied = [];
+        $profileChanged = false;
         if (array_key_exists('label', $changes) && trim((string) $changes['label']) !== '') {
             $account->label = mb_substr(trim($changes['label']), 0, 120);
             $applied['label'] = $account->label;
         }
         if (array_key_exists('risk_profile_id', $changes)) {
+            if ($changes['risk_profile_id'] !== null && ! RiskProfile::query()->whereKey($changes['risk_profile_id'])->where('user_id', $account->user_id)->exists()) {
+                throw new DomainException('Risk profile not found.', 404, 'not_found');
+            }
+            $profileChanged = $account->risk_profile_id !== $changes['risk_profile_id'];
             $account->risk_profile_id = $changes['risk_profile_id'];
             $applied['risk_profile_id'] = $changes['risk_profile_id'];
         }
@@ -323,6 +341,13 @@ class BrokerService
         if ($applied) {
             $this->audit->record('account.updated', actor: $actor, targetType: 'trading_account', targetId: $account->id, details: $applied);
         }
+        if ($profileChanged) {
+            $this->control->revokeLiveIf($account->user_id, $actor, "the risk profile of \"{$account->label}\" was changed",
+                fn ($state) => $state->live_authorized_account_id === $account->id);
+        }
+        if (($applied['trading_enabled'] ?? false) === true) {
+            $this->control->accountTradingEnabled($account, $actor);
+        }
 
         return $account;
     }
@@ -334,7 +359,7 @@ class BrokerService
         return match (true) {
             $account->risk_profile_id === null => 'Assign a risk profile before enabling trading.',
             $account->environment === AccountEnvironment::Unknown => 'Accounts of unknown type (demo/live) can never trade.',
-            $account->environment === AccountEnvironment::Live && ! config('fx.live_trading_enabled') => 'LIVE trading is locked on this server (LIVE_TRADING_ENABLED=false).',
+            $account->environment === AccountEnvironment::Live && ! config('tradepilot.live_trading_enabled') => 'LIVE trading is locked on this server (LIVE_TRADING_ENABLED=false).',
             $connection !== null && ! $connection->is_enabled => 'Reconnect this broker before enabling trading.',
             default => null,
         };

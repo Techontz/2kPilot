@@ -1,4 +1,7 @@
-"""Datasets (import, synthetic generation, broker download) and live market views."""
+"""Datasets (import, synthetic generation, broker download) and live market views.
+
+A dataset belongs to the user who created it (`user_id`); None = shared.
+"""
 
 from __future__ import annotations
 
@@ -15,12 +18,14 @@ from fxrobot.domain.market import Timeframe
 from fxrobot.domain.trading import DataSource
 from fxrobot.market_data import store
 from fxrobot.market_data.csv_import import CsvFormatError, parse_csv
-from fxrobot.market_data.resample import resample
-from fxrobot.market_data.synthetic import DEFAULT_SPECS, SyntheticSeries
+from fxrobot.market_data.synthetic import DEFAULT_SPECS
+from fxrobot.market_data.synthetic_feed import SyntheticFeed
 from fxrobot.market_data.validation import validate_candles
 from fxrobot.models import Dataset
 
 MAX_SYNTHETIC_DAYS = 3650
+# Short candles make many bars: cap the period so a dataset stays ≈100k bars or fewer.
+MAX_SYNTHETIC_DAYS_BY_TIMEFRAME = {Timeframe.M1: 60, Timeframe.M5: 365}
 DOWNLOAD_CHUNK_BARS = 5000
 
 
@@ -40,10 +45,11 @@ def import_csv(
     content: str,
     utc_offset_hours: float,
     filename: str,
+    user_id: uuid.UUID | None = None,
 ) -> tuple[Dataset, dict[str, object]]:
     symbol = symbol.strip().upper()
-    if not symbol.isalnum() or not 3 <= len(symbol) <= 20:
-        raise DatasetError("Symbol must be 3–20 letters/digits, e.g. EURUSD")
+    if not symbol.replace("_", "").isalnum() or not 3 <= len(symbol) <= 20:
+        raise DatasetError("Symbol must be 3–20 letters/digits (or _), e.g. EURUSD or R_100")
     try:
         parsed = parse_csv(content, utc_offset_hours=utc_offset_hours)
     except CsvFormatError as exc:
@@ -63,6 +69,7 @@ def import_csv(
         source=DataSource.CSV,
         source_ref=filename[:120],
         description=f"Imported from {filename[:80]} (UTC offset {utc_offset_hours:+g}h)",
+        user_id=user_id,
     )
     count = store.upsert_candles(db, dataset, parsed.candles)
     db.commit()
@@ -84,19 +91,19 @@ def generate_synthetic(
     days: int,
     seed: int,
     now: datetime | None = None,
+    user_id: uuid.UUID | None = None,
 ) -> Dataset:
     spec = DEFAULT_SPECS.get(symbol.upper())
     if spec is None:
         raise DatasetError(f"Synthetic data available for: {', '.join(sorted(DEFAULT_SPECS))}")
-    if not 30 <= days <= MAX_SYNTHETIC_DAYS:
-        raise DatasetError("Days must be between 30 and 3650")
-    if timeframe.seconds < Timeframe.M15.seconds:
-        raise DatasetError("Synthetic data is generated at M15 or coarser")
+    max_days = MAX_SYNTHETIC_DAYS_BY_TIMEFRAME.get(timeframe, MAX_SYNTHETIC_DAYS)
+    if not 30 <= days <= max_days:
+        raise DatasetError(f"Days must be between 30 and {max_days} for {timeframe} candles")
     end = Timeframe.D1.floor(now or datetime.now(UTC))
     start = end - timedelta(days=days)
-    series = SyntheticSeries(spec, seed, start, Timeframe.M15)
-    base = series.bars(start, end)
-    candles = base if timeframe is Timeframe.M15 else resample(base, timeframe, until=end)
+    # The same 1-minute feed as Paper accounts: same seed → the very same prices,
+    # on any candle size.
+    candles = SyntheticFeed(spec, seed).bars(timeframe, start, end)
     dataset = store.get_or_create_dataset(
         db,
         symbol=spec.symbol,
@@ -104,6 +111,7 @@ def generate_synthetic(
         source=DataSource.SYNTHETIC,
         source_ref=f"seed-{seed}",
         description="SYNTHETIC — generated for testing. NOT real market data.",
+        user_id=user_id,
     )
     store.upsert_candles(db, dataset, candles)
     db.commit()
@@ -119,9 +127,12 @@ def download_from_broker(
     timeframe: Timeframe,
     start: datetime,
     end: datetime,
+    user_id: uuid.UUID | None = None,
 ) -> Dataset:
     if adapter.is_simulated:
-        raise DatasetError("Paper connections don't provide real history; import a CSV or use MT5.")
+        raise DatasetError(
+            "Paper connections don't provide real history; import a CSV or use a Deriv account."
+        )
     if end <= start:
         raise DatasetError("End must be after start")
     info = adapter.get_symbol(symbol)
@@ -132,6 +143,7 @@ def download_from_broker(
         source=DataSource.BROKER,
         source_ref=str(connection_id),
         description=f"Downloaded from broker ({symbol})",
+        user_id=user_id,
     )
     cursor, total = start, 0
     chunk = timeframe.delta * DOWNLOAD_CHUNK_BARS

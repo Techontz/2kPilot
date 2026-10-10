@@ -23,7 +23,7 @@ class MarketController extends Controller
     {
         $data = $request->validate(['account_id' => ['required', 'uuid'], 'category' => ['nullable', 'string', 'max:30']]);
         $account = TradingAccount::query()->with('connection')->findOrFail($data['account_id']);
-        $this->authorize('view', $account);
+        $this->authorize('use', $account); // asks the broker: the owner only
         $symbols = BrokerSymbol::query()->where('connection_id', $account->connection_id)
             ->when($data['category'] ?? null, fn ($q, $c) => $q->where('category', $c))
             ->orderBy('category')->orderBy('canonical')->get();
@@ -61,7 +61,7 @@ class MarketController extends Controller
             'symbols' => ['required', 'string', 'max:2000'],
         ]);
         $account = TradingAccount::query()->findOrFail($data['account_id']);
-        $this->authorize('view', $account);
+        $this->authorize('use', $account); // asks the broker: the owner only
 
         return response()->json($this->engine->get("/internal/accounts/{$account->id}/quotes", ['symbols' => $data['symbols']]));
     }
@@ -73,7 +73,7 @@ class MarketController extends Controller
             'timeframe' => ['nullable', Rule::in(['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1'])],
         ]);
         $account = TradingAccount::query()->with('connection')->findOrFail($data['account_id']);
-        $this->authorize('view', $account);
+        $this->authorize('use', $account); // asks the broker: the owner only
         $timeframe = $data['timeframe'] ?? 'H1';
 
         return response()->json([
@@ -84,6 +84,23 @@ class MarketController extends Controller
             'provider' => config("brokers.{$account->connection->connector_type->value}.name"),
             'simulated' => $account->isPaper(),
         ]);
+    }
+
+    /**
+     * Which contracts the broker offers on a symbol (families, durations,
+     * multipliers) and the default the dashboard should preselect.
+     */
+    public function contracts(Request $request): JsonResponse
+    {
+        $data = $request->validate(['account_id' => ['required', 'uuid'], 'symbol' => ['required', 'string', 'max:40']]);
+        $account = TradingAccount::query()->ownedBy($request->user())->with('connection')->findOrFail($data['account_id']);
+        $this->authorize('use', $account); // asks the broker: the owner only
+        $offer = $this->engine->get("/internal/accounts/{$account->id}/contracts", ['symbol' => $data['symbol']]);
+
+        return response()->json([
+            'account' => ['id' => $account->id, 'label' => $account->label, 'environment' => $account->environment->value],
+            'provider' => config("brokers.{$account->connection->connector_type->value}.name"),
+        ] + $offer);
     }
 
     public function session(): JsonResponse

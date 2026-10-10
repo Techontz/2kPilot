@@ -13,6 +13,8 @@ use Illuminate\Support\Facades\Schema;
  * - An account's environment (PAPER / DEMO / LIVE) is what the BROKER reported,
  *   not what the user typed.
  * - New accounts are saved with trading disabled.
+ * - A connection and its accounts belong to one user. `trading_accounts.user_id`
+ *   repeats the connection's owner because nearly every query filters by it.
  */
 return new class extends Migration
 {
@@ -20,8 +22,9 @@ return new class extends Migration
     {
         Schema::create('broker_connections', function (Blueprint $table) {
             $table->uuid('id')->primary();
+            $table->foreignUuid('user_id')->constrained('users')->cascadeOnDelete();
             $table->string('label', 120);
-            $table->string('connector_type', 24);          // paper | deriv | mt5_bridge
+            $table->string('connector_type', 24);          // paper | deriv
             $table->string('expected_environment', 16);    // what the user selected
             $table->json('settings');                      // non-secret configuration
             $table->text('credentials_encrypted')->nullable();
@@ -30,16 +33,16 @@ return new class extends Migration
             $table->boolean('is_enabled')->default(true);
             $table->dateTime('last_connected_at', 6)->nullable();
             $table->dateTime('last_error_at', 6)->nullable();
-            $table->foreignUuid('created_by')->nullable()->constrained('users')->nullOnDelete();
             $table->utcTimestamps();
         });
-        DB::statement("ALTER TABLE broker_connections ADD CONSTRAINT ck_broker_connections_type CHECK (connector_type IN ('paper','deriv','mt5_bridge'))");
+        DB::statement("ALTER TABLE broker_connections ADD CONSTRAINT ck_broker_connections_type CHECK (connector_type IN ('paper','deriv'))");
         DB::statement("ALTER TABLE broker_connections ADD CONSTRAINT ck_broker_connections_env CHECK (expected_environment IN ('PAPER','DEMO','LIVE'))");
         DB::statement("ALTER TABLE broker_connections ADD CONSTRAINT ck_broker_connections_status CHECK (status IN ('CONNECTED','DISCONNECTED','RECONNECTING','ERROR'))");
 
         Schema::create('trading_accounts', function (Blueprint $table) {
             $table->uuid('id')->primary();
             $table->foreignUuid('connection_id')->constrained('broker_connections')->cascadeOnDelete();
+            $table->foreignUuid('user_id')->constrained('users')->cascadeOnDelete(); // = connection owner
             $table->string('broker_account_id', 64);
             $table->string('label', 120);
             $table->string('name', 200)->default('');
@@ -61,6 +64,12 @@ return new class extends Migration
             $table->unique(['connection_id', 'broker_account_id'], 'uq_trading_accounts_login');
         });
         DB::statement("ALTER TABLE trading_accounts ADD CONSTRAINT ck_trading_accounts_env CHECK (environment IN ('PAPER','DEMO','LIVE','UNKNOWN'))");
+
+        // user_trading_states (created earlier) points at the LIVE-authorised account and profile.
+        Schema::table('user_trading_states', function (Blueprint $table) {
+            $table->foreign('live_authorized_account_id', 'fk_uts_live_account')->references('id')->on('trading_accounts')->nullOnDelete();
+            $table->foreign('live_authorized_profile_id', 'fk_uts_live_profile')->references('id')->on('risk_profiles')->nullOnDelete();
+        });
 
         Schema::create('account_snapshots', function (Blueprint $table) {
             $table->id();
@@ -105,6 +114,10 @@ return new class extends Migration
 
     public function down(): void
     {
+        Schema::table('user_trading_states', function (Blueprint $table) {
+            $table->dropForeign('fk_uts_live_account');
+            $table->dropForeign('fk_uts_live_profile');
+        });
         Schema::dropIfExists('paper_states');
         Schema::dropIfExists('broker_symbols');
         Schema::dropIfExists('account_snapshots');

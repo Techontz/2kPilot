@@ -2,12 +2,13 @@
 
 namespace App\Models;
 
+use App\Models\Concerns\BelongsToUser;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 
-/** A stored candle series (CSV import, broker download, or SYNTHETIC test data). */
+/** A stored candle series (CSV import, broker download, or SYNTHETIC test data). user_id NULL = shared. */
 class Dataset extends BaseModel
 {
-    use HasUuids;
+    use BelongsToUser, HasUuids;
 
     protected function casts(): array
     {

@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
@@ -12,7 +13,12 @@ from fxrobot.broker_engine.models import (
     SymbolInfo,
     Timeframe,
 )
-from fxrobot.domain.modes import AccountEnvironment, TradingMode, environment_permitted
+from fxrobot.domain.modes import (
+    AccountEnvironment,
+    TradingControls,
+    TradingMode,
+    environment_permitted,
+)
 
 
 def test_incomplete_adapter_cannot_be_instantiated() -> None:
@@ -39,11 +45,49 @@ def test_unknown_account_environment_is_treated_as_real_money() -> None:
         (TradingMode.DEMO, AccountEnvironment.UNKNOWN, False),
         (TradingMode.LIVE, AccountEnvironment.LIVE, True),
         (TradingMode.LIVE, AccountEnvironment.UNKNOWN, False),
-        (TradingMode.BACKTEST, AccountEnvironment.PAPER, False),
+        # LIVE mode trades real-money accounts only.
+        (TradingMode.LIVE, AccountEnvironment.DEMO, False),
+        (TradingMode.LIVE, AccountEnvironment.PAPER, False),
     ],
 )
 def test_environment_permitted(mode: TradingMode, env: AccountEnvironment, allowed: bool) -> None:
     assert environment_permitted(mode, env) is allowed
+
+
+@pytest.mark.parametrize(
+    ("controls", "env", "reason"),
+    [
+        ({}, AccountEnvironment.PAPER, None),
+        ({"platform_halted": True}, AccountEnvironment.PAPER, "halted platform-wide"),
+        ({"kill_switch_engaged": True}, AccountEnvironment.PAPER, "trading stopped"),
+        ({}, AccountEnvironment.LIVE, "LIVE account not traded in DEMO mode"),
+        ({"mode": TradingMode.LIVE}, AccountEnvironment.DEMO, "DEMO account not traded in LIVE"),
+        ({"mode": TradingMode.LIVE, "live_authorized": True}, AccountEnvironment.LIVE, "hard lock"),
+        (
+            {"mode": TradingMode.LIVE, "live_trading_locked": False},
+            AccountEnvironment.LIVE,
+            "not been authorised",
+        ),
+        (
+            {"mode": TradingMode.LIVE, "live_trading_locked": False, "live_authorized": True},
+            AccountEnvironment.LIVE,
+            None,
+        ),
+    ],
+)
+def test_trading_controls_blocking_reason(
+    controls: dict[str, Any], env: AccountEnvironment, reason: str | None
+) -> None:
+    values: dict[str, Any] = {
+        "platform_halted": False,
+        "kill_switch_engaged": False,
+        "mode": TradingMode.DEMO,
+        "live_authorized": False,
+        "live_trading_locked": True,
+        **controls,
+    }
+    found = TradingControls(**values).blocking_reason(env)
+    assert (found is None) if reason is None else (found is not None and reason in found)
 
 
 def _order(**overrides: object) -> OrderRequest:

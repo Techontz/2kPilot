@@ -5,16 +5,16 @@ import { defineConfig } from "@playwright/test";
 /**
  * Browser E2E tests against the REAL stack — Laravel + trading engine + MySQL +
  * the production Next.js build — in the locally installed Google Chrome.
- * Run with `make e2e`. The E2E database (twokfx_e2e) is recreated every run.
+ * Run with `make e2e`. The E2E database (tradepilot_e2e) is recreated every run.
  */
 const BACKEND_PORT = Number(process.env.E2E_BACKEND_PORT ?? 8432);
 const ENGINE_PORT = Number(process.env.E2E_ENGINE_PORT ?? 8433);
 const FRONTEND_PORT = Number(process.env.E2E_FRONTEND_PORT ?? 3432);
 const DB_PORT = process.env.E2E_DB_PORT ?? "3308";
-const DB_NAME = "twokfx_e2e";
+const DB_NAME = "tradepilot_e2e";
 const backendDir = path.resolve(__dirname, "../backend");
 const engineDir = path.resolve(__dirname, "../trading-engine");
-export const E2E_USER = { email: "e2e@2kfx.local", password: "E2e-Verify-Passw0rd" };
+export const E2E_USER = { email: "e2e@tradepilot.local", password: "E2e-Verify-Passw0rd" };
 
 const laravelEnv = {
   DB_PORT,
@@ -24,14 +24,17 @@ const laravelEnv = {
   SANCTUM_STATEFUL_DOMAINS: `127.0.0.1:${FRONTEND_PORT},localhost:${FRONTEND_PORT}`,
   APP_URL: `http://127.0.0.1:${BACKEND_PORT}`,
   LOG_LEVEL: "warning",
-  FX_LOGIN_ATTEMPTS: "200", // the suite signs in many times; production keeps 5
-  PHP_CLI_SERVER_WORKERS: "4",
+  TP_LOGIN_ATTEMPTS: "200", // the suite signs in many times; production keeps 5
+  TP_LOGIN_ATTEMPTS_PER_IP: "1000", // …all from 127.0.0.1; production keeps 50
+  TP_API_PER_MINUTE: "5000", // the layout test reloads every page quickly; production keeps 300
+  TP_STREAM_PER_MINUTE: "1000",
+  PHP_CLI_SERVER_WORKERS: "8",
 };
 
 if (!process.env.E2E_SKIP_PREPARE) {
   execSync(`mysql -h127.0.0.1 -P${DB_PORT} -uroot -e "DROP DATABASE IF EXISTS ${DB_NAME}; CREATE DATABASE ${DB_NAME} CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"`);
   execSync("php artisan migrate:fresh --force --no-interaction", { cwd: backendDir, env: { ...process.env, ...laravelEnv }, stdio: "inherit" });
-  execSync(`php artisan fx:user --email=${E2E_USER.email} --name="E2E Owner" --password-stdin`, {
+  execSync(`php artisan tp:user --email=${E2E_USER.email} --name="E2E User" --password-stdin`, {
     cwd: backendDir, env: { ...process.env, ...laravelEnv }, input: `${E2E_USER.password}\n`, stdio: ["pipe", "inherit", "inherit"],
   });
   process.env.E2E_SKIP_PREPARE = "1"; // workers re-evaluate this file; prepare only once
@@ -60,7 +63,9 @@ export default defineConfig({
       reuseExistingServer: false,
     },
     {
-      command: `php artisan serve --host=127.0.0.1 --port=${BACKEND_PORT}`,
+      // --no-reload: otherwise `artisan serve` ignores PHP_CLI_SERVER_WORKERS and one open
+      // live-update stream (/api/stream) would block every other request.
+      command: `php artisan serve --no-reload --host=127.0.0.1 --port=${BACKEND_PORT}`,
       cwd: backendDir,
       url: `http://127.0.0.1:${BACKEND_PORT}/up`,
       env: laravelEnv,

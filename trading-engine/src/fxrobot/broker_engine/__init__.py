@@ -2,7 +2,7 @@
 
 Everything above this package (strategies, risk, execution) talks to the
 `BrokerAdapter` interface and broker-neutral DTOs. Broker specifics
-(Deriv, MetaTrader 5 via the Windows bridge, the internal paper simulator)
+(Deriv, the internal paper simulator)
 live only in `adapters/`.
 """
 

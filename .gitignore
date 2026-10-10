@@ -45,3 +45,10 @@ playwright-report/
 logs/
 *.log
 data/
+
+# ── Local dev MySQL (make mysql) ──────────────────────
+.devdata/
+
+# ── Local archives ────────────────────────────────────
+Archive.zip
+trading-engine.zip

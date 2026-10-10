@@ -8,6 +8,7 @@ use App\Services\Engine\EngineException;
 use App\Services\Security\BrokerVault;
 use App\Services\Trading\TradingControl;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 /** Settings → System: what is configured, and is everything healthy? */
@@ -19,7 +20,7 @@ class SystemController extends Controller
         private readonly BrokerVault $vault,
     ) {}
 
-    public function status(): JsonResponse
+    public function status(Request $request): JsonResponse
     {
         try {
             $engine = $this->engine->get('/internal/health');
@@ -31,12 +32,12 @@ class SystemController extends Controller
             'app' => config('app.name'),
             'environment' => app()->environment(),
             'database' => DB::connection()->getDatabaseName() ? 'ok' : 'error',
-            'trading' => $this->control->status()->toArray(),
+            'trading' => $this->control->status($request->user())->toArray(),
             'engine' => $engine,
-            'live_trading_enabled' => (bool) config('fx.live_trading_enabled'),
+            'live_trading_enabled' => (bool) config('tradepilot.live_trading_enabled'),
             'broker_vault_configured' => $this->vault->configured(),
-            'deriv_app_id_configured' => (bool) config('fx.deriv.app_id'),
-            'mfa_required' => (bool) config('fx.mfa.required'),
+            'deriv_app_id_configured' => (bool) config('tradepilot.deriv.app_id'),
+            'mfa_required' => (bool) config('tradepilot.mfa.required'),
             'queue_connection' => config('queue.default'),
         ]);
     }

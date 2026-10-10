@@ -2,9 +2,9 @@
 
 namespace App\Policies;
 
-use App\Policies\Concerns\OwnerWrites;
+use App\Policies\Concerns\OwnsRecords;
 
 class StrategyPolicy
 {
-    use OwnerWrites;
+    use OwnsRecords;
 }

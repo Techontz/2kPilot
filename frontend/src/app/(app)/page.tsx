@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
-import { OverviewScreen } from "@/features/overview/OverviewScreen";
+import { HomeScreen } from "@/features/home/HomeScreen";
 
-export const metadata: Metadata = { title: "Overview" };
+export const metadata: Metadata = { title: "Home" };
 
-export default function OverviewPage() {
-  return <OverviewScreen />;
+export default function HomePage() {
+  return <HomeScreen />;
 }

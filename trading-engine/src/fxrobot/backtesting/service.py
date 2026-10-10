@@ -21,9 +21,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from fxrobot.analytics import metrics as metrics_mod
-from fxrobot.backtesting.engine import BacktestConfig, Backtester, BacktestError, CostModel
+from fxrobot.backtesting.engine import (
+    BacktestConfig,
+    Backtester,
+    BacktestError,
+    CostModel,
+    expiry_bars,
+)
 from fxrobot.core.errors import NotFoundError, UnprocessableError
 from fxrobot.db.types import utcnow
+from fxrobot.domain.contracts import ContractFamily, ContractSpec
 from fxrobot.domain.market import Candle, SymbolInfo, Timeframe
 from fxrobot.domain.trading import BacktestKind, BacktestStatus, DataSource
 from fxrobot.market_data import store
@@ -61,14 +68,50 @@ class BacktestRequest:
     train_months: int = 6
     test_months: int = 2
     grid: dict[str, list[Any]] = field(default_factory=dict)
+    contract: dict[str, Any] = field(default_factory=dict)  # canonical spec; {} = SPOT
+    payout_ratio: Decimal = Decimal("0.95")  # Rise/Fall estimate
+    commission_pct: Decimal = Decimal(0)  # Multipliers estimate
+
+
+# Deriv synthetic indices trade around the clock (no FX weekend).
+SYNTHETIC_PREFIXES = ("R_", "1HZ", "BOOM", "CRASH", "JD", "RDB", "stpRNG")
 
 
 def symbol_spec(symbol: str, candles: list[Candle]) -> SymbolInfo:
     spec = DEFAULT_SPECS.get(symbol)
     if spec is not None:
         return spec.symbol_info()
+    if symbol.startswith(SYNTHETIC_PREFIXES):
+        return index_spec(symbol, candles)
     raise BacktestRequestError(
-        f"No contract specification for {symbol}; supported: {', '.join(sorted(DEFAULT_SPECS))}"
+        f"No contract specification for {symbol}; supported: "
+        f"{', '.join(sorted(DEFAULT_SPECS))} and Deriv synthetic indices (R_10 … 1HZ100V)"
+    )
+
+
+def index_spec(symbol: str, candles: list[Candle]) -> SymbolInfo:
+    """A 24/7 index quoted in USD (e.g. data downloaded from Deriv for R_100)."""
+    digits = 2
+    for candle in candles[:500]:
+        exponent = candle.close.normalize().as_tuple().exponent
+        if isinstance(exponent, int):
+            digits = max(digits, min(6, -exponent))
+    point = Decimal(1).scaleb(-digits)
+    return SymbolInfo(
+        name=symbol,
+        description=f"{symbol} (synthetic index)",
+        base_currency=symbol,
+        quote_currency="USD",
+        digits=digits,
+        point=point,
+        contract_size=Decimal(1),
+        volume_min=Decimal("0.01"),
+        volume_max=Decimal(1000),
+        volume_step=Decimal("0.01"),
+        trade_allowed=True,
+        canonical=symbol,
+        category="synthetic",
+        market_open=True,
     )
 
 
@@ -114,7 +157,7 @@ class BacktestService:
         self,
         db: Session,
         req: BacktestRequest,
-        actor_id: uuid.UUID | None = None,
+        user_id: uuid.UUID,
         *,
         run_async: bool = True,
     ) -> Backtest:
@@ -133,9 +176,22 @@ class BacktestService:
         except (ValueError, ArithmeticError) as exc:
             raise BacktestRequestError(f"Invalid risk settings: {exc}") from exc
         costs = cost_model(req.costs)
+        try:
+            contract = ContractSpec.parse(req.contract)
+        except ValueError as exc:
+            raise BacktestRequestError(f"Invalid contract settings: {exc}") from exc
+        if not Decimal("0.01") <= req.payout_ratio <= Decimal(2):
+            raise BacktestRequestError("payout_ratio must be between 0.01 and 2")
+        if not Decimal(0) <= req.commission_pct <= Decimal(10):
+            raise BacktestRequestError("commission_pct must be between 0 and 10")
         dataset = db.get(Dataset, req.dataset_id)
         if dataset is None:
             raise NotFoundError("Dataset not found")
+        if contract.contract_family is ContractFamily.RISE_FALL:
+            try:
+                expiry_bars(contract, dataset.timeframe)
+            except BacktestError as exc:
+                raise BacktestRequestError(str(exc)) from exc
         if req.end <= req.start:
             raise BacktestRequestError("End must be after start")
         if req.initial_capital <= 0:
@@ -180,8 +236,12 @@ class BacktestService:
                 "train_months": req.train_months,
                 "test_months": req.test_months,
                 "grid": grid,
+                "contract": contract.as_json(),
+                "payout_ratio": str(req.payout_ratio),
+                "payout_ratio_is_estimate": contract.contract_family is ContractFamily.RISE_FALL,
+                "commission_pct": str(req.commission_pct),
             },
-            created_by=actor_id,
+            user_id=user_id,
             created_at=utcnow(),
         )
         db.add(row)
@@ -281,6 +341,9 @@ class BacktestService:
             initial_capital=row.initial_capital,
             limits=RiskLimits.from_mapping(row.risk_settings),
             costs=cost_model(row.costs),
+            contract=ContractSpec.parse(row.config.get("contract")),
+            payout_ratio=Decimal(str(row.config.get("payout_ratio", "0.95"))),
+            commission_pct=Decimal(str(row.config.get("commission_pct", "0"))),
         )
         return Backtester(cfg, candles, row.timeframe).run(progress)
 
@@ -310,6 +373,10 @@ class BacktestService:
                     stop_loss=t.stop_loss,
                     take_profit=t.take_profit,
                     risk_amount=t.risk_amount,
+                    contract_type=t.contract_type.value if t.contract_type else None,
+                    stake=t.stake,
+                    payout=t.payout,
+                    outcome=t.outcome,
                     gross_pnl=t.gross_pnl,
                     costs=t.costs,
                     net_pnl=t.net_pnl,
@@ -349,8 +416,12 @@ class BacktestService:
             account_currency=parent.account_currency,
             risk_settings=parent.risk_settings,
             costs=parent.costs,
-            config={},
-            created_by=parent.created_by,
+            config={
+                k: v
+                for k, v in parent.config.items()
+                if k in ("contract", "payout_ratio", "payout_ratio_is_estimate", "commission_pct")
+            },
+            user_id=parent.user_id,
             created_at=utcnow(),
             started_at=utcnow(),
         )
@@ -371,7 +442,7 @@ class BacktestService:
             row, candles, row.parameters, row.start, row.end, self._progress(db, row, 0, 99)
         )
         row.metrics = result.metrics
-        row.report = {"warnings": warnings_for(result.metrics, row)}
+        row.report = {"warnings": warnings_for(result.metrics, row), "notes": result.notes}
         self._store_trades(db, row, result)
         db.commit()
 
@@ -551,6 +622,11 @@ def warnings_for(m: dict[str, Any], row: Backtest) -> list[str]:
         )
     if (m.get("rejections") or {}).get("Max drawdown"):
         out.append("The maximum-drawdown limit halted trading during this test.")
+    if row.config.get("payout_ratio_is_estimate"):
+        out.append(
+            f"Rise/Fall payouts are an ESTIMATE ({row.config.get('payout_ratio')} × stake per "
+            "win); live payouts vary per quote and include up to 3 % app markup."
+        )
     return out
 
 

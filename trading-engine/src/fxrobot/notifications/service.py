@@ -4,22 +4,24 @@ In-app delivery (the `notifications` table, read by the dashboard) is always on.
 channels (email, Telegram, webhooks…) implement `NotificationChannel` and
 are registered with `register_channel`; a failing channel never breaks the
 caller or the other channels.
+
+Every notification has a recipient: the owner of `account_id` unless
+`user_id` is given; with neither it is a platform notification (admins).
 """
 
 from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
 from typing import Any, Protocol
 
-from sqlalchemy import func, select, update
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from fxrobot.core.logging import mask_data
 from fxrobot.db.types import utcnow
 from fxrobot.domain.trading import NotificationSeverity
-from fxrobot.models import Notification
+from fxrobot.models import Notification, TradingAccount
 from fxrobot.notifications.types import TYPES
 
 logger = logging.getLogger(__name__)
@@ -50,11 +52,15 @@ def notify(
     title: str | None = None,
     severity: NotificationSeverity | None = None,
     account_id: uuid.UUID | None = None,
+    user_id: uuid.UUID | None = None,
     data: dict[str, Any] | None = None,
     commit: bool = True,
 ) -> Notification:
     default_severity, default_title = TYPES.get(type_, (NotificationSeverity.INFO, type_))
+    if user_id is None and account_id is not None:
+        user_id = db.scalar(select(TradingAccount.user_id).where(TradingAccount.id == account_id))
     note = Notification(
+        user_id=user_id,
         type=type_,
         severity=severity or default_severity,
         title=(title or default_title)[:200],
@@ -74,43 +80,3 @@ def notify(
         except Exception:
             logger.exception("notification channel %s failed", channel.name)
     return note
-
-
-def serialize(note: Notification) -> dict[str, Any]:
-    return {
-        "id": note.id,
-        "type": note.type,
-        "severity": note.severity.value,
-        "title": note.title,
-        "message": note.message,
-        "account_id": str(note.account_id) if note.account_id else None,
-        "data": note.data,
-        "created_at": note.created_at.isoformat() if note.created_at else None,
-        "read_at": note.read_at.isoformat() if note.read_at else None,
-    }
-
-
-def list_notifications(
-    db: Session, *, limit: int, before_id: int | None, unread_only: bool, severity: str | None
-) -> list[Notification]:
-    stmt = select(Notification).order_by(Notification.id.desc()).limit(limit)
-    if before_id:
-        stmt = stmt.where(Notification.id < before_id)
-    if unread_only:
-        stmt = stmt.where(Notification.read_at.is_(None))
-    if severity:
-        stmt = stmt.where(Notification.severity == NotificationSeverity(severity))
-    return list(db.scalars(stmt))
-
-
-def unread_count(db: Session) -> int:
-    return int(db.scalar(select(func.count()).where(Notification.read_at.is_(None))) or 0)
-
-
-def mark_read(db: Session, ids: list[int] | None, at: datetime | None = None) -> int:
-    stmt = update(Notification).where(Notification.read_at.is_(None)).values(read_at=at or utcnow())
-    if ids is not None:
-        stmt = stmt.where(Notification.id.in_(ids))
-    result = db.execute(stmt)
-    db.commit()
-    return int(result.rowcount or 0)  # type: ignore[attr-defined]

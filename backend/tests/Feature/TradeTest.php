@@ -24,7 +24,7 @@ class TradeTest extends TestCase
     {
         $this->fakeEngine(['/internal/orders/preview' => ['approved' => true, 'checks' => [['rule' => 'Kill switch', 'passed' => true, 'detail' => 'released']], 'risk_amount' => '20']]);
         $account = $this->account();
-        $this->actingAs($this->owner())->postJson('/api/trade/preview', $this->ticket($account->id, ['volume' => null, 'idempotency_key' => null, 'confirm' => null]))
+        $this->actingAs($this->me())->postJson('/api/trade/preview', $this->ticket($account->id, ['volume' => null, 'idempotency_key' => null, 'confirm' => null]))
             ->assertOk()->assertJsonPath('approved', true);
         Http::assertSent(fn (Request $r) => str_ends_with($r->url(), '/internal/orders/preview') && ! isset($r['volume']));
     }
@@ -33,7 +33,7 @@ class TradeTest extends TestCase
     {
         Http::fake();
         $account = $this->account();
-        $this->actingAs($this->owner())->postJson('/api/trade/orders', $this->ticket($account->id, ['stop_loss' => null]))
+        $this->actingAs($this->me())->postJson('/api/trade/orders', $this->ticket($account->id, ['stop_loss' => null]))
             ->assertStatus(422)->assertJsonValidationErrors('stop_loss');
         Http::assertNothingSent();
     }
@@ -42,7 +42,7 @@ class TradeTest extends TestCase
     {
         Http::fake();
         $account = $this->account();
-        $owner = $this->owner();
+        $owner = $this->me();
         $this->actingAs($owner)->postJson('/api/trade/orders', $this->ticket($account->id, ['confirm' => false]))->assertJsonValidationErrors('confirm');
         $this->postJson('/api/trade/orders', $this->ticket($account->id, ['idempotency_key' => null]))->assertJsonValidationErrors('idempotency_key');
         Http::assertNothingSent();
@@ -52,23 +52,11 @@ class TradeTest extends TestCase
     {
         $this->fakeEngine(['/internal/orders' => ['signal_id' => 's1', 'status' => 'REJECTED', 'rejection_reason' => 'Trade rejected: Kill switch: STOP ALL TRADING is engaged', 'order' => null, 'trade_id' => null]]);
         $account = $this->account();
-        $owner = $this->owner();
+        $owner = $this->me();
         $this->actingAs($owner)->postJson('/api/trade/orders', $this->ticket($account->id))
             ->assertOk()->assertJsonPath('status', 'REJECTED');
         Http::assertSent(fn (Request $r) => $r['idempotency_key'] === 'ticket-0123456789abcdef' && $r['actor_id'] === $owner->id && $r['actor_label'] === $owner->email);
         $this->assertDatabaseHas('audit_logs', ['action' => 'trade.manual_ticket', 'outcome' => 'denied', 'target_id' => $account->id]);
-    }
-
-    public function test_viewers_cannot_trade(): void
-    {
-        Http::fake();
-        $account = $this->account();
-        $trade = $this->openTrade($account);
-        $this->actingAs($this->viewer())->postJson('/api/trade/orders', $this->ticket($account->id))->assertForbidden();
-        $this->postJson('/api/trade/preview', $this->ticket($account->id))->assertForbidden();
-        $this->postJson("/api/positions/{$trade->id}/close", ['confirm' => true])->assertForbidden();
-        $this->putJson("/api/positions/{$trade->id}", ['stop_loss' => '1.09'])->assertForbidden();
-        Http::assertNothingSent();
     }
 
     public function test_positions_close_and_modify_go_through_the_engine(): void
@@ -77,7 +65,7 @@ class TradeTest extends TestCase
             ? ['stop_loss' => '1.099', 'take_profit' => null] : ['order_status' => 'FILLED', 'fill_price' => '1.1003'])]);
         $account = $this->account();
         $trade = $this->openTrade($account);
-        $owner = $this->owner();
+        $owner = $this->me();
         $this->actingAs($owner)->getJson('/api/positions')->assertOk()->assertJsonPath('0.id', $trade->id)->assertJsonPath('0.is_simulated', true);
         $this->putJson("/api/positions/{$trade->id}", ['take_profit' => '1.2'])->assertJsonValidationErrors('stop_loss'); // a stop can't be removed
         $this->putJson("/api/positions/{$trade->id}", ['stop_loss' => '1.09900'])->assertOk();
@@ -91,7 +79,7 @@ class TradeTest extends TestCase
     {
         $this->fakeEngine(['/internal/orders' => Http::response(['error' => ['code' => 'conflict', 'message' => 'An earlier order on this account is still being reconciled with the broker.']], 409)]);
         $account = $this->account();
-        $this->actingAs($this->owner())->postJson('/api/trade/orders', $this->ticket($account->id))
+        $this->actingAs($this->me())->postJson('/api/trade/orders', $this->ticket($account->id))
             ->assertStatus(409)->assertJsonPath('message', 'An earlier order on this account is still being reconciled with the broker.');
     }
 }

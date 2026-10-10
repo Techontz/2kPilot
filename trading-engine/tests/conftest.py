@@ -1,7 +1,7 @@
 """Shared fixtures.
 
 Tests run against a real MySQL 8 database (TEST_DATABASE_URL, default:
-`twokfx_engine_test` on 127.0.0.1:3308) whose schema is created by the
+`tradepilot_engine_test` on 127.0.0.1:3308) whose schema is created by the
 **Laravel migrations** in ../backend — the same schema production uses. So
 every engine test run also proves the engine and Laravel agree on the schema.
 """
@@ -12,6 +12,7 @@ import os
 import subprocess
 import uuid
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ from sqlalchemy import create_engine, make_url, text
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
 
+from fxrobot.broker_engine.adapters.paper_market import set_paper_clock
 from fxrobot.core.config import AppEnv, LogFormat, Settings
 from fxrobot.core.crypto import SecretBox, generate_key
 from fxrobot.db.base import Base
@@ -29,13 +31,18 @@ from fxrobot.internal.auth import sign
 from fxrobot.main import create_app
 
 TEST_DATABASE_URL = os.environ.get(
-    "TEST_DATABASE_URL", "mysql+pymysql://root@127.0.0.1:3308/twokfx_engine_test?charset=utf8mb4"
+    "TEST_DATABASE_URL",
+    "mysql+pymysql://root@127.0.0.1:3308/tradepilot_engine_test?charset=utf8mb4",
 )
 ENGINE_DIR = Path(__file__).resolve().parents[1]
 BACKEND_DIR = ENGINE_DIR.parent / "backend"
 ENGINE_SECRET = "test-engine-secret-0123456789-abcdefghijklmnop"
 CREDENTIALS_KEY = generate_key()
 OWNER_EMAIL = "owner@example.com"
+# "Today" as paper markets see it in tests (a Wednesday, FX market open), so no
+# test depends on the real date: where a simulation starts, which weekday it
+# lands on and how far it may run are all fixed.
+PAPER_NOW = datetime(2026, 3, 4, 14, 0, tzinfo=UTC)
 
 
 def make_settings(**overrides: object) -> Settings:
@@ -48,6 +55,7 @@ def make_settings(**overrides: object) -> Settings:
         "live_trading_enabled": False,
         "engine_enabled": False,  # tests drive the engine explicitly
         "deriv_app_id": "app-test",
+        "anthropic_api_key": "",  # AI drafting off unless a test turns it on (never a real key)
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)  # type: ignore[call-arg]
@@ -101,6 +109,14 @@ _TABLES = [t.name for t in Base.metadata.sorted_tables if t.name not in ("audit_
 
 
 @pytest.fixture(autouse=True)
+def paper_now() -> Iterator[datetime]:
+    """Pin the paper markets' clock (see PAPER_NOW)."""
+    set_paper_clock(lambda: PAPER_NOW)
+    yield PAPER_NOW
+    set_paper_clock(None)
+
+
+@pytest.fixture(autouse=True)
 def clean_database(migrated_database: None) -> Iterator[None]:
     engine = build_engine(TEST_DATABASE_URL, poolclass=NullPool)
     with engine.begin() as conn:
@@ -109,13 +125,7 @@ def clean_database(migrated_database: None) -> Iterator[None]:
             conn.execute(text(f"DELETE FROM `{table}`"))  # noqa: S608 (names from ORM metadata)
         conn.execute(text("TRUNCATE TABLE audit_logs"))  # append-only: TRUNCATE bypasses triggers
         conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
-        conn.execute(
-            text(
-                "INSERT INTO system_state "
-                "(id, trading_mode, kill_switch_engaged, kill_switch_reason) "
-                "VALUES (1, 'DEMO', true, 'Initial state')"
-            )
-        )
+        conn.execute(text("INSERT INTO system_state (id, kill_switch_engaged) VALUES (1, false)"))
     engine.dispose()
     yield
 
@@ -192,17 +202,10 @@ def db(client: SignedClient) -> Iterator[Session]:
 
 @pytest.fixture
 def owner(db: Session) -> uuid.UUID:
-    """A user row as Laravel would create it (the engine only references ids)."""
-    user_id = uuid.uuid4()
-    db.execute(
-        text(
-            "INSERT INTO users (id, name, email, password, role) "
-            "VALUES (:id, 'Owner', :email, 'x', 'owner')"
-        ),
-        {"id": str(user_id), "email": OWNER_EMAIL},
-    )
-    db.commit()
-    return user_id
+    """The default test user (the owner of factory-made accounts), as Laravel creates it."""
+    from tests import factories
+
+    return factories.ensure_user(db)
 
 
 def fresh_heartbeat(db: Session) -> None:

@@ -2,7 +2,10 @@
 
 This is NOT market data. It produces plausible-looking FX bars (fat-tailed
 returns, trending/ranging regimes, volatility clustering, weekend closure)
-so the whole pipeline can be exercised without a broker. Everything built
+so the whole pipeline can be exercised without a broker. It can also imitate
+the SHAPE of a volatility index that trades around the clock (R_10 … R_100:
+constant annualised volatility of 10 … 100 %) — generated here, NOT Deriv's
+feed. Everything built
 on it is labelled SYNTHETIC / PAPER in the database and the UI, and results
 on it say nothing about real markets.
 """
@@ -31,23 +34,44 @@ class SyntheticSpec:
     digits: int
     daily_vol: float  # relative, e.g. 0.005 = 0.5 % per day
     spread_points: int
+    contract_size: int = 100_000
+    always_open: bool = False  # trades 24/7 (volatility indices), no FX weekend
+    name: str = ""
 
     def symbol_info(self) -> SymbolInfo:
         point = Decimal(1).scaleb(-self.digits)
         return SymbolInfo(
             name=self.symbol,
-            description=f"{self.base}/{self.quote} (synthetic)",
+            description=(self.name or f"{self.base}/{self.quote}") + " (synthetic)",
             base_currency=self.base,
             quote_currency=self.quote,
             digits=self.digits,
             point=point,
-            contract_size=Decimal(100000),
+            contract_size=Decimal(self.contract_size),
             volume_min=Decimal("0.01"),
             volume_max=Decimal(50),
             volume_step=Decimal("0.01"),
             trade_allowed=True,
             canonical=self.symbol,
+            category="synthetic" if self.always_open else "forex",
+            market_open=True if self.always_open else None,
         )
+
+
+def _index(symbol: str, price: float, digits: int, annual_vol: float, name: str) -> SyntheticSpec:
+    """A 24/7 index with constant volatility (the shape of Deriv's volatility indices)."""
+    return SyntheticSpec(
+        symbol,
+        symbol,
+        "USD",
+        price,
+        digits,
+        annual_vol / 365**0.5,
+        0,
+        contract_size=1,
+        always_open=True,
+        name=name,
+    )
 
 
 DEFAULT_SPECS: dict[str, SyntheticSpec] = {
@@ -59,6 +83,11 @@ DEFAULT_SPECS: dict[str, SyntheticSpec] = {
         SyntheticSpec("AUDUSD", "AUD", "USD", 0.6600, 5, 0.0065, 14),
         SyntheticSpec("USDCHF", "USD", "CHF", 0.8800, 5, 0.0050, 16),
         SyntheticSpec("USDCAD", "USD", "CAD", 1.3600, 5, 0.0045, 18),
+        _index("R_10", 6000.0, 3, 0.10, "Volatility 10-like index"),
+        _index("R_25", 3000.0, 3, 0.25, "Volatility 25-like index"),
+        _index("R_50", 250.0, 4, 0.50, "Volatility 50-like index"),
+        _index("R_75", 80000.0, 4, 0.75, "Volatility 75-like index"),
+        _index("R_100", 1000.0, 2, 1.00, "Volatility 100-like index"),
     )
 }
 
@@ -137,7 +166,7 @@ class SyntheticSeries:
         if index < 0:
             return None
         moment = self.time_of(index)
-        if not is_fx_market_open(moment):
+        if not self.spec.always_open and not is_fx_market_open(moment):
             return None
         self._extend(index)
         return Candle(

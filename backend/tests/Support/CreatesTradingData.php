@@ -12,20 +12,23 @@ use App\Models\Strategy;
 use App\Models\StrategyVersion;
 use App\Models\Trade;
 use App\Models\TradingAccount;
+use App\Models\User;
 use Illuminate\Support\Str;
 
-/** Rows as the trading engine / Broker Center would write them. */
+/** Rows as the trading engine / Broker Center would write them. Owner: me() unless given. */
 trait CreatesTradingData
 {
-    protected function defaultProfile(): RiskProfile
+    protected function defaultProfile(?User $user = null): RiskProfile
     {
-        return RiskProfile::query()->where('name', RiskProfile::DEFAULT_NAME)->firstOrFail();
+        return RiskProfile::query()->ownedBy($user ?? $this->me())->where('name', RiskProfile::DEFAULT_NAME)->firstOrFail();
     }
 
-    protected function account(array $overrides = [], ConnectorType $type = ConnectorType::Paper): TradingAccount
+    protected function account(array $overrides = [], ConnectorType $type = ConnectorType::Paper, ?User $owner = null): TradingAccount
     {
+        $owner ??= $this->me();
         $environment = $overrides['environment'] ?? ($type === ConnectorType::Paper ? AccountEnvironment::Paper : AccountEnvironment::Demo);
         $connection = BrokerConnection::query()->create([
+            'user_id' => $owner->id,
             'label' => $overrides['label'] ?? 'Test account',
             'connector_type' => $type,
             'expected_environment' => $environment === AccountEnvironment::Unknown ? AccountEnvironment::Demo : $environment,
@@ -37,6 +40,7 @@ trait CreatesTradingData
 
         return TradingAccount::query()->create(array_merge([
             'connection_id' => $connection->id,
+            'user_id' => $owner->id,
             'broker_account_id' => 'ACC-'.Str::random(6),
             'label' => 'Test account',
             'currency' => 'USD',

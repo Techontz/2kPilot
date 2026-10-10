@@ -20,9 +20,12 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         // Cookie sessions + CSRF for the Next.js dashboard (Sanctum SPA auth).
         $middleware->statefulApi();
-        // The dashboard reaches Laravel through the Next.js server on this machine.
-        $middleware->trustProxies(at: ['127.0.0.1', '::1']);
+        // Proxies trusted for X-Forwarded-For (the client IP behind rate limits and
+        // audit logs) come from config/trustedproxy.php (TRUSTED_PROXIES).
         $middleware->append(SecurityHeaders::class);
+        // An API with no login page: guests get 401 JSON, never a redirect
+        // (also for EventSource, which asks for text/event-stream).
+        $middleware->redirectGuestsTo(fn () => null);
         $middleware->alias([
             'active' => EnsureUserIsActive::class,
             'mfa.enrolled' => EnsureMfaEnrolled::class,
@@ -36,7 +39,7 @@ return Application::configure(basePath: dirname(__DIR__))
         $exceptions->render(fn (DomainException $e) => response()->json(
             ['message' => $e->getMessage(), 'code' => $e->errorCode], $e->status));
         $exceptions->render(fn (EngineException $e) => response()->json(
-            ['message' => $e->getMessage(), 'code' => $e->errorCode], $e->httpStatus()));
+            ['message' => $e->getMessage(), 'code' => $e->errorCode] + ($e->problems() ? ['problems' => $e->problems()] : []), $e->httpStatus()));
         // Never log secrets that might sit in request input.
-        $exceptions->dontFlash(['password', 'password_confirmation', 'current_password', 'token', 'code', 'bridge_secret']);
+        $exceptions->dontFlash(['password', 'password_confirmation', 'current_password', 'token', 'code', 'mfa_code']);
     })->create();

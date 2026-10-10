@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from fxrobot.broker_engine.adapters.deriv import DerivAdapter
-from fxrobot.broker_engine.adapters.mt5_bridge import MT5BridgeAdapter
 from fxrobot.broker_engine.adapters.paper import FaultInjector, PaperBroker, PaperConfig
-from fxrobot.broker_engine.adapters.paper_market import ReplayMarket, SimMarket, SyntheticMarket
+from fxrobot.broker_engine.adapters.paper_market import (
+    ReplayMarket,
+    SimMarket,
+    SyntheticMarket,
+    paper_clock,
+)
 from fxrobot.broker_engine.errors import BrokerAuthError as BrokerAuthErrorType
 from fxrobot.broker_engine.interface import BrokerAdapter
 from fxrobot.core.crypto import SecretBox, SecretBoxError
@@ -51,6 +55,11 @@ def normalize_paper_settings(raw: dict[str, Any]) -> dict[str, Any]:
             "commission_per_lot": str(Decimal(str(raw.get("commission_per_lot", "3.5")))),
             "slippage_points": int(raw.get("slippage_points", 0)),
             "seed": int(raw.get("seed", 42)),
+            # Simulated contracts: profit per 1 of stake when a Rise/Fall wins.
+            "rise_fall_payout_ratio": str(Decimal(str(raw.get("rise_fall_payout_ratio", "0.95")))),
+            "multiplier_commission_pct": str(
+                Decimal(str(raw.get("multiplier_commission_pct", "0")))
+            ),
             "dataset_symbol_map": dict(raw.get("dataset_symbol_map") or {}),
         }
     except (ValueError, ArithmeticError) as exc:
@@ -61,6 +70,10 @@ def normalize_paper_settings(raw: dict[str, Any]) -> dict[str, Any]:
         raise ConfigurationError("Leverage must be between 1 and 1000")
     if settings["currency"] != "USD":
         raise ConfigurationError("Paper accounts currently support USD only")
+    if not Decimal("0.01") <= Decimal(settings["rise_fall_payout_ratio"]) <= Decimal(2):
+        raise ConfigurationError("rise_fall_payout_ratio must be between 0.01 and 2")
+    if not Decimal(0) <= Decimal(settings["multiplier_commission_pct"]) <= Decimal(10):
+        raise ConfigurationError("multiplier_commission_pct must be between 0 and 10")
     if not 0 <= settings["seconds_per_bar"] <= 3600:
         raise ConfigurationError("seconds_per_bar must be between 0 and 3600")
     if source == "synthetic":
@@ -70,26 +83,6 @@ def normalize_paper_settings(raw: dict[str, Any]) -> dict[str, Any]:
     elif not settings["dataset_symbol_map"]:
         raise ConfigurationError("Replay needs at least one dataset")
     return settings
-
-
-def normalize_mt5_settings(raw: dict[str, Any]) -> dict[str, Any]:
-    url = str(raw.get("bridge_url", "")).strip()
-    if not url.startswith(("http://", "https://")):
-        raise ConfigurationError("Bridge URL must start with http:// or https://")
-    login = str(raw.get("login", "")).strip()
-    server = str(raw.get("server", "")).strip()
-    if not login.isdigit():
-        raise ConfigurationError("MT5 account number must be numeric")
-    if not server:
-        raise ConfigurationError("MT5 server is required")
-    verify = raw.get("verify_tls", True)
-    verify_bool = str(verify).lower() not in ("false", "0", "no")
-    return {
-        "bridge_url": url.rstrip("/"),
-        "login": login,
-        "server": server,
-        "verify_tls": verify_bool,
-    }
 
 
 def normalize_deriv_settings(raw: dict[str, Any]) -> dict[str, Any]:
@@ -114,8 +107,6 @@ def normalize_settings(connector: ConnectorType, raw: dict[str, Any]) -> dict[st
         return normalize_paper_settings(raw)
     if connector is ConnectorType.DERIV:
         return normalize_deriv_settings(raw)
-    if connector is ConnectorType.MT5_BRIDGE:
-        return normalize_mt5_settings(raw)
     raise ConfigurationError(f"Unsupported connector {connector}")
 
 
@@ -159,10 +150,6 @@ def build_temporary_adapter(
         )
     if connector is ConnectorType.DERIV:
         return deriv_from(settings, secrets, deriv_app_id)
-    if connector is ConnectorType.MT5_BRIDGE:
-        if not secrets.get("password"):
-            raise ConfigurationError("MT5 password is required")
-        return mt5_from(settings, secrets)
     raise ConfigurationError(f"Unsupported connector {connector}")
 
 
@@ -181,7 +168,7 @@ def decrypt_secrets(secret_box: SecretBox | None, ciphertext: str | None) -> dic
 
 
 def build_market(db: Session, settings: dict[str, Any], now: datetime | None = None) -> SimMarket:
-    now = now or datetime.now(UTC)
+    now = now or paper_clock()
     start = now - timedelta(days=settings.get("start_days_ago", 30))
     if settings["price_source"] == "synthetic":
         return SyntheticMarket(
@@ -199,7 +186,9 @@ def build_market(db: Session, settings: dict[str, Any], now: datetime | None = N
         bars[symbol] = store.load_candles(db, dataset.id)
         spec = DEFAULT_SPECS.get(symbol)
         if spec is None:
-            raise ConfigurationError(f"Replay supports FX majors only; {symbol} unknown")
+            raise ConfigurationError(
+                f"Replay supports FX majors and R_10…R_100 only; {symbol} unknown"
+            )
         specs[symbol] = spec.symbol_info()
     if len(timeframes) != 1:
         raise ConfigurationError("All replay datasets must share one timeframe")
@@ -235,6 +224,8 @@ def build_adapter(
             leverage=settings["leverage"],
             commission_per_lot=Decimal(settings["commission_per_lot"]),
             slippage_points=settings["slippage_points"],
+            rise_fall_payout_ratio=Decimal(settings["rise_fall_payout_ratio"]),
+            multiplier_commission_pct=Decimal(settings["multiplier_commission_pct"]),
         )
         return PaperBroker(
             market,
@@ -247,26 +238,7 @@ def build_adapter(
     if connection.connector_type is ConnectorType.DERIV:
         settings = normalize_deriv_settings(connection.settings)
         return deriv_from(settings, secrets, deriv_app_id)
-    if connection.connector_type is ConnectorType.MT5_BRIDGE:
-        if not secrets:
-            raise ConfigurationError("Connection has no stored credentials")
-        settings = normalize_mt5_settings(connection.settings)
-        return mt5_from(settings, secrets)
     raise ConfigurationError(f"Unsupported connector {connection.connector_type}")
-
-
-def mt5_from(settings: dict[str, Any], secrets: dict[str, Any]) -> MT5BridgeAdapter:
-    try:
-        return MT5BridgeAdapter(
-            base_url=settings["bridge_url"],
-            secret=str(secrets.get("bridge_secret", "")),
-            login=settings["login"],
-            password=str(secrets.get("password", "")),
-            server=settings["server"],
-            verify_tls=settings["verify_tls"],
-        )
-    except ValueError as exc:
-        raise ConfigurationError(str(exc)) from exc
 
 
 def _uuid(value: Any) -> Any:

@@ -1,0 +1,511 @@
+{
+ "schema_version": 1,
+ "timeframes": [
+  "M1",
+  "M5",
+  "M15",
+  "M30",
+  "H1",
+  "H4",
+  "D1"
+ ],
+ "price_fields": [
+  {
+   "key": "open",
+   "label": "Open"
+  },
+  {
+   "key": "high",
+   "label": "High"
+  },
+  {
+   "key": "low",
+   "label": "Low"
+  },
+  {
+   "key": "close",
+   "label": "Close"
+  }
+ ],
+ "indicators": [
+  {
+   "key": "sma",
+   "label": "Simple moving average (SMA)",
+   "short": "SMA",
+   "description": "The average price of the last N bars. Smooths out noise; price above a rising average is a common definition of an uptrend.",
+   "params": [
+    {
+     "key": "period",
+     "label": "Period",
+     "type": "integer",
+     "default": 50,
+     "description": "Number of bars in the average.",
+     "min": 1,
+     "max": 500
+    },
+    {
+     "key": "source",
+     "label": "Price",
+     "type": "source",
+     "default": "close",
+     "description": "Which price to use.",
+     "options": [
+      "open",
+      "high",
+      "low",
+      "close"
+     ]
+    }
+   ],
+   "outputs": [
+    {
+     "key": "value",
+     "label": "Value",
+     "scale": "price",
+     "meaning": "a price"
+    }
+   ],
+   "default_output": "value",
+   "notes": []
+  },
+  {
+   "key": "ema",
+   "label": "Exponential moving average (EMA)",
+   "short": "EMA",
+   "description": "Like the SMA, but recent bars count more, so it reacts faster to new moves.",
+   "params": [
+    {
+     "key": "period",
+     "label": "Period",
+     "type": "integer",
+     "default": 20,
+     "description": "Number of bars in the average.",
+     "min": 1,
+     "max": 500
+    },
+    {
+     "key": "source",
+     "label": "Price",
+     "type": "source",
+     "default": "close",
+     "description": "Which price to use.",
+     "options": [
+      "open",
+      "high",
+      "low",
+      "close"
+     ]
+    }
+   ],
+   "outputs": [
+    {
+     "key": "value",
+     "label": "Value",
+     "scale": "price",
+     "meaning": "a price"
+    }
+   ],
+   "default_output": "value",
+   "notes": []
+  },
+  {
+   "key": "rsi",
+   "label": "Relative Strength Index (RSI)",
+   "short": "RSI",
+   "description": "Momentum from 0 to 100 (Wilder). Readings below 30 are often called oversold, above 70 overbought — in strong trends it can stay there for a long time.",
+   "params": [
+    {
+     "key": "period",
+     "label": "Period",
+     "type": "integer",
+     "default": 14,
+     "description": "Number of bars measured.",
+     "min": 1,
+     "max": 500
+    }
+   ],
+   "outputs": [
+    {
+     "key": "value",
+     "label": "Value",
+     "scale": "oscillator",
+     "meaning": "a 0–100 oscillator"
+    }
+   ],
+   "default_output": "value",
+   "notes": []
+  },
+  {
+   "key": "macd",
+   "label": "MACD",
+   "short": "MACD",
+   "description": "The difference between a fast and a slow EMA (the MACD line), a signal line (an EMA of the MACD line) and the histogram (line − signal). Used to judge momentum: the line crossing above the signal line suggests momentum is turning up.",
+   "params": [
+    {
+     "key": "fast",
+     "label": "Fast EMA",
+     "type": "integer",
+     "default": 12,
+     "description": "",
+     "min": 1,
+     "max": 500
+    },
+    {
+     "key": "slow",
+     "label": "Slow EMA",
+     "type": "integer",
+     "default": 26,
+     "description": "",
+     "min": 1,
+     "max": 500
+    },
+    {
+     "key": "signal",
+     "label": "Signal EMA",
+     "type": "integer",
+     "default": 9,
+     "description": "",
+     "min": 1,
+     "max": 500
+    }
+   ],
+   "outputs": [
+    {
+     "key": "line",
+     "label": "MACD line",
+     "scale": "macd",
+     "meaning": "a MACD value (difference of two averages, around 0)"
+    },
+    {
+     "key": "signal",
+     "label": "Signal line",
+     "scale": "macd",
+     "meaning": "a MACD value (difference of two averages, around 0)"
+    },
+    {
+     "key": "histogram",
+     "label": "Histogram",
+     "scale": "macd",
+     "meaning": "a MACD value (difference of two averages, around 0)"
+    }
+   ],
+   "default_output": "line",
+   "notes": [
+    "The fast period must be smaller than the slow period."
+   ]
+  },
+  {
+   "key": "bollinger",
+   "label": "Bollinger Bands",
+   "short": "Bollinger",
+   "description": "A moving average (middle band) with bands N standard deviations above and below. %B shows where the close sits: 0 = on the lower band, 1 = on the upper band.",
+   "params": [
+    {
+     "key": "period",
+     "label": "Period",
+     "type": "integer",
+     "default": 20,
+     "description": "Number of bars in the average.",
+     "min": 1,
+     "max": 500
+    },
+    {
+     "key": "stddev",
+     "label": "Standard deviations",
+     "type": "number",
+     "default": 2,
+     "description": "Band distance from the middle, in standard deviations.",
+     "min": 0.1,
+     "max": 5
+    }
+   ],
+   "outputs": [
+    {
+     "key": "upper",
+     "label": "Upper band",
+     "scale": "price",
+     "meaning": "a price"
+    },
+    {
+     "key": "middle",
+     "label": "Middle band",
+     "scale": "price",
+     "meaning": "a price"
+    },
+    {
+     "key": "lower",
+     "label": "Lower band",
+     "scale": "price",
+     "meaning": "a price"
+    },
+    {
+     "key": "percent_b",
+     "label": "%B (position within the bands)",
+     "scale": "ratio",
+     "meaning": "a band position (0 = lower band, 1 = upper band)"
+    }
+   ],
+   "default_output": "upper",
+   "notes": []
+  },
+  {
+   "key": "atr",
+   "label": "Average True Range (ATR)",
+   "short": "ATR",
+   "description": "How far price typically moves per bar (Wilder). A volatility measure, not a direction — mostly used to size stops and targets.",
+   "params": [
+    {
+     "key": "period",
+     "label": "Period",
+     "type": "integer",
+     "default": 14,
+     "description": "Number of bars measured.",
+     "min": 1,
+     "max": 500
+    }
+   ],
+   "outputs": [
+    {
+     "key": "value",
+     "label": "Value",
+     "scale": "price_distance",
+     "meaning": "a price distance (volatility)"
+    }
+   ],
+   "default_output": "value",
+   "notes": []
+  },
+  {
+   "key": "highest",
+   "label": "Highest of previous bars (Donchian high)",
+   "short": "Highest",
+   "description": "The highest price of the previous N bars, NOT counting the current bar — so 'close crosses above the highest high of 20 bars' is a breakout.",
+   "params": [
+    {
+     "key": "period",
+     "label": "Period",
+     "type": "integer",
+     "default": 20,
+     "description": "Number of previous bars.",
+     "min": 1,
+     "max": 500
+    },
+    {
+     "key": "source",
+     "label": "Price",
+     "type": "source",
+     "default": "high",
+     "description": "Which price to use.",
+     "options": [
+      "open",
+      "high",
+      "low",
+      "close"
+     ]
+    }
+   ],
+   "outputs": [
+    {
+     "key": "value",
+     "label": "Value",
+     "scale": "price",
+     "meaning": "a price"
+    }
+   ],
+   "default_output": "value",
+   "notes": []
+  },
+  {
+   "key": "lowest",
+   "label": "Lowest of previous bars (Donchian low)",
+   "short": "Lowest",
+   "description": "The lowest price of the previous N bars, NOT counting the current bar.",
+   "params": [
+    {
+     "key": "period",
+     "label": "Period",
+     "type": "integer",
+     "default": 20,
+     "description": "Number of previous bars.",
+     "min": 1,
+     "max": 500
+    },
+    {
+     "key": "source",
+     "label": "Price",
+     "type": "source",
+     "default": "low",
+     "description": "Which price to use.",
+     "options": [
+      "open",
+      "high",
+      "low",
+      "close"
+     ]
+    }
+   ],
+   "outputs": [
+    {
+     "key": "value",
+     "label": "Value",
+     "scale": "price",
+     "meaning": "a price"
+    }
+   ],
+   "default_output": "value",
+   "notes": []
+  },
+  {
+   "key": "roc",
+   "label": "Rate of change (ROC)",
+   "short": "ROC",
+   "description": "How much the close changed over N bars, in percent. Above 0 = higher than N bars ago.",
+   "params": [
+    {
+     "key": "period",
+     "label": "Period",
+     "type": "integer",
+     "default": 10,
+     "description": "Number of bars back.",
+     "min": 1,
+     "max": 500
+    }
+   ],
+   "outputs": [
+    {
+     "key": "value",
+     "label": "Value",
+     "scale": "percent",
+     "meaning": "a percentage change"
+    }
+   ],
+   "default_output": "value",
+   "notes": []
+  }
+ ],
+ "operators": [
+  {
+   "key": "crosses_above",
+   "label": "crosses above",
+   "description": "Was at or below the other value on the previous bar and is above it on this bar. With 'within the last N bars' the cross may have happened up to N bars ago.",
+   "operands": [
+    "right"
+   ],
+   "supports_within_bars": true
+  },
+  {
+   "key": "crosses_below",
+   "label": "crosses below",
+   "description": "Was at or above the other value on the previous bar and is below it on this bar.",
+   "operands": [
+    "right"
+   ],
+   "supports_within_bars": true
+  },
+  {
+   "key": "gt",
+   "label": "is above",
+   "description": "Strictly greater.",
+   "operands": [
+    "right"
+   ]
+  },
+  {
+   "key": "gte",
+   "label": "is at or above",
+   "description": "Greater or equal.",
+   "operands": [
+    "right"
+   ]
+  },
+  {
+   "key": "lt",
+   "label": "is below",
+   "description": "Strictly smaller.",
+   "operands": [
+    "right"
+   ]
+  },
+  {
+   "key": "lte",
+   "label": "is at or below",
+   "description": "Smaller or equal.",
+   "operands": [
+    "right"
+   ]
+  },
+  {
+   "key": "between",
+   "label": "is between",
+   "description": "Within an inclusive range (low ≤ value ≤ high).",
+   "operands": [
+    "low",
+    "high"
+   ]
+  }
+ ],
+ "groups": [
+  {
+   "key": "all",
+   "label": "All of these must be true"
+  },
+  {
+   "key": "any",
+   "label": "At least one of these must be true"
+  }
+ ],
+ "stop_types": [
+  {
+   "key": "atr",
+   "label": "ATR multiple",
+   "fields": [
+    "atr_period",
+    "multiple"
+   ]
+  },
+  {
+   "key": "pips",
+   "label": "Fixed pips",
+   "fields": [
+    "pips"
+   ]
+  }
+ ],
+ "target_types": [
+  {
+   "key": "rr",
+   "label": "Reward/risk multiple of the stop",
+   "fields": [
+    "ratio"
+   ]
+  },
+  {
+   "key": "atr",
+   "label": "ATR multiple",
+   "fields": [
+    "atr_period",
+    "multiple"
+   ]
+  },
+  {
+   "key": "pips",
+   "label": "Fixed pips",
+   "fields": [
+    "pips"
+   ]
+  }
+ ],
+ "limits": {
+  "max_conditions": 12,
+  "min_period": 1,
+  "max_period": 500,
+  "max_within_bars": 50,
+  "max_constant": 1000000000
+ },
+ "contract_notes": {
+  "RISE_FALL": "Rise/Fall contracts always run to expiry: exit conditions, stops and targets do not apply. The stake is the most you can lose.",
+  "MULTIPLIER": "Exit conditions close the contract early. Stops and targets become money amounts unless the assignment sets its own.",
+  "SPOT": "Paper only. Every trade has the stop below; exit conditions can close it earlier."
+ },
+ "ai_drafting_available": false
+}

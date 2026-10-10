@@ -12,6 +12,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from fxrobot.db.base import Base, TimestampMixin
 from fxrobot.db.types import NOW_DEFAULT, Money, Price, Volume, str_enum, utcnow
+from fxrobot.domain.contracts import ContractFamily, ContractOutcome, ContractType
 from fxrobot.domain.market import Side, Timeframe
 from fxrobot.domain.trading import (
     ExitReason,
@@ -31,6 +32,8 @@ class Signal(Base):
     __table_args__ = (
         # Duplicate-signal protection: one signal per assignment, bar and direction.
         UniqueConstraint("assignment_id", "bar_time", "side", name="uq_signals_dedupe"),
+        # Manual-ticket keys are unique per ACCOUNT, never across tenants.
+        UniqueConstraint("account_id", "idempotency_key", name="uq_signals_account_idempotency"),
         Index("ix_signals_account_created", "account_id", "created_at"),
     )
 
@@ -52,16 +55,25 @@ class Signal(Base):
         ForeignKey("users.id", ondelete="SET NULL")
     )
     # Manual tickets: one key per confirmation, so a retry never opens a second position.
-    idempotency_key: Mapped[str | None] = mapped_column(String(64), unique=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(64))
     symbol: Mapped[str] = mapped_column(String(40))
     side: Mapped[Side] = mapped_column(str_enum(Side, "side", 8))
     timeframe: Mapped[Timeframe] = mapped_column(str_enum(Timeframe, "signal_timeframe", 8))
     bar_time: Mapped[datetime]
     entry_type: Mapped[OrderType] = mapped_column(str_enum(OrderType, "signal_entry_type", 16))
     entry_price: Mapped[Decimal] = mapped_column(Price())
-    stop_loss: Mapped[Decimal] = mapped_column(Price())
+    stop_loss: Mapped[Decimal | None] = mapped_column(Price())  # None only for Rise/Fall
     take_profit: Mapped[Decimal | None] = mapped_column(Price())
     reasons: Mapped[list[str]] = mapped_column(JSON)
+    contract_family: Mapped[ContractFamily] = mapped_column(
+        str_enum(ContractFamily, "signal_contract_family", 16),
+        default=ContractFamily.SPOT,
+        server_default=text("'SPOT'"),
+    )
+    contract_type: Mapped[ContractType | None] = mapped_column(
+        str_enum(ContractType, "signal_contract_type", 8)
+    )
+    stake: Mapped[Decimal | None] = mapped_column(Money())
     status: Mapped[SignalStatus] = mapped_column(
         str_enum(SignalStatus, "signal_status", 16), default=SignalStatus.NEW
     )
@@ -76,7 +88,33 @@ class Signal(Base):
     decided_at: Mapped[datetime | None]
 
 
-class Order(TimestampMixin, Base):
+class ContractColumns:
+    """Contract details shared by orders and trades (NULL / SPOT for lot-based trades)."""
+
+    contract_family: Mapped[ContractFamily] = mapped_column(
+        str_enum(ContractFamily, "contract_family", 16),
+        default=ContractFamily.SPOT,
+        server_default=text("'SPOT'"),
+    )
+    contract_type: Mapped[ContractType | None] = mapped_column(
+        str_enum(ContractType, "contract_type", 8)
+    )
+    broker_contract_id: Mapped[str | None] = mapped_column(String(64))
+    stake: Mapped[Decimal | None] = mapped_column(Money())
+    payout: Mapped[Decimal | None] = mapped_column(Money())
+    multiplier: Mapped[int | None]
+    duration: Mapped[int | None]
+    duration_unit: Mapped[str | None] = mapped_column(String(1))
+    expires_at: Mapped[datetime | None]
+    entry_spot: Mapped[Decimal | None] = mapped_column(Price())
+    exit_spot: Mapped[Decimal | None] = mapped_column(Price())
+    fees: Mapped[Decimal | None] = mapped_column(Money())
+    outcome: Mapped[ContractOutcome | None] = mapped_column(
+        str_enum(ContractOutcome, "contract_outcome", 10)
+    )
+
+
+class Order(ContractColumns, TimestampMixin, Base):
     """Every instruction sent (or about to be sent) to a broker.
 
     `client_order_id` is the idempotency key: it is persisted BEFORE the broker
@@ -122,7 +160,7 @@ class Order(TimestampMixin, Base):
     last_reconciled_at: Mapped[datetime | None]
 
 
-class Trade(TimestampMixin, Base):
+class Trade(ContractColumns, TimestampMixin, Base):
     """A position from open to close — the unit of the journal and analytics."""
 
     __tablename__ = "trades"
@@ -169,6 +207,7 @@ class Trade(TimestampMixin, Base):
     unrealized_pnl: Mapped[Decimal | None] = mapped_column(Money())
     r_multiple: Mapped[Decimal | None] = mapped_column(Price())
     is_simulated: Mapped[bool] = mapped_column(default=False, server_default=text("0"))
+    longcode: Mapped[str | None] = mapped_column(String(500))
 
 
 class TradeEvent(Base):

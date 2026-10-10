@@ -25,7 +25,7 @@ class BrokerConnectionError(BrokerError):
 
 
 class BrokerAuthError(BrokerConnectionError):
-    """Credentials were refused by the broker (or the bridge)."""
+    """Credentials were refused by the broker (or the broker API)."""
 
     code = "auth_failed"
 
@@ -36,8 +36,14 @@ class BrokerTimeoutError(BrokerError):
     code = "timeout"
 
 
+class BrokerRateLimitError(BrokerError):
+    """Our own request budget for the broker is used up; the request was NOT sent."""
+
+    code = "rate_limited"
+
+
 class InvalidBrokerResponseError(BrokerError):
-    """The broker/bridge answered with something we cannot trust or parse."""
+    """The broker answered with something we cannot trust or parse."""
 
     code = "invalid_response"
 

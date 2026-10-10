@@ -18,10 +18,14 @@ class Dataset(TimestampMixin, Base):
 
     __tablename__ = "datasets"
     __table_args__ = (
-        UniqueConstraint("source", "source_ref", "symbol", "timeframe", name="uq_datasets_key"),
+        UniqueConstraint(
+            "user_id", "source", "source_ref", "symbol", "timeframe", name="uq_datasets_key"
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    # The user who created it; NULL = shared with every user.
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     symbol: Mapped[str] = mapped_column(String(20))  # canonical, e.g. EURUSD
     timeframe: Mapped[Timeframe] = mapped_column(str_enum(Timeframe, "timeframe", 8))
     source: Mapped[DataSource] = mapped_column(str_enum(DataSource, "data_source", 16))

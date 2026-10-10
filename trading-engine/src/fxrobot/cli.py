@@ -3,7 +3,7 @@
     fxrobot serve          run the internal API + trading loop (127.0.0.1:8431)
     fxrobot generate-key   print a new BROKER_CREDENTIALS_KEY
 
-Users are created in Laravel: `php artisan fx:user`.
+Users are created in Laravel: `php artisan tp:user`.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ def _generate_secret(_: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="fxrobot", description="2kFX trading engine")
+    parser = argparse.ArgumentParser(prog="fxrobot", description="2kPilot trading engine")
     sub = parser.add_subparsers(dest="command", required=True)
     p_serve = sub.add_parser("serve", help="Run the internal API and the trading loop")
     p_serve.add_argument("--host", default=None)

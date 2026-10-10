@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from fxrobot.broker_engine.errors import (
@@ -25,6 +26,7 @@ from fxrobot.broker_engine.models import (
     Quote,
 )
 from fxrobot.db.types import utcnow
+from fxrobot.domain.contracts import ContractFamily, ContractFill, ContractOutcome
 from fxrobot.domain.market import Side, SymbolInfo
 from fxrobot.domain.trading import (
     ExitReason,
@@ -49,7 +51,9 @@ DEAL_REASON_TO_EXIT = {
     "TP": ExitReason.TAKE_PROFIT,
     "SO": ExitReason.EMERGENCY,
     "CLIENT": ExitReason.MANUAL,
+    "EXPIRY": ExitReason.EXPIRED,
 }
+OUTCOMES = {o.value: o for o in ContractOutcome}
 
 
 def _v(value: Decimal | None) -> str:
@@ -59,6 +63,18 @@ def _v(value: Decimal | None) -> str:
 
 def _money(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"))
+
+
+def _what(order: Order) -> str:
+    """'BUY 0.1 EURUSD' or 'CALL 5m stake 1.00 R_100' for journals and notifications."""
+    if order.contract_type is not None and order.stake is not None:
+        term = (
+            f" {order.duration}{order.duration_unit}"
+            if order.duration is not None
+            else (f" ×{order.multiplier}" if order.multiplier else "")
+        )
+        return f"{order.contract_type.value}{term} stake {_v(order.stake)} {order.symbol}"
+    return f"{order.side.value} {_v(order.volume)} {order.symbol}"
 
 
 class ExecutionEngine:
@@ -78,6 +94,7 @@ class ExecutionEngine:
     ) -> Order:
         if not decision.approved or decision.volume is None:
             raise ValueError("only approved risk decisions can be executed")
+        contract = decision.contract
         order = Order(
             client_order_id=new_client_order_id(),
             account_id=account.id,
@@ -93,16 +110,27 @@ class ExecutionEngine:
             status=OrderStatus.PENDING_SUBMIT,
             is_simulated=adapter.is_simulated,
         )
+        if contract is not None:
+            order.contract_family = contract.family
+            order.contract_type = contract.contract_type
+            order.stake = contract.stake
+            order.multiplier = contract.multiplier
+            order.duration = contract.duration
+            order.duration_unit = contract.duration_unit
         db.add(order)
         db.commit()  # crash-safe intent: the order exists before anything is sent
         order.status = OrderStatus.SUBMITTED
         order.attempts += 1
         order.submitted_at = utcnow()
+        terms = (
+            f"(SL {signal.stop_loss}, TP {signal.take_profit})"
+            if contract is None
+            else f"({contract.family.value.replace('_', '/').title()})"
+        )
         journal.record(
             db,
             EventType.ORDER_SUBMITTED,
-            f"{'PAPER ' if adapter.is_simulated else ''}{signal.side.value} {_v(decision.volume)} "
-            f"{signal.symbol} @ market (SL {signal.stop_loss}, TP {signal.take_profit})",
+            f"{'PAPER ' if adapter.is_simulated else ''}{_what(order)} @ market {terms}",
             account_id=account.id,
             signal_id=signal.id,
             order_id=order.id,
@@ -117,8 +145,7 @@ class ExecutionEngine:
         notify(
             db,
             "order.submitted",
-            f"{'PAPER ' if adapter.is_simulated else ''}{signal.side.value} {_v(decision.volume)} "
-            f"{signal.symbol} submitted.",
+            f"{'PAPER ' if adapter.is_simulated else ''}{_what(order)} submitted.",
             account_id=account.id,
             data={"order_id": str(order.id)},
         )
@@ -131,7 +158,8 @@ class ExecutionEngine:
             stop_loss=signal.stop_loss,
             take_profit=signal.take_profit,
             max_slippage_points=decision.max_slippage_points,
-            comment="2kFX",
+            comment="2kPilot",
+            contract=contract,
         )
         try:
             result = adapter.place_order(request)
@@ -174,7 +202,7 @@ class ExecutionEngine:
         notify(
             db,
             "order.rejected",
-            f"{order.side.value} {_v(order.volume)} {order.symbol}: {exc}",
+            f"{_what(order)}: {exc}",
             account_id=order.account_id,
         )
 
@@ -211,8 +239,7 @@ class ExecutionEngine:
         notify(
             db,
             "order.unknown",
-            f"{order.side.value} {_v(order.volume)} {order.symbol}: "
-            "outcome uncertain — reconciling.",
+            f"{_what(order)}: outcome uncertain — reconciling.",
             account_id=order.account_id,
         )
 
@@ -237,8 +264,18 @@ class ExecutionEngine:
             order.filled_volume = result.filled_volume or order.volume
             order.fill_price = result.fill_price
             order.filled_at = result.time or adapter.now()
+            if result.contract is not None and order.purpose is OrderPurpose.ENTRY:
+                apply_fill(order, result.contract)
             if order.purpose is OrderPurpose.ENTRY:
-                self.open_trade(db, order, signal, adapter=adapter, symbol=symbol, quote=quote)
+                self.open_trade(
+                    db,
+                    order,
+                    signal,
+                    adapter=adapter,
+                    symbol=symbol,
+                    quote=quote,
+                    contract_fill=result.contract,
+                )
             db.commit()
         elif result.status is OrderStatus.PENDING:
             order.status = OrderStatus.PENDING
@@ -276,6 +313,7 @@ class ExecutionEngine:
         adapter: BrokerAdapter,
         symbol: SymbolInfo | None,
         quote: Quote | None,
+        contract_fill: ContractFill | None = None,
     ) -> Trade:
         existing = None
         if order.broker_position_id:
@@ -321,6 +359,14 @@ class ExecutionEngine:
             commission=Decimal(0),
             swap=Decimal(0),
         )
+        if order.contract_family is not ContractFamily.SPOT:
+            copy_contract(order, trade)
+            trade.outcome = ContractOutcome.OPEN
+            trade.risk_amount = order.stake if trade.risk_amount is None else trade.risk_amount
+            if contract_fill is not None:
+                trade.longcode = (contract_fill.longcode or "")[:500] or None
+        else:
+            trade.outcome = ContractOutcome.OPEN
         db.add(trade)
         db.flush()
         order.trade_id = trade.id
@@ -330,8 +376,13 @@ class ExecutionEngine:
         journal.record(
             db,
             EventType.ORDER_FILLED,
-            f"{prefix}Filled {_v(order.filled_volume)} {order.symbol} at {fill}"
-            + (f" (slippage {slippage} pips)" if slippage is not None else ""),
+            (
+                f"{prefix}Bought {_what(order)} (contract {order.broker_contract_id}), "
+                f"entry spot {order.entry_spot or fill}"
+                if order.contract_type is not None
+                else f"{prefix}Filled {_v(order.filled_volume)} {order.symbol} at {fill}"
+                + (f" (slippage {slippage} pips)" if slippage is not None else "")
+            ),
             account_id=order.account_id,
             signal_id=order.signal_id,
             order_id=order.id,
@@ -341,7 +392,8 @@ class ExecutionEngine:
         journal.record(
             db,
             EventType.POSITION_OPENED,
-            f"{prefix}{order.side.value} {_v(trade.volume)} {order.symbol} opened at {fill}",
+            f"{prefix}{_what(order)} opened at {fill}"
+            + (f", expires {trade.expires_at:%H:%M:%S} UTC" if trade.expires_at else ""),
             account_id=order.account_id,
             signal_id=order.signal_id,
             order_id=order.id,
@@ -351,7 +403,7 @@ class ExecutionEngine:
         notify(
             db,
             "position.opened",
-            f"{prefix}{order.side.value} {_v(trade.volume)} {order.symbol} at {fill}",
+            f"{prefix}{_what(order)} at {fill}",
             account_id=order.account_id,
             data={"trade_id": str(trade.id)},
         )
@@ -366,14 +418,28 @@ class ExecutionEngine:
         symbol: SymbolInfo | None = None,
         grace: timedelta = timedelta(minutes=2),
     ) -> bool:
-        """Resolve an order whose outcome is uncertain. Returns True if resolved."""
+        """Resolve an order whose outcome is uncertain. Returns True if resolved.
+
+        A failed broker lookup leaves the order UNKNOWN (never "not executed"):
+        only a lookup that read the broker's state and found nothing may, after
+        the grace period, conclude that the order was not executed.
+        """
+        order.last_reconciled_at = utcnow()  # attempts are throttled per account
         try:
-            hint = OrderHint(order.symbol, order.side, order.volume, order.submitted_at)
+            hint = OrderHint(
+                order.symbol,
+                order.side,
+                order.volume,
+                order.submitted_at,
+                contract_type=order.contract_type,
+                stake=order.stake,
+                claimed_ids=claimed_broker_ids(db, order),
+            )
             found = adapter.find_order_by_client_id(order.client_order_id, hint)
         except BrokerError as exc:
             logger.warning("reconciliation lookup failed for %s: %s", order.client_order_id, exc)
+            db.commit()
             return False
-        order.last_reconciled_at = utcnow()
         if found is not None:
             journal.record(
                 db,
@@ -420,6 +486,9 @@ class ExecutionEngine:
             status=OrderStatus.PENDING_SUBMIT,
             is_simulated=adapter.is_simulated,
         )
+        if trade.contract_family is not ContractFamily.SPOT:
+            order.contract_family, order.contract_type = trade.contract_family, trade.contract_type
+            order.broker_contract_id, order.stake = trade.broker_contract_id, trade.stake
         db.add(order)
         db.commit()
         order.status, order.attempts, order.submitted_at = OrderStatus.SUBMITTED, 1, utcnow()
@@ -464,6 +533,8 @@ class ExecutionEngine:
     ) -> None:
         if trade.status is not TradeStatus.OPEN or not trade.broker_position_id:
             raise ValueError("trade is not open at the broker")
+        if trade.contract_family is ContractFamily.RISE_FALL:
+            raise ValueError("a Rise/Fall contract has no stop loss or take profit to modify")
         if stop_loss is None:
             raise ValueError("a stop loss is mandatory")
         adapter.modify_position(trade.broker_position_id, stop_loss, take_profit)
@@ -490,9 +561,17 @@ class ExecutionEngine:
         fallback_reason: ExitReason = ExitReason.BROKER,
         deals: list[Deal] | None = None,
     ) -> None:
-        """Record the exit of a trade using the broker's deal history when available."""
-        if trade.status is TradeStatus.CLOSED:
+        """Record the exit of a trade using the broker's deal history when available.
+
+        Without a closing deal the trade is closed with its P/L PENDING (NULL):
+        reconciliation retries `finalize_trade` until the history has it, and
+        meanwhile the risk engine blocks new entries on the account.
+        """
+        if trade.status is TradeStatus.CLOSED and trade.net_pnl is not None:
             return
+        settling = trade.status is TradeStatus.CLOSED  # closed earlier, P/L still pending
+        if settling and trade.exit_reason is not None:
+            fallback_reason = trade.exit_reason
         now = adapter.now()
         if deals is None:
             try:
@@ -514,6 +593,10 @@ class ExecutionEngine:
             if fallback_reason in (ExitReason.MANUAL, ExitReason.EMERGENCY, ExitReason.STRATEGY):
                 reason = fallback_reason
             exit_time = exits[-1].time
+            outcome = OUTCOMES.get(exits[-1].outcome or "")
+            payout = exits[-1].payout
+        elif settling:
+            return  # still not in the broker's history: retried on a later tick
         else:
             price = fallback_price if fallback_price is not None else trade.entry_price
             gross, commission, swap, reason, exit_time = (
@@ -523,6 +606,7 @@ class ExecutionEngine:
                 fallback_reason,
                 now,
             )
+            outcome, payout = None, None
             journal.record(
                 db,
                 EventType.POSITION_CLOSED,
@@ -536,17 +620,36 @@ class ExecutionEngine:
         trade.commission, trade.swap = _money(commission), _money(swap)
         trade.net_pnl = _money(gross + commission + swap) if gross is not None else None
         trade.unrealized_pnl = None
+        if trade.contract_family is not ContractFamily.SPOT:
+            trade.exit_spot = price if exits else trade.exit_spot
+            if payout is not None:
+                trade.payout = payout
+        if trade.fees is None or trade.contract_family is ContractFamily.SPOT:
+            trade.fees = _money(abs(commission))
+        if outcome is None and trade.net_pnl is not None:
+            outcome = (
+                ContractOutcome.WON
+                if trade.net_pnl > 0
+                else (ContractOutcome.LOST if trade.net_pnl < 0 else ContractOutcome.SOLD)
+            )
+        trade.outcome = outcome
         if trade.net_pnl is not None and trade.risk_amount:
             trade.r_multiple = (trade.net_pnl / trade.risk_amount).quantize(Decimal("0.01"))
         prefix = "PAPER " if trade.is_simulated else ""
         journal.record(
             db,
             EventType.POSITION_CLOSED,
-            f"{prefix}{trade.side.value} {_v(trade.volume)} {trade.symbol} closed at {price} "
-            f"({reason.value}), net P/L {trade.net_pnl}",
+            f"{prefix}{_trade_what(trade)} closed at {price} ({reason.value}"
+            + (f", {trade.outcome.value}" if trade.outcome is not None else "")
+            + f"), net P/L {trade.net_pnl}",
             account_id=trade.account_id,
             trade_id=trade.id,
-            data={"exit_price": str(price), "net_pnl": str(trade.net_pnl), "reason": reason.value},
+            data={
+                "exit_price": str(price),
+                "net_pnl": str(trade.net_pnl),
+                "reason": reason.value,
+                "outcome": trade.outcome.value if trade.outcome else None,
+            },
         )
         db.commit()
         kind = {
@@ -556,10 +659,72 @@ class ExecutionEngine:
         notify(
             db,
             kind,
-            f"{prefix}{trade.symbol} {trade.side.value} closed at {price}: net {trade.net_pnl}",
+            f"{prefix}{_trade_what(trade)} closed at {price}: net {trade.net_pnl}"
+            + (f" ({trade.outcome.value})" if trade.outcome is not None else ""),
             account_id=trade.account_id,
             data={"trade_id": str(trade.id)},
         )
+
+
+def claimed_broker_ids(db: Session, order: Order) -> frozenset[str]:
+    """Broker position/contract ids the database ties to this account's OTHER
+    orders and trades — an uncertain order must never be matched to them.
+
+    Only rows from around the order's time can compete for its match window."""
+    since = (order.submitted_at or order.created_at or utcnow()) - timedelta(days=1)
+    ids: set[str] = set()
+    for row in db.execute(
+        select(Trade.broker_position_id, Trade.broker_contract_id).where(
+            Trade.account_id == order.account_id, Trade.created_at >= since
+        )
+    ):
+        ids.update(v for v in row if v)
+    for row in db.execute(
+        select(Order.broker_position_id, Order.broker_contract_id).where(
+            Order.account_id == order.account_id, Order.id != order.id, Order.created_at >= since
+        )
+    ):
+        ids.update(v for v in row if v)
+    return frozenset(ids)
+
+
+def _trade_what(trade: Trade) -> str:
+    if trade.contract_type is not None and trade.stake is not None:
+        return f"{trade.contract_type.value} stake {_v(trade.stake)} {trade.symbol}"
+    return f"{trade.side.value} {_v(trade.volume)} {trade.symbol}"
+
+
+def apply_fill(order: Order, fill: ContractFill) -> None:
+    """Record what the broker actually sold (contract id, price paid, payout…)."""
+    order.broker_contract_id = fill.contract_id
+    order.contract_type = fill.contract_type
+    order.contract_family = fill.contract_type.family
+    order.stake = fill.buy_price
+    order.payout = fill.payout if fill.payout is not None else order.payout
+    order.multiplier = fill.multiplier if fill.multiplier is not None else order.multiplier
+    order.duration = fill.duration if fill.duration is not None else order.duration
+    order.duration_unit = fill.duration_unit or order.duration_unit
+    order.expires_at = fill.expires_at
+    order.entry_spot = fill.entry_spot
+    order.fees = fill.commission.quantize(Decimal("0.01")) if fill.commission else order.fees
+    order.outcome = ContractOutcome.OPEN
+
+
+def copy_contract(source: Order, trade: Trade) -> None:
+    for name in (
+        "contract_family",
+        "contract_type",
+        "broker_contract_id",
+        "stake",
+        "payout",
+        "multiplier",
+        "duration",
+        "duration_unit",
+        "expires_at",
+        "entry_spot",
+        "fees",
+    ):
+        setattr(trade, name, getattr(source, name))
 
 
 def order_summary(order: Order) -> dict[str, Any]:

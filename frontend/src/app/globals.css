@@ -1,70 +1,407 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+/* `dark:` applies under <html class="dark"> (set before paint by the theme script). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* `short:` compacts layouts on short viewports (e.g. 1280×720 / 1366×768 laptops). */
+@custom-variant short (@media (max-height: 800px));
+/* `tiny:` compacts further on very short viewports (≈ 1024×640). */
+@custom-variant tiny (@media (max-height: 680px));
 
 /*
- * 2kFX design tokens. Dark-first. Colour is semantic and used sparingly:
- *   positive = profit, negative = loss, warning = attention,
- *   live = REAL MONEY (reserved exclusively for LIVE mode), info = demo/neutral info.
+ * 2kPilot design system — calm, confident, numbers first.
+ *
+ * Raw values live in CSS variables on :root (light) and .dark (dark); the
+ * @theme inline block below turns them into Tailwind utilities. Two naming
+ * layers point at the same values:
+ *   - shadcn/ui names: background, foreground, card, popover, primary, secondary,
+ *     muted, accent, destructive, border, input, ring, chart-1..5, sidebar-*
+ *   - 2kPilot semantic names (used across features): canvas, surface,
+ *     surface-raised, surface-hover, line, line-strong, fg, fg-muted, fg-subtle,
+ *     brand-ink, positive, negative, warning, info, live, demo (+ "-soft", "-foreground").
+ *
+ * Palette: true neutrals (black / white / grays) plus ONE brand colour — the
+ * 2K purple. Everything else is semantic and only appears where it carries
+ * meaning:
+ *   primary   = 2K purple fill (#8b3fd9, white text) — primary actions, focus, selection
+ *   brand-ink = purple for text/icons on neutral surfaces (darker on light, lavender on dark)
+ *   positive  = profit / Start, negative = loss / danger, warning = needs attention,
+ *   live      = REAL MONEY (solid red), demo = virtual money (purple, outlined),
+ *   info      = neutral information (brand ink, never a second hue).
+ *
+ * Look: dark-first, music-app inspired — a near-black shell with rounded
+ * inset panels, a faint wash at the top of each page, bold tight headings,
+ * pill chips and round floating actions. Typography: Figtree for everything,
+ * with tabular figures for every number (`num`); JetBrains Mono only for ids.
+ * Every text pair is WCAG AA in both themes.
  */
-@theme {
-  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
-  --font-mono: var(--font-jetbrains), ui-monospace, monospace;
-
-  --color-canvas: #0a0d12;
-  --color-surface: #10141b;
-  --color-surface-raised: #161b24;
-  --color-surface-hover: #1b212c;
-  --color-line: #222a36;
-  --color-line-strong: #2e3847;
-
-  --color-fg: #e7eaf0;
-  --color-fg-muted: #9aa3b2;
-  --color-fg-subtle: #6b7486;
-
-  --color-accent: #7aa2ff;
-  --color-accent-strong: #5a86f0;
-
-  --color-positive: #34c28a;
-  --color-positive-soft: rgb(52 194 138 / 0.12);
-  --color-negative: #ef5f6b;
-  --color-negative-soft: rgb(239 95 107 / 0.12);
-  --color-warning: #f2b34a;
-  --color-warning-soft: rgb(242 179 74 / 0.12);
-  --color-info: #6ea8fe;
-  --color-info-soft: rgb(110 168 254 / 0.12);
-  --color-live: #ff3b3b;
-  --color-live-soft: rgb(255 59 59 / 0.14);
-}
 
 :root {
+  color-scheme: light;
+
+  /* The shell behind the inset panels (Spotify-style frame). */
+  --shell: #ededed;
+  --background: #fafafa;
+  --foreground: #0a0a0a;
+  --card: #ffffff;
+  --card-foreground: #0a0a0a;
+  --popover: #ffffff;
+  --popover-foreground: #0a0a0a;
+  --primary: #8b3fd9;
+  --primary-foreground: #ffffff;
+  --secondary: #f2f2f2;
+  --secondary-foreground: #0a0a0a;
+  --muted: #f2f2f2;
+  --muted-foreground: #575757;
+  --accent: #efefef;
+  --accent-foreground: #0a0a0a;
+  --destructive: #c52a1f;
+  --border: #e5e5e5;
+  --input: #d4d4d4;
+  --ring: #8b3fd9;
+
+  --brand-ink: #7b2fc9;
+  --surface-raised: #f5f5f5;
+  --surface-hover: #efefef;
+  --line-strong: #d4d4d4;
+  --fg-subtle: #686868;
+
+  --positive: #087443;
+  --positive-foreground: #ffffff;
+  --negative: #c52a1f;
+  --negative-foreground: #ffffff;
+  --warning: #8f5300;
+  --warning-foreground: #ffffff;
+  --info: var(--brand-ink);
+  --info-foreground: #ffffff;
+  --live: #c52a1f;
+  --live-foreground: #ffffff;
+  --demo: var(--brand-ink);
+  --demo-foreground: #ffffff;
+
+  /* Brand stops — all the same 2K purple family (the app tile gradient). */
+  --brand-1: #8b3fd9;
+  --brand-2: #6c25b0;
+  --brand-3: #b57cf0;
+
+  /* Page wash (set per section/account by the shell). */
+  --wash: #8b3fd9;
+
+  --chart-1: var(--primary);
+  --chart-2: var(--fg-subtle);
+  --chart-3: var(--brand-3);
+  --chart-4: var(--warning);
+  --chart-5: var(--line-strong);
+
+  --radius: 0.5rem;
+
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.04);
+  --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.04), 0 8px 20px -8px rgb(0 0 0 / 0.14);
+  --shadow-overlay: 0 24px 48px -16px rgb(0 0 0 / 0.22), 0 6px 14px -6px rgb(0 0 0 / 0.08);
+  --shadow-glow: 0 8px 24px -8px color-mix(in oklab, var(--primary) 45%, transparent);
+  --shadow-fab: 0 8px 16px -4px rgb(0 0 0 / 0.3);
+
+  --sidebar: #ffffff;
+  --sidebar-foreground: #0a0a0a;
+  --sidebar-primary: var(--primary);
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #f2f2f2;
+  --sidebar-accent-foreground: #0a0a0a;
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--ring);
+}
+
+.dark {
   color-scheme: dark;
+
+  --shell: #000000;
+  --background: #121212;
+  --foreground: #ffffff;
+  --card: #181818;
+  --card-foreground: #ffffff;
+  --popover: #222222;
+  --popover-foreground: #ffffff;
+  --primary: #8b3fd9;
+  --primary-foreground: #ffffff;
+  --secondary: #242424;
+  --secondary-foreground: #ffffff;
+  --muted: #242424;
+  --muted-foreground: #b3b3b3;
+  --accent: #282828;
+  --accent-foreground: #ffffff;
+  --destructive: #f2716a;
+  --border: #2a2a2a;
+  --input: #3a3a3a;
+  --ring: #b57cf0;
+
+  --brand-ink: #c8a2f0;
+  --surface-raised: #1f1f1f;
+  --surface-hover: #282828;
+  --line-strong: #3a3a3a;
+  --fg-subtle: #919191;
+
+  --positive: #3dcb83;
+  --positive-foreground: #03130b;
+  --negative: #f2716a;
+  --negative-foreground: #1a0504;
+  --warning: #f2b54a;
+  --warning-foreground: #1a1205;
+  --info: var(--brand-ink);
+  --info-foreground: #14081f;
+  --live: #f2716a;
+  --live-foreground: #1a0504;
+  --demo: var(--brand-ink);
+  --demo-foreground: #14081f;
+
+  --brand-1: #8b3fd9;
+  --brand-2: #6c25b0;
+  --brand-3: #c8a2f0;
+
+  --wash: #8b3fd9;
+
+  --shadow-card: none;
+  --shadow-raised: 0 8px 24px rgb(0 0 0 / 0.5);
+  --shadow-overlay: 0 16px 48px rgb(0 0 0 / 0.6);
+  --shadow-glow: 0 8px 28px -10px color-mix(in oklab, var(--primary) 55%, transparent);
+  --shadow-fab: 0 8px 16px rgb(0 0 0 / 0.45);
+
+  --sidebar: #121212;
+  --sidebar-foreground: #ffffff;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #242424;
+  --sidebar-accent-foreground: #ffffff;
 }
 
-html,
-body {
-  background: var(--color-canvas);
-  color: var(--color-fg);
+@theme inline {
+  --font-sans: var(--font-figtree), ui-sans-serif, system-ui, sans-serif;
+  --font-heading: var(--font-figtree), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, monospace;
+
+  /* shadcn/ui */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  /* 2kPilot semantic surfaces & text */
+  --color-canvas: var(--background);
+  --color-surface: var(--card);
+  --color-surface-raised: var(--surface-raised);
+  --color-surface-hover: var(--surface-hover);
+  --color-line: var(--border);
+  --color-line-strong: var(--line-strong);
+  --color-fg: var(--foreground);
+  --color-fg-muted: var(--muted-foreground);
+  --color-fg-subtle: var(--fg-subtle);
+  --color-brand-ink: var(--brand-ink);
+  --color-brand-1: var(--brand-1);
+  --color-brand-2: var(--brand-2);
+  --color-brand-3: var(--brand-3);
+  --color-shell: var(--shell);
+  --color-wash: var(--wash);
+
+  /* 2kPilot semantic status colours */
+  --color-positive: var(--positive);
+  --color-positive-foreground: var(--positive-foreground);
+  --color-positive-soft: color-mix(in oklab, var(--positive) 10%, transparent);
+  --color-negative: var(--negative);
+  --color-negative-foreground: var(--negative-foreground);
+  --color-negative-soft: color-mix(in oklab, var(--negative) 10%, transparent);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-warning-soft: color-mix(in oklab, var(--warning) 12%, transparent);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+  --color-info-soft: color-mix(in oklab, var(--info) 10%, transparent);
+  --color-live: var(--live);
+  --color-live-foreground: var(--live-foreground);
+  --color-live-soft: color-mix(in oklab, var(--live) 12%, transparent);
+  --color-demo: var(--demo);
+  --color-demo-foreground: var(--demo-foreground);
+  --color-demo-soft: color-mix(in oklab, var(--demo) 10%, transparent);
+
+  --radius-sm: calc(var(--radius) * 0.5);
+  --radius-md: calc(var(--radius) * 0.75);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.33);
+  --radius-2xl: calc(var(--radius) * 1.67);
+  --radius-3xl: calc(var(--radius) * 2);
+  --radius-4xl: calc(var(--radius) * 2.5);
+
+  /* Elevation */
+  --shadow-card: var(--shadow-card);
+  --shadow-raised: var(--shadow-raised);
+  --shadow-overlay: var(--shadow-overlay);
+  --shadow-glow: var(--shadow-glow);
+  --shadow-fab: var(--shadow-fab);
+
+  /* Motion */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --animate-fade-up: tp-fade-up 0.5s var(--ease-out-expo) both;
+  --animate-fade-in: tp-fade-in 0.4s ease-out both;
+  --animate-pulse-ring: tp-pulse-ring 2s cubic-bezier(0.2, 0.6, 0.4, 1) infinite;
+  --animate-shimmer: tp-shimmer 1.6s ease-in-out infinite;
+  --animate-drift: tp-drift 22s ease-in-out infinite alternate;
+  --animate-drift-slow: tp-drift 30s ease-in-out infinite alternate-reverse;
+  --animate-draw: tp-draw 2.4s var(--ease-out-expo) both;
+  --animate-float: tp-float 6s ease-in-out infinite;
 }
 
-body {
-  font-family: var(--font-sans);
-  font-feature-settings: "cv11", "ss01";
+@keyframes tp-fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes tp-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes tp-pulse-ring {
+  0% { transform: scale(1); opacity: 0.55; }
+  80%, 100% { transform: scale(2.6); opacity: 0; }
+}
+@keyframes tp-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@keyframes tp-drift {
+  0% { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(4%, -3%, 0) scale(1.08); }
+  100% { transform: translate3d(-3%, 4%, 0) scale(0.96); }
+}
+@keyframes tp-draw {
+  from { stroke-dashoffset: var(--tp-dash, 1200); }
+  to { stroke-dashoffset: 0; }
+}
+@keyframes tp-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
 }
 
-/* Financial figures always align. */
-.num {
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply font-sans;
+  }
+  body {
+    @apply bg-shell text-foreground;
+    text-rendering: optimizeLegibility;
+  }
+  h1, h2, h3 {
+    text-wrap: balance;
+  }
+  ::selection {
+    background: color-mix(in oklab, var(--primary) 26%, transparent);
+  }
+  /* Visible keyboard focus everywhere; components with their own ring utilities override this. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+  dialog::backdrop {
+    background: rgb(5 7 10 / 0.6);
+  }
+}
+
+/* Financial figures always align: Figtree with tabular, lining figures. */
+@utility num {
+  font-family: var(--font-figtree), ui-sans-serif, system-ui, sans-serif;
+  font-variant-numeric: tabular-nums lining-nums;
+  letter-spacing: -0.01em;
+}
+
+/* Identifiers (account ids, codes) in mono. */
+@utility mono-id {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
 }
 
-::selection {
-  background: rgb(122 162 255 / 0.3);
+/* Big bold page titles (playlist-header style). */
+@utility title-xl {
+  font-weight: 800;
+  letter-spacing: -0.035em;
+  line-height: 1.02;
 }
 
-:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
+/* Tiny uppercase eyebrow label. */
+@utility eyebrow {
+  font-size: 0.6875rem;
+  line-height: 1rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
-dialog::backdrop {
-  background: rgb(5 7 10 / 0.72);
+/* Bottom tab bar clears the iOS home indicator (class: safe-bottom). */
+@utility safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* Faint engineering grid (brand panel, hero). */
+@utility bg-grid {
+  background-image:
+    linear-gradient(to right, color-mix(in oklab, var(--foreground) 7%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in oklab, var(--foreground) 7%, transparent) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+/* Brand fill: the 2K app-tile gradient (one hue, light → deep purple). */
+@utility bg-brand {
+  background-image: linear-gradient(160deg, #9e4fe0 0%, #5a1389 100%);
+}
+
+/* Hero/cockpit surface: a card with a faint purple wash in one corner. */
+@utility surface-hero {
+  background-color: var(--card);
+  background-image: radial-gradient(120% 140% at 100% 0%, color-mix(in oklab, var(--brand-1) 7%, transparent) 0%, transparent 55%);
+}
+
+/* Shimmer placeholder (skeletons). */
+@utility shimmer {
+  background-color: var(--muted);
+  background-image: linear-gradient(90deg, transparent 0%, color-mix(in oklab, var(--foreground) 5%, transparent) 50%, transparent 100%);
+  background-size: 200% 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

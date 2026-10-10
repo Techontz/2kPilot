@@ -7,6 +7,7 @@ use App\Models\Order;
 use App\Models\Signal;
 use App\Models\Trade;
 use App\Models\TradingAccount;
+use App\Models\User;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -14,24 +15,25 @@ use Illuminate\Support\Facades\DB;
 /**
  * Analytics computed only from stored records — never invented.
  *
- * Scope is ONE account, or ONE environment group (PAPER, DEMO or LIVE).
+ * Scope is ONE of the user's accounts, or ONE environment group (PAPER, DEMO
+ * or LIVE) of the user's accounts.
  * Simulated (PAPER) results are never mixed with real broker results.
  */
 class PerformanceService
 {
     /** @return Collection<int, TradingAccount> */
-    public function accountsFor(?string $accountId, ?string $environment): Collection
+    public function accountsFor(User $user, ?string $accountId, ?string $environment): Collection
     {
         if ($accountId !== null) {
-            return TradingAccount::query()->whereKey($accountId)->get();
+            return TradingAccount::query()->ownedBy($user)->whereKey($accountId)->get();
         }
 
-        return TradingAccount::query()->where('environment', $environment ?? 'PAPER')->get();
+        return TradingAccount::query()->ownedBy($user)->where('environment', $environment ?? 'PAPER')->get();
     }
 
-    public function performance(?string $accountId, ?string $environment, ?CarbonImmutable $since): array
+    public function performance(User $user, ?string $accountId, ?string $environment, ?CarbonImmutable $since): array
     {
-        $accounts = $this->accountsFor($accountId, $environment);
+        $accounts = $this->accountsFor($user, $accountId, $environment);
         $ids = $accounts->pluck('id');
         $scope = $accountId !== null
             ? ['type' => 'account', 'label' => $accounts->first()?->label, 'environment' => $accounts->first()?->environment->value]

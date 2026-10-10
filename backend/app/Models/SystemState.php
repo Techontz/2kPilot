@@ -2,9 +2,11 @@
 
 namespace App\Models;
 
-use App\Enums\TradingMode;
-
-/** The single row (id = 1) holding the kill switch, operating mode and engine heartbeat. */
+/**
+ * The single row (id = 1) holding the PLATFORM HALT (columns kill_switch_*,
+ * admin only — stops every user's trading) and the engine lease/heartbeat.
+ * Each user's own STOP switch and mode live in user_trading_states.
+ */
 class SystemState extends BaseModel
 {
     protected $table = 'system_state';
@@ -16,10 +18,8 @@ class SystemState extends BaseModel
     protected function casts(): array
     {
         return [
-            'trading_mode' => TradingMode::class,
             'kill_switch_engaged' => 'boolean',
             'kill_switch_changed_at' => 'datetime',
-            'mode_changed_at' => 'datetime',
             'engine_lease_until' => 'datetime',
             'engine_heartbeat_at' => 'datetime',
             'engine_degraded' => 'boolean',

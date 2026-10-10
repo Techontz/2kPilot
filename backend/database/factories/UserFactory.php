@@ -4,6 +4,7 @@ namespace Database\Factories;
 
 use App\Enums\UserRole;
 use App\Models\User;
+use App\Services\Users\UserProvisioner;
 use Illuminate\Database\Eloquent\Factories\Factory;
 use Illuminate\Support\Facades\Hash;
 
@@ -20,14 +21,20 @@ class UserFactory extends Factory
             'name' => fake()->name(),
             'email' => strtolower(fake()->unique()->safeEmail()),
             'password' => static::$password ??= Hash::make(self::PASSWORD),
-            'role' => UserRole::Owner,
+            'role' => UserRole::User,
             'is_active' => true,
         ];
     }
 
-    public function viewer(): static
+    public function admin(): static
     {
-        return $this->state(['role' => UserRole::Viewer]);
+        return $this->state(['role' => UserRole::Admin]);
+    }
+
+    /** As after sign-up: the default risk profile and trading state (stopped, DEMO). */
+    public function provisioned(): static
+    {
+        return $this->afterCreating(fn (User $user) => app(UserProvisioner::class)->provision($user));
     }
 
     public function inactive(): static

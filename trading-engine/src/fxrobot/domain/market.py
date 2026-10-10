@@ -73,7 +73,7 @@ class SymbolInfo:
     volume_step: Decimal
     trade_allowed: bool
     # Value of a one-point move for 1.00 lot in the ACCOUNT currency, when the
-    # broker provides it (MT5 does). Otherwise computed from conversion rates.
+    # broker provides it. Otherwise computed from conversion rates.
     point_value: Decimal | None = None
     canonical: str | None = None  # "EURUSD" when the broker symbol has a suffix
     # forex | commodities | indices | crypto | synthetic | stocks | other

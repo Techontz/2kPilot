@@ -35,6 +35,7 @@ from fxrobot.db.session import build_engine, build_session_factory
 from fxrobot.internal.auth import NonceCache, verify
 from fxrobot.internal.routes import router
 from fxrobot.services import strategies
+from fxrobot.services.strategy_drafts import StrategyDrafter
 from fxrobot.trading_engine.engine import TradingEngine
 
 logger = logging.getLogger(__name__)
@@ -108,7 +109,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         logger.info("shutdown complete")
 
     app = FastAPI(
-        title="2kFX trading engine (internal)",
+        title="2kPilot trading engine (internal)",
         version=__version__,
         lifespan=lifespan,
         docs_url=None,
@@ -120,6 +121,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.broker_manager = manager
     app.state.secret_box = box
     app.state.backtests = backtests
+    app.state.drafter = StrategyDrafter(settings)
     app.state.trading_engine = trading_engine
     nonces = NonceCache()
 
@@ -153,7 +155,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.exception_handler(AppError)
     async def _app_error(_: Request, exc: AppError) -> JSONResponse:
-        return JSONResponse(error_body(exc.code, exc.message), status_code=int(exc.status_code))
+        return JSONResponse(
+            error_body(exc.code, exc.message, exc.details), status_code=int(exc.status_code)
+        )
 
     @app.exception_handler(RequestValidationError)
     async def _validation(_: Request, exc: RequestValidationError) -> JSONResponse:

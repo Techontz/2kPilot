@@ -1,4 +1,9 @@
-"""Internal endpoints. Thin: validate input, call a service, serialise."""
+"""Internal endpoints. Thin: validate input, call a service, serialise.
+
+Laravel authenticates the user and checks ownership BEFORE calling; requests
+that act for a user carry that user's id (`user_id` / `actor_id`) or the
+exact account ids to act on.
+"""
 
 from __future__ import annotations
 
@@ -19,7 +24,8 @@ from fxrobot.broker_engine.errors import BrokerError
 from fxrobot.broker_engine.manager import BrokerManager
 from fxrobot.core.config import Settings
 from fxrobot.core.crypto import SecretBox
-from fxrobot.core.errors import BrokerUnavailableError, NotFoundError
+from fxrobot.core.errors import BrokerUnavailableError, NotFoundError, UnprocessableError
+from fxrobot.domain.contracts import ContractFamily, ContractSpec
 from fxrobot.domain.market import Side, Timeframe
 from fxrobot.domain.modes import AccountEnvironment
 from fxrobot.domain.trading import ConnectorType, OrderType
@@ -27,6 +33,7 @@ from fxrobot.internal import serializers as out
 from fxrobot.market_data.sessions import is_fx_market_open, session_at
 from fxrobot.models import BrokerConnection, SystemState, TradingAccount
 from fxrobot.services import brokers, market_data, strategies, trading_ops
+from fxrobot.services.strategy_drafts import StrategyDrafter
 
 router = APIRouter(prefix="/internal")
 
@@ -112,6 +119,34 @@ class ParamsIn(BaseModel):
 @router.post("/strategies/{key}/validate")
 def validate_parameters(key: str, body: ParamsIn) -> dict[str, Any]:
     return strategies.validate_params(key, body.parameters)
+
+
+def drafter_of(request: Request) -> StrategyDrafter:
+    return request.app.state.drafter  # type: ignore[no-any-return]
+
+
+@router.get("/strategies/catalog")
+def rules_catalog(request: Request) -> dict[str, Any]:
+    """Indicators, operators, fields and limits for the visual rule builder."""
+    return strategies.rules_catalog(ai_drafting_available=drafter_of(request).available)
+
+
+class DraftIn(BaseModel):
+    description: str = Field(min_length=10, max_length=2000)
+    symbol: str | None = Field(default=None, max_length=40)
+    timeframe: Timeframe | None = None
+    contract_family: ContractFamily | None = None
+
+
+@router.post("/strategies/draft")
+def draft_strategy(request: Request, body: DraftIn) -> dict[str, Any]:
+    """Plain English → a DRAFT rule set (never saved here; the user reviews it)."""
+    return drafter_of(request).draft(
+        body.description,
+        symbol=body.symbol,
+        timeframe=body.timeframe,
+        contract_family=body.contract_family.value if body.contract_family else None,
+    )
 
 
 # ── connections ──────────────────────────────────────────────────────────
@@ -264,6 +299,63 @@ def candles(
     return {"candles": [out.candle(c) for c in rows], "simulated": adapter.is_simulated}
 
 
+class UnsupportedContractError(UnprocessableError):
+    code = "unsupported_contract"
+
+
+def _spec(raw: dict[str, Any] | None) -> ContractSpec:
+    try:
+        return ContractSpec.parse(raw)
+    except ValueError as exc:
+        raise UnsupportedContractError(f"Invalid contract settings: {exc}") from exc
+
+
+@router.get("/accounts/{account_id}/contracts")
+def contracts(
+    request: Request,
+    db: Db,
+    account_id: uuid.UUID,
+    symbol: Annotated[str, Query(min_length=1, max_length=40)],
+) -> dict[str, Any]:
+    """Which contracts the account's broker offers on `symbol` (Deriv: contracts_for)."""
+    adapter = _adapter(request, _account(db, account_id))
+    try:
+        caps = adapter.contract_capabilities(symbol)
+    except BrokerError as exc:
+        raise BrokerUnavailableError(f"Contract offer unavailable: {exc}") from exc
+    data: dict[str, Any] = caps.as_json()
+    if not caps.spot and not caps.rise_fall and not caps.multipliers:
+        data["notes"] = [*data["notes"], f"No supported contracts on {symbol}."]
+    data["fetched_at"] = datetime.now(UTC).isoformat()
+    return data
+
+
+class ContractCheckIn(BaseModel):
+    symbol: str = Field(min_length=1, max_length=40)
+    contract: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/accounts/{account_id}/contracts/validate")
+def validate_contract(
+    request: Request, db: Db, account_id: uuid.UUID, body: ContractCheckIn
+) -> dict[str, Any]:
+    """Is this contract spec tradeable on this account and symbol? 422 with a reason if not."""
+    spec = _spec(body.contract)
+    adapter = _adapter(request, _account(db, account_id))
+    if spec.contract_family.value not in adapter.capabilities.contract_families:
+        raise UnsupportedContractError(
+            f"{spec.label()} is not offered by {adapter.connector_id.capitalize()}."
+        )
+    if spec.contract_family.is_contract:
+        try:
+            problem = adapter.contract_capabilities(body.symbol).check(spec)
+        except BrokerError as exc:
+            raise BrokerUnavailableError(f"Contract offer unavailable: {exc}") from exc
+        if problem:
+            raise UnsupportedContractError(problem)
+    return {"ok": True, "contract": spec.as_json()}
+
+
 @router.get("/market/session")
 def market_session() -> dict[str, Any]:
     now = datetime.now(UTC)
@@ -283,11 +375,12 @@ class TicketIn(BaseModel):
     side: Side
     order_type: OrderType = OrderType.MARKET
     volume: Decimal | None = Field(default=None, gt=0, max_digits=16, decimal_places=4)
-    stop_loss: Decimal = Field(gt=0, max_digits=24, decimal_places=10)
+    stop_loss: Decimal | None = Field(default=None, gt=0, max_digits=24, decimal_places=10)
     take_profit: Decimal | None = Field(default=None, gt=0, max_digits=24, decimal_places=10)
     idempotency_key: str | None = Field(default=None, min_length=16, max_length=64)
     actor_id: uuid.UUID | None = None
     actor_label: str = Field(default="dashboard", max_length=320)
+    contract: dict[str, Any] | None = None  # canonical contract spec; None = SPOT
 
     def ticket(self) -> trading_ops.ManualTicket:
         return trading_ops.ManualTicket(
@@ -301,6 +394,7 @@ class TicketIn(BaseModel):
             idempotency_key=self.idempotency_key,
             actor_id=self.actor_id,
             actor_label=self.actor_label,
+            contract=_spec(self.contract),
         )
 
 
@@ -340,9 +434,16 @@ class ModifyIn(ActorIn):
     take_profit: Decimal | None = Field(default=None, gt=0, max_digits=24, decimal_places=10)
 
 
+class CloseAllIn(ActorIn):
+    # The user's own accounts (Laravel resolves them). Nothing else is closed.
+    account_ids: list[uuid.UUID] = Field(max_length=1000)
+
+
 @router.post("/positions/close-all")
-def close_all(request: Request, db: Db, body: ActorIn) -> dict[str, Any]:
-    return trading_ops.close_all_positions(db, manager_of(request), actor_label=body.actor_label)
+def close_all(request: Request, db: Db, body: CloseAllIn) -> dict[str, Any]:
+    return trading_ops.close_all_positions(
+        db, manager_of(request), account_ids=body.account_ids, actor_label=body.actor_label
+    )
 
 
 @router.post("/positions/{trade_id}/close")
@@ -385,7 +486,11 @@ class BacktestIn(BaseModel):
     train_months: int = Field(default=6, ge=1, le=36)
     test_months: int = Field(default=2, ge=1, le=12)
     grid: dict[str, list[Any]] = Field(default_factory=dict)
-    actor_id: uuid.UUID | None = None
+    actor_id: uuid.UUID  # the user who owns the backtest
+    contract: dict[str, Any] | None = None  # canonical contract spec; None = SPOT
+    # Rise/Fall profit per 1 of stake when won — an ESTIMATE (live payouts vary).
+    payout_ratio: Decimal = Field(default=Decimal("0.95"), ge=Decimal("0.01"), le=Decimal(2))
+    commission_pct: Decimal = Field(default=Decimal(0), ge=0, le=Decimal(10))  # Multipliers
 
 
 def _aware(value: datetime) -> datetime:
@@ -413,6 +518,9 @@ def create_backtest(request: Request, db: Db, body: BacktestIn) -> dict[str, Any
             train_months=body.train_months,
             test_months=body.test_months,
             grid=body.grid,
+            contract=body.contract or {},
+            payout_ratio=body.payout_ratio,
+            commission_pct=body.commission_pct,
         ),
         body.actor_id,
         run_async=False,  # Laravel's queue job runs it via /run
@@ -441,12 +549,18 @@ class SyntheticIn(BaseModel):
     timeframe: Timeframe = Timeframe.H1
     days: int = Field(default=365, ge=30, le=3650)
     seed: int = Field(default=42, ge=0, le=2**31)
+    user_id: uuid.UUID | None = None  # owner; None = a shared dataset
 
 
 @router.post("/datasets/synthetic")
 def synthetic(db: Db, body: SyntheticIn) -> dict[str, Any]:
     dataset = market_data.generate_synthetic(
-        db, symbol=body.symbol, timeframe=body.timeframe, days=body.days, seed=body.seed
+        db,
+        symbol=body.symbol,
+        timeframe=body.timeframe,
+        days=body.days,
+        seed=body.seed,
+        user_id=body.user_id,
     )
     return {"id": str(dataset.id), "bars": dataset.bar_count}
 
@@ -457,6 +571,7 @@ class CsvIn(BaseModel):
     content: str = Field(max_length=60_000_000)
     utc_offset_hours: float = Field(default=0, ge=-14, le=14)
     filename: str = Field(default="upload.csv", max_length=200)
+    user_id: uuid.UUID | None = None
 
 
 @router.post("/datasets/import")
@@ -468,6 +583,7 @@ def import_csv(db: Db, body: CsvIn) -> dict[str, Any]:
         content=body.content,
         utc_offset_hours=body.utc_offset_hours,
         filename=body.filename,
+        user_id=body.user_id,
     )
     return {"id": str(dataset.id), "report": out.plain(report)}
 
@@ -478,6 +594,7 @@ class DownloadIn(BaseModel):
     timeframe: Timeframe
     start: datetime
     end: datetime
+    user_id: uuid.UUID | None = None
 
 
 @router.post("/datasets/download")
@@ -492,5 +609,6 @@ def download(request: Request, db: Db, body: DownloadIn) -> dict[str, Any]:
         timeframe=body.timeframe,
         start=_aware(body.start),
         end=_aware(body.end),
+        user_id=body.user_id,
     )
     return {"id": str(dataset.id), "bars": dataset.bar_count}

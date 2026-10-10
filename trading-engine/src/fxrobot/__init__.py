@@ -1,3 +1,3 @@
-"""2kFX ROBOT backend package."""
+"""2kPilot trading engine package."""
 
 __version__ = "0.1.0"

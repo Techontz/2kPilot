@@ -17,6 +17,12 @@ use Illuminate\Support\Str;
  *
  * Access tokens last about one hour; for 24/7 automated trading a personal
  * access token is more robust (documented in docs/BROKERS.md).
+ *
+ * Local development: Deriv's web application firewall answers 403 "Access Denied"
+ * to any /oauth2/auth or /oauth2/token request whose `redirect_uri` points at a
+ * loopback host (localhost, 127.0.0.1, ::1). For those we leave `redirect_uri`
+ * out of both requests; Deriv then uses the redirect URL registered for the app,
+ * which must be exactly DERIV_OAUTH_REDIRECT_URL (see docs/BROKERS.md).
  */
 class DerivOAuth
 {
@@ -26,7 +32,7 @@ class DerivOAuth
 
     public function enabled(): bool
     {
-        return (bool) config('fx.deriv.app_id') && (bool) config('fx.deriv.oauth_redirect_url');
+        return (bool) config('tradepilot.deriv.app_id') && (bool) config('tradepilot.deriv.oauth_redirect_url');
     }
 
     /** @return array{url: string, state: string, verifier: string} */
@@ -40,8 +46,8 @@ class DerivOAuth
         $challenge = rtrim(strtr(base64_encode(hash('sha256', $verifier, true)), '+/', '-_'), '=');
         $url = self::AUTHORIZE_URL.'?'.http_build_query([
             'response_type' => 'code',
-            'client_id' => config('fx.deriv.app_id'),
-            'redirect_uri' => config('fx.deriv.oauth_redirect_url'),
+            'client_id' => config('tradepilot.deriv.app_id'),
+            ...$this->redirectParam(),
             'scope' => 'trade',
             'state' => $state,
             'code_challenge' => $challenge,
@@ -57,9 +63,9 @@ class DerivOAuth
         try {
             $response = Http::asForm()->acceptJson()->timeout(20)->post(self::TOKEN_URL, [
                 'grant_type' => 'authorization_code',
-                'client_id' => config('fx.deriv.app_id'),
+                'client_id' => config('tradepilot.deriv.app_id'),
                 'code' => $code,
-                'redirect_uri' => config('fx.deriv.oauth_redirect_url'),
+                ...$this->redirectParam(),
                 'code_verifier' => $verifier,
             ]);
         } catch (ConnectionException) {
@@ -76,5 +82,26 @@ class DerivOAuth
             'expires_in' => is_numeric($response->json('expires_in')) ? (int) $response->json('expires_in') : null,
             'refresh_token' => $response->json('refresh_token') ?: null,
         ];
+    }
+
+    /**
+     * `redirect_uri` for both OAuth requests — omitted for loopback hosts, which
+     * Deriv's firewall blocks (Deriv falls back to the app's registered URL).
+     *
+     * @return array<string, string>
+     */
+    private function redirectParam(): array
+    {
+        $url = (string) config('tradepilot.deriv.oauth_redirect_url');
+
+        return self::isLoopback($url) ? [] : ['redirect_uri' => $url];
+    }
+
+    public static function isLoopback(string $url): bool
+    {
+        $host = strtolower(trim((string) parse_url($url, PHP_URL_HOST), '[]'));
+
+        return $host === 'localhost' || str_ends_with($host, '.localhost') || $host === '::1'
+            || (filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false && str_starts_with($host, '127.'));
     }
 }

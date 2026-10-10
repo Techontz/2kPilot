@@ -30,6 +30,6 @@ class AnalyticsController extends Controller
             default => null,
         };
 
-        return response()->json($this->performance->performance($data['account_id'] ?? null, $data['environment'] ?? null, $since));
+        return response()->json($this->performance->performance($request->user(), $data['account_id'] ?? null, $data['environment'] ?? null, $since));
     }
 }

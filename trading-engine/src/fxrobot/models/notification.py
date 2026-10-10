@@ -13,13 +13,16 @@ from fxrobot.domain.trading import NotificationSeverity
 
 
 class Notification(Base):
+    """In-app notification. `user_id` = recipient; NULL = platform notification (admins)."""
+
     __tablename__ = "notifications"
     __table_args__ = (
-        Index("ix_notifications_created", "created_at"),
-        Index("ix_notifications_read", "read_at"),
+        Index("ix_notifications_user_created", "user_id", "created_at"),
+        Index("ix_notifications_user_read", "user_id", "read_at"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     type: Mapped[str] = mapped_column(String(40))  # e.g. "broker.disconnected"
     severity: Mapped[NotificationSeverity] = mapped_column(
         str_enum(NotificationSeverity, "notification_severity", 16)

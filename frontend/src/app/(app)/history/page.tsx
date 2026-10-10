@@ -1,8 +1,13 @@
 import type { Metadata } from "next";
-import { HistoryScreen } from "@/features/records/RecordsScreens";
+import { Suspense } from "react";
+import { HistorySection } from "@/features/history/HistorySection";
 
 export const metadata: Metadata = { title: "History" };
 
 export default function Page() {
-  return <HistoryScreen />;
+  return (
+    <Suspense>
+      <HistorySection />
+    </Suspense>
+  );
 }

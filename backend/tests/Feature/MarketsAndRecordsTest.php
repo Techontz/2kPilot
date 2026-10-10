@@ -25,7 +25,7 @@ class MarketsAndRecordsTest extends TestCase
                 'base_currency' => 'EUR', 'quote_currency' => 'USD', 'digits' => 5, 'point' => '0.00001', 'contract_size' => '100000',
                 'volume_min' => '0.01', 'volume_max' => '50', 'volume_step' => '0.01', 'trade_allowed' => true, 'market_open' => true]);
         }
-        $this->actingAs($this->viewer())->getJson("/api/markets/instruments?account_id={$account->id}")->assertOk()
+        $this->actingAs($this->me())->getJson("/api/markets/instruments?account_id={$account->id}")->assertOk()
             ->assertJsonPath('provider', 'Paper Trading')->assertJsonPath('simulated', true)
             ->assertJsonPath('categories.forex', 1)->assertJsonCount(2, 'instruments');
         $this->getJson("/api/markets/instruments?account_id={$account->id}&category=synthetic")->assertJsonCount(1, 'instruments');
@@ -36,7 +36,7 @@ class MarketsAndRecordsTest extends TestCase
     {
         $this->fakeEngine(['/internal/accounts/' => ['quotes' => ['EURUSD' => ['bid' => '1.1', 'ask' => '1.10012', 'spread' => '0.00012']], 'errors' => [], 'simulated' => true]]);
         $account = $this->account();
-        $this->actingAs($this->owner())->getJson("/api/markets/quotes?account_id={$account->id}&symbols=EURUSD")
+        $this->actingAs($this->me())->getJson("/api/markets/quotes?account_id={$account->id}&symbols=EURUSD")
             ->assertOk()->assertJsonPath('quotes.EURUSD.ask', '1.10012');
         Http::assertSent(fn (Request $r) => str_contains($r->url(), 'symbols=EURUSD'));
     }
@@ -52,7 +52,7 @@ class MarketsAndRecordsTest extends TestCase
         foreach (['SIGNAL_GENERATED', 'RISK_APPROVED', 'ORDER_SUBMITTED', 'ORDER_FILLED', 'POSITION_OPENED'] as $type) {
             TradeEvent::query()->create(['account_id' => $account->id, 'signal_id' => $signal->id, 'event_type' => $type, 'message' => $type, 'data' => []]);
         }
-        $body = $this->actingAs($this->viewer())->getJson("/api/trades/{$trade->id}")->assertOk()->json();
+        $body = $this->actingAs($this->me())->getJson("/api/trades/{$trade->id}")->assertOk()->json();
         $this->assertSame('MANUAL', $body['trade']['source']);
         $this->assertSame('Kill switch', $body['signal']['risk_checks'][0]['rule']);
         $this->assertCount(1, $body['orders']);
@@ -66,9 +66,9 @@ class MarketsAndRecordsTest extends TestCase
     public function test_notifications_can_be_listed_and_marked_read(): void
     {
         foreach (range(1, 3) as $i) {
-            AppNotification::query()->create(['type' => 'position.opened', 'severity' => 'info', 'title' => 't', 'message' => "m{$i}", 'data' => []]);
+            AppNotification::query()->create(['user_id' => $this->me()->id, 'type' => 'position.opened', 'severity' => 'info', 'title' => 't', 'message' => "m{$i}", 'data' => []]);
         }
-        $this->actingAs($this->owner())->getJson('/api/notifications/unread-count')->assertJsonPath('count', 3);
+        $this->actingAs($this->me())->getJson('/api/notifications/unread-count')->assertJsonPath('count', 3);
         $first = $this->getJson('/api/notifications')->json('data.0.id');
         $this->postJson('/api/notifications/read', ['ids' => [$first]])->assertJsonPath('updated', 1);
         $this->getJson('/api/notifications/unread-count')->assertJsonPath('count', 2);
@@ -78,7 +78,7 @@ class MarketsAndRecordsTest extends TestCase
     public function test_system_status_reports_configuration(): void
     {
         $this->engineDown();
-        $this->actingAs($this->owner())->getJson('/api/system/status')->assertOk()
+        $this->actingAs($this->me())->getJson('/api/system/status')->assertOk()
             ->assertJsonPath('engine.status', 'unreachable')
             ->assertJsonPath('live_trading_enabled', false)
             ->assertJsonPath('broker_vault_configured', true)

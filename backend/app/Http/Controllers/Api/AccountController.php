@@ -14,10 +14,10 @@ class AccountController extends Controller
 {
     public function __construct(private readonly BrokerService $brokers, private readonly EngineClient $engine) {}
 
-    public function index(): JsonResponse
+    public function index(Request $request): JsonResponse
     {
         $this->authorize('viewAny', TradingAccount::class);
-        $accounts = TradingAccount::query()
+        $accounts = TradingAccount::query()->ownedBy($request->user())
             ->with(['connection', 'riskProfile', 'assignments.strategy'])
             ->orderBy('created_at')->get();
 
@@ -47,7 +47,7 @@ class AccountController extends Controller
     /** Refresh balance/equity from the broker now. */
     public function sync(TradingAccount $account): JsonResponse
     {
-        $this->authorize('view', $account);
+        $this->authorize('trade', $account); // reaches the broker: the owner only
         $this->engine->post("/internal/accounts/{$account->id}/sync");
 
         return response()->json(new AccountResource($account->fresh()->load('connection', 'riskProfile', 'assignments.strategy')));

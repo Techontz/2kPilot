@@ -10,7 +10,7 @@ use Illuminate\Console\Command;
 /** Scheduled each evening (UTC): one notification per account that traded today. */
 class DailySummary extends Command
 {
-    protected $signature = 'fx:daily-summary';
+    protected $signature = 'tp:daily-summary';
 
     protected $description = 'Post a daily P/L summary notification per account';
 
@@ -26,7 +26,7 @@ class DailySummary extends Command
             $net = round((float) (clone $closed)->sum('net_pnl'), 2);
             $wins = (clone $closed)->where('net_pnl', '>', 0)->count();
             $label = $account->isPaper() ? "{$account->label} (PAPER)" : "{$account->label} ({$account->environment->value})";
-            $notifier->notify('report.daily', "{$label}: {$count} closed trade(s), {$wins} winner(s), net ".($net >= 0 ? '+' : '')."{$net} {$account->currency} today.", $account->id);
+            $notifier->notify('report.daily', "{$label}: {$count} closed trade(s), {$wins} winner(s), net ".($net >= 0 ? '+' : '')."{$net} {$account->currency} today.", $account->user_id, $account->id);
         }
 
         return self::SUCCESS;

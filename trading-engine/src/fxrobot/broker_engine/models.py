@@ -12,6 +12,7 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
+from fxrobot.domain.contracts import ContractFill, ContractOrder, ContractType
 from fxrobot.domain.market import Candle, Quote, Side, SymbolInfo, Timeframe
 from fxrobot.domain.modes import AccountEnvironment
 from fxrobot.domain.trading import OrderStatus, OrderType
@@ -67,6 +68,13 @@ class Position:
     unrealized_pnl: Decimal
     swap: Decimal = Decimal(0)
     client_order_id: str | None = None
+    # Contracts only (None for SPOT positions).
+    contract_type: ContractType | None = None
+    stake: Decimal | None = None
+    payout: Decimal | None = None
+    multiplier: int | None = None
+    expires_at: datetime | None = None
+    is_valid_to_sell: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,7 +116,11 @@ class Deal:
     swap: Decimal = Decimal(0)
     fee: Decimal = Decimal(0)
     client_order_id: str | None = None
-    reason: str = "OTHER"  # SL | TP | SO | CLIENT | EXPERT | OTHER
+    reason: str = "OTHER"  # SL | TP | SO | CLIENT | EXPERT | EXPIRY | OTHER
+    # Contracts: how it settled (WON | LOST | SOLD | CANCELLED) and its payout.
+    outcome: str | None = None
+    payout: Decimal | None = None
+    contract_type: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +137,9 @@ class OrderRequest:
     price: Decimal | None = None  # required for LIMIT / STOP
     max_slippage_points: int | None = None
     comment: str = ""
+    # Set for contract trades (Rise/Fall, Multipliers): what to buy and the stake.
+    # `volume` is then 1 (one contract); lots do not apply.
+    contract: ContractOrder | None = None
 
     def __post_init__(self) -> None:
         if self.volume <= 0:
@@ -152,6 +167,7 @@ class OrderResult:
     broker_message: str | None = None
     time: datetime | None = None
     raw: dict[str, str] = field(default_factory=dict)
+    contract: ContractFill | None = None  # contract trades: what the broker sold us
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,13 +182,20 @@ class OrderHint:
     """What we sent, for brokers that cannot store our client order id (Deriv).
 
     Reconciliation passes it to `find_order_by_client_id` so the adapter can
-    match a broker-side contract to our order after a timeout or restart.
+    match a broker-side contract to our order after a timeout or restart. A
+    lookup that cannot read the broker's state must RAISE (BrokerError), never
+    answer "not found": "not found" lets the engine conclude "not executed".
     """
 
     symbol: str
     side: Side
     volume: Decimal
     submitted_at: datetime | None
+    contract_type: ContractType | None = None  # contracts: the exact type that was bought
+    stake: Decimal | None = None  # contracts: the stake we asked to pay
+    # Broker ids the database already ties to OTHER orders/trades of this account:
+    # never matched again (the adapter's in-memory claims are lost on restart).
+    claimed_ids: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,7 +210,9 @@ class BrokerCapabilities:
     historical_candles: bool = True
     trade_history: bool = True
     client_order_ids: bool = True  # broker stores our idempotency key
-    volume_unit: str = "lots"  # "lots" | "units"
+    volume_unit: str = "lots"  # "lots" | "units" | "stake"
+    # Contract families offered: "SPOT" (lots), "RISE_FALL", "MULTIPLIER".
+    contract_families: tuple[str, ...] = ("SPOT",)
     notes: tuple[str, ...] = ()
 
     def as_json(self) -> dict[str, object]:
@@ -200,5 +225,6 @@ class BrokerCapabilities:
             "trade_history": self.trade_history,
             "client_order_ids": self.client_order_ids,
             "volume_unit": self.volume_unit,
+            "contract_families": list(self.contract_families),
             "notes": list(self.notes),
         }

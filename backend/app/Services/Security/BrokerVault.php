@@ -6,7 +6,7 @@ use Illuminate\Encryption\Encrypter;
 use RuntimeException;
 
 /**
- * Encrypts broker credentials (tokens, passwords, bridge secrets) with
+ * Encrypts broker credentials (tokens, OAuth refresh tokens) with
  * AES-256-GCM and BROKER_CREDENTIALS_KEY — a key separate from APP_KEY, shared
  * only with the trading engine, which decrypts them when it connects.
  *
@@ -45,7 +45,7 @@ class BrokerVault
     {
         $key = $this->rawKey();
         if ($key === null) {
-            throw new RuntimeException('BROKER_CREDENTIALS_KEY is not configured (run php artisan fx:keys).');
+            throw new RuntimeException('BROKER_CREDENTIALS_KEY is not configured (run php artisan tp:keys).');
         }
 
         return $this->encrypter ??= new Encrypter($key, 'aes-256-gcm');

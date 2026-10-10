@@ -6,8 +6,10 @@ use App\Enums\AccountEnvironment;
 use App\Enums\ConnectorType;
 use App\Models\BrokerConnection;
 use App\Models\TradingAccount;
+use App\Services\Brokers\DerivOAuth;
 use App\Services\Security\BrokerVault;
 use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Http;
 use Tests\Support\CreatesTradingData;
 use Tests\TestCase;
@@ -40,21 +42,21 @@ class BrokersTest extends TestCase
         ], $extra);
     }
 
-    public function test_catalogue_lists_paper_deriv_and_mt5(): void
+    public function test_catalogue_lists_paper_and_deriv(): void
     {
-        $body = $this->actingAs($this->owner())->getJson('/api/brokers/connectors')->assertOk()->json();
+        $body = $this->actingAs($this->me())->getJson('/api/brokers/connectors')->assertOk()->json();
         $connectors = collect($body['connectors'])->keyBy('id');
-        $this->assertSame(['paper', 'deriv', 'mt5_bridge'], $connectors->keys()->all());
+        $this->assertSame(['paper', 'deriv'], $connectors->keys()->all());
         $this->assertSame('needs_setup', $connectors['deriv']['status']); // no DERIV_APP_ID in tests
         $this->assertSame(['pat'], $connectors['deriv']['auth_methods']); // OAuth hidden until configured
-        $this->assertSame(['DEMO', 'LIVE'], $connectors['mt5_bridge']['environments']);
+        $this->assertSame(['DEMO', 'LIVE'], $connectors['deriv']['environments']);
         $this->assertTrue($body['vault_configured']);
     }
 
     public function test_connection_test_sends_only_encrypted_credentials_to_the_engine(): void
     {
         $this->fakeEngine(['/internal/connections/test' => $this->engineAccount()]);
-        $this->actingAs($this->owner())->postJson('/api/brokers/test', $this->derivBody())
+        $this->actingAs($this->me())->postJson('/api/brokers/test', $this->derivBody())
             ->assertOk()->assertJsonPath('account.environment', 'DEMO')->assertJsonPath('symbol_count', 89);
         Http::assertSent(function (Request $request) {
             $this->assertStringNotContainsString('pat_super_secret_token', $request->body());
@@ -72,15 +74,17 @@ class BrokersTest extends TestCase
             '/internal/connections/test' => $this->engineAccount(),
             '/internal/connections/' => ['status' => 'CONNECTED', 'detail' => 'Connected', 'symbols' => 89],
         ]);
-        $response = $this->actingAs($this->owner())->postJson('/api/brokers', $this->derivBody(['label' => 'My Deriv demo']))
+        $response = $this->actingAs($this->me())->postJson('/api/brokers', $this->derivBody(['label' => 'My Deriv demo']))
             ->assertCreated()
             ->assertJsonPath('environment', 'DEMO')
             ->assertJsonPath('trading_enabled', false)
             ->assertJsonPath('broker', 'Deriv')
-            ->assertJsonPath('risk_profile.name', 'Conservative (default)');
+            ->assertJsonPath('risk_profile.name', 'Beginner');
         $this->assertStringNotContainsString('pat_super_secret_token', $response->getContent());
         $this->assertStringNotContainsString('credentials', $response->getContent());
         $connection = BrokerConnection::query()->firstOrFail();
+        $this->assertSame($this->me()->id, $connection->user_id);
+        $this->assertSame($this->me()->id, TradingAccount::query()->firstOrFail()->user_id);
         $this->assertStringNotContainsString('pat_super_secret_token', $connection->getRawOriginal('credentials_encrypted'));
         $this->assertSame('pat_super_secret_token', app(BrokerVault::class)->open($connection->credentials_encrypted)['token']);
         $this->assertStringNotContainsString('pat_super_secret_token', json_encode(\DB::table('audit_logs')->get()));
@@ -94,7 +98,7 @@ class BrokersTest extends TestCase
     {
         $this->fakeEngine(['/internal/connections/test' => Http::response(['error' => ['code' => 'environment_mismatch',
             'message' => 'You selected DEMO, but the broker reports a LIVE account. Nothing was saved.']], 422)]);
-        $this->actingAs($this->owner())->postJson('/api/brokers', $this->derivBody())
+        $this->actingAs($this->me())->postJson('/api/brokers', $this->derivBody())
             ->assertStatus(422)->assertJsonPath('code', 'environment_mismatch');
         $this->assertDatabaseCount('broker_connections', 0);
         $this->assertDatabaseHas('audit_logs', ['action' => 'broker.add_failed', 'outcome' => 'failure']);
@@ -103,7 +107,7 @@ class BrokersTest extends TestCase
     public function test_live_accounts_need_explicit_acknowledgement(): void
     {
         Http::fake();
-        $this->actingAs($this->owner())->postJson('/api/brokers', $this->derivBody(['expected_environment' => 'LIVE']))
+        $this->actingAs($this->me())->postJson('/api/brokers', $this->derivBody(['expected_environment' => 'LIVE']))
             ->assertForbidden()->assertJsonPath('code', 'live_ack_required');
         Http::assertNothingSent();
     }
@@ -112,19 +116,19 @@ class BrokersTest extends TestCase
     {
         $this->account(['broker_account_id' => 'DOT90004580', 'server' => 'Deriv Options (demo)'], ConnectorType::Deriv);
         $this->fakeEngine(['/internal/connections/test' => $this->engineAccount()]);
-        $this->actingAs($this->owner())->postJson('/api/brokers', $this->derivBody())->assertStatus(409);
+        $this->actingAs($this->me())->postJson('/api/brokers', $this->derivBody())->assertStatus(409);
     }
 
     public function test_engine_offline_is_a_clear_error(): void
     {
         $this->engineDown();
-        $this->actingAs($this->owner())->postJson('/api/brokers/test', $this->derivBody())
+        $this->actingAs($this->me())->postJson('/api/brokers/test', $this->derivBody())
             ->assertStatus(503)->assertJsonPath('code', 'engine_unreachable');
     }
 
     public function test_enabling_trading_needs_a_risk_profile_and_respects_the_live_lock(): void
     {
-        $owner = $this->owner();
+        $owner = $this->me();
         $account = $this->account();
         $this->actingAs($owner)->patchJson("/api/accounts/{$account->id}", ['trading_enabled' => true])
             ->assertForbidden()->assertJsonFragment(['message' => 'Assign a risk profile before enabling trading.']);
@@ -140,7 +144,7 @@ class BrokersTest extends TestCase
     public function test_removing_the_risk_profile_turns_trading_off(): void
     {
         $account = $this->account(['risk_profile_id' => $this->defaultProfile()->id, 'trading_enabled' => true]);
-        $this->actingAs($this->owner())->patchJson("/api/accounts/{$account->id}", ['risk_profile_id' => null])
+        $this->actingAs($this->me())->patchJson("/api/accounts/{$account->id}", ['risk_profile_id' => null])
             ->assertOk()->assertJsonPath('trading_enabled', false);
     }
 
@@ -151,7 +155,7 @@ class BrokersTest extends TestCase
                 ? ['status' => 'DISCONNECTED'] : ['status' => 'CONNECTED', 'detail' => 'Connected', 'symbols' => 3]),
         ]);
         $account = $this->account(['trading_enabled' => true, 'risk_profile_id' => $this->defaultProfile()->id], ConnectorType::Deriv);
-        $owner = $this->owner();
+        $owner = $this->me();
         $this->actingAs($owner)->postJson("/api/brokers/{$account->connection_id}/disconnect")->assertOk();
         $connection = $account->connection->fresh();
         $this->assertFalse($connection->is_enabled);
@@ -166,7 +170,7 @@ class BrokersTest extends TestCase
         Http::fake(['engine.test/*' => Http::response(['status' => 'DISCONNECTED'])]);
         $account = $this->account([], ConnectorType::Deriv);
         $this->closedTrade($account, 12.5);
-        $this->actingAs($this->owner())->deleteJson("/api/brokers/{$account->connection_id}")
+        $this->actingAs($this->me())->deleteJson("/api/brokers/{$account->connection_id}")
             ->assertOk()->assertJsonPath('result', 'broker.archived');
         $connection = BrokerConnection::query()->findOrFail($account->connection_id);
         $this->assertNull($connection->credentials_encrypted);
@@ -178,39 +182,32 @@ class BrokersTest extends TestCase
     {
         $account = $this->account([], ConnectorType::Deriv);
         $this->openTrade($account);
-        $this->actingAs($this->owner())->deleteJson("/api/brokers/{$account->connection_id}")->assertStatus(409);
-    }
-
-    public function test_viewers_cannot_add_or_change_brokers(): void
-    {
-        $account = $this->account();
-        $this->actingAs($this->viewer())->getJson('/api/brokers')->assertOk();
-        $this->postJson('/api/brokers/test', $this->derivBody())->assertForbidden();
-        $this->postJson('/api/brokers', $this->derivBody())->assertForbidden();
-        $this->patchJson("/api/accounts/{$account->id}", ['trading_enabled' => true])->assertForbidden();
-        $this->deleteJson("/api/brokers/{$account->connection_id}")->assertForbidden();
+        $this->actingAs($this->me())->deleteJson("/api/brokers/{$account->connection_id}")->assertStatus(409);
     }
 
     public function test_deriv_oauth_uses_pkce_and_keeps_the_token_server_side(): void
     {
-        config(['fx.deriv.app_id' => 'app12345', 'fx.deriv.oauth_redirect_url' => 'http://localhost:3421/api/brokers/deriv/oauth/callback']);
-        $owner = $this->owner();
+        config(['tradepilot.deriv.app_id' => 'app12345', 'tradepilot.deriv.oauth_redirect_url' => 'http://localhost:3421/api/brokers/deriv/oauth/callback']);
+        $owner = $this->me();
         $url = $this->actingAs($owner)->postJson('/api/brokers/deriv/oauth/start')->assertOk()->json('url');
         parse_str(parse_url($url, PHP_URL_QUERY), $query);
         $this->assertStringStartsWith('https://auth.deriv.com/oauth2/auth', $url);
         $this->assertSame(['code', 'app12345', 'S256', 'trade'], [$query['response_type'], $query['client_id'], $query['code_challenge_method'], $query['scope']]);
+        // Deriv's firewall blocks loopback redirect URLs: Deriv uses the app's registered one instead.
+        $this->assertArrayNotHasKey('redirect_uri', $query);
         $pkce = session('deriv.pkce');
         $this->assertSame(rtrim(strtr(base64_encode(hash('sha256', $pkce['verifier'], true)), '+/', '-_'), '='), $query['code_challenge']);
 
-        $this->get('/api/brokers/deriv/oauth/callback?code=abc&state=forged')->assertRedirect('http://localhost:3421/brokers/new?deriv=invalid');
+        $this->get('/api/brokers/deriv/oauth/callback?code=abc&state=forged')->assertRedirect('http://localhost:3421/settings/brokers/new?deriv=invalid');
 
         $this->withSession(['deriv.pkce' => $pkce]);
         Http::fake([
             'auth.deriv.com/oauth2/token' => Http::response(['access_token' => 'ory_at_secret', 'expires_in' => 3600, 'token_type' => 'Bearer']),
             'engine.test/internal/deriv/accounts*' => Http::response([['account_id' => 'DOT90004580', 'account_type' => 'demo', 'currency' => 'USD', 'balance' => '10000', 'status' => 'active']]),
         ]);
-        $this->get("/api/brokers/deriv/oauth/callback?code=abc&state={$pkce['state']}")->assertRedirect('http://localhost:3421/brokers/new?deriv=connected');
-        Http::assertSent(fn (Request $r) => str_contains($r->url(), 'oauth2/token') && $r['code_verifier'] === $pkce['verifier'] && $r['grant_type'] === 'authorization_code');
+        $this->get("/api/brokers/deriv/oauth/callback?code=abc&state={$pkce['state']}")->assertRedirect('http://localhost:3421/settings/brokers/new?deriv=connected');
+        Http::assertSent(fn (Request $r) => str_contains($r->url(), 'oauth2/token') && $r['code_verifier'] === $pkce['verifier'] && $r['grant_type'] === 'authorization_code'
+            && ! array_key_exists('redirect_uri', $r->data()));
         $this->assertStringNotContainsString('ory_at_secret', (string) session('deriv.oauth'));
 
         $this->postJson('/api/brokers/deriv/accounts', ['use_oauth' => true])->assertOk()->assertJsonPath('accounts.0.account_type', 'demo');
@@ -218,10 +215,56 @@ class BrokersTest extends TestCase
             && app(BrokerVault::class)->open($r['credentials_encrypted']) === ['token' => 'ory_at_secret', 'token_kind' => 'oauth']);
     }
 
+    public function test_deriv_oauth_sends_a_public_redirect_url(): void
+    {
+        $redirect = 'https://app.example.com/api/brokers/deriv/oauth/callback';
+        config(['tradepilot.deriv.app_id' => 'app12345', 'tradepilot.deriv.oauth_redirect_url' => $redirect]);
+        $url = $this->actingAs($this->me())->postJson('/api/brokers/deriv/oauth/start')->assertOk()->json('url');
+        parse_str(parse_url($url, PHP_URL_QUERY), $query);
+        $this->assertSame($redirect, $query['redirect_uri']);
+
+        $pkce = session('deriv.pkce');
+        Http::fake(['auth.deriv.com/oauth2/token' => Http::response(['access_token' => 'ory_at_x', 'expires_in' => 3600])]);
+        $this->get("/api/brokers/deriv/oauth/callback?code=abc&state={$pkce['state']}");
+        Http::assertSent(fn (Request $r) => str_contains($r->url(), 'oauth2/token') && $r['redirect_uri'] === $redirect);
+    }
+
+    public function test_deriv_oauth_return_uses_the_session_whatever_the_referer(): void
+    {
+        // Deriv's redirect is a top-level navigation whose Referer is auth.deriv.com:
+        // the callback must still find the signed-in user in the session cookie.
+        config(['tradepilot.deriv.app_id' => 'app12345', 'tradepilot.deriv.oauth_redirect_url' => 'http://localhost:3421/api/brokers/deriv/oauth/callback']);
+        $owner = $this->me();
+        $this->app['auth']->forgetGuards();
+        $this->withSession([Auth::guard('web')->getName() => $owner->id, 'deriv.pkce' => ['state' => 'state-123456', 'verifier' => str_repeat('v', 64), 'until' => now()->addMinutes(5)->timestamp]]);
+        Http::fake(['auth.deriv.com/oauth2/token' => Http::response(['access_token' => 'ory_at_x', 'expires_in' => 3600])]);
+
+        $this->withHeader('Referer', 'https://auth.deriv.com/')
+            ->get('/api/brokers/deriv/oauth/callback?code=abc&state=state-123456')
+            ->assertRedirect('http://localhost:3421/settings/brokers/new?deriv=connected');
+    }
+
+    public function test_deriv_oauth_return_without_a_session_goes_back_to_the_dashboard(): void
+    {
+        $this->withHeader('Referer', 'https://auth.deriv.com/')
+            ->get('/api/brokers/deriv/oauth/callback?code=abc&state=x')
+            ->assertRedirect(rtrim((string) config('tradepilot.frontend_url'), '/').'/settings/brokers/new?deriv=signed_out');
+    }
+
+    public function test_loopback_redirect_urls_are_detected(): void
+    {
+        foreach (['http://localhost:3001/cb', 'https://localhost/cb', 'http://127.0.0.1:3421/cb', 'http://[::1]:3000/cb', 'http://app.localhost/cb'] as $url) {
+            $this->assertTrue(DerivOAuth::isLoopback($url), $url);
+        }
+        foreach (['https://app.example.com/cb', 'http://localhost.example.com/cb', 'http://10.0.0.5/cb'] as $url) {
+            $this->assertFalse(DerivOAuth::isLoopback($url), $url);
+        }
+    }
+
     public function test_account_list_shows_card_fields(): void
     {
         $account = $this->account(['risk_profile_id' => $this->defaultProfile()->id]);
-        $this->actingAs($this->owner())->getJson('/api/accounts')->assertOk()
+        $this->actingAs($this->me())->getJson('/api/accounts')->assertOk()
             ->assertJsonPath('0.id', $account->id)
             ->assertJsonPath('0.environment', 'PAPER')
             ->assertJsonPath('0.connection_status', 'CONNECTED')

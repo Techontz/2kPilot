@@ -1,31 +1,42 @@
 """Deriv adapter against the in-memory Deriv imitation (tests/fake_deriv.py).
 
-These tests prove the translation between the 2kFX broker contract and Deriv
-multipliers. They do NOT prove anything about Deriv's live servers — that
+These tests prove the translation between the 2kPilot broker contract and Deriv
+Options contracts (Rise/Fall and Multipliers, stake-sized). They do NOT prove
+anything about Deriv's live servers — that
 requires a real App ID and token (see docs/BROKERS.md).
 """
 
 from __future__ import annotations
 
+import dataclasses
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
 from fxrobot.broker_engine.adapters.deriv import DerivAdapter
-from fxrobot.broker_engine.adapters.deriv_client import DerivRest
+from fxrobot.broker_engine.adapters.deriv_client import DerivRest, RateLimiter
 from fxrobot.broker_engine.errors import (
     BrokerAuthError,
+    BrokerError,
+    BrokerRateLimitError,
     MarketClosedError,
     OrderOutcomeUnknownError,
     OrderRejectedError,
     SymbolUnavailableError,
 )
-from fxrobot.broker_engine.models import DealEntry, OrderHint, OrderRequest
+from fxrobot.broker_engine.models import DealEntry, OrderHint, OrderRequest, OrderResult
+from fxrobot.domain.contracts import (
+    ContractFamily,
+    ContractOrder,
+    ContractSpec,
+    ContractType,
+)
 from fxrobot.domain.market import Side, Timeframe
 from fxrobot.domain.modes import AccountEnvironment
 from fxrobot.domain.trading import OrderStatus, OrderType
-from tests.fake_deriv import ACCOUNT_ID, APP_ID, TOKEN, FakeDeriv
+from tests.fake_deriv import ACCOUNT_ID, APP_ID, TOKEN, FakeDeriv, FakeSocket
 
 
 def make(fake: FakeDeriv, *, token: str = TOKEN, account_id: str = ACCOUNT_ID) -> DerivAdapter:
@@ -53,18 +64,64 @@ def deriv(fake: FakeDeriv) -> DerivAdapter:
     adapter.disconnect()
 
 
-def buy(adapter: DerivAdapter, cid: str = "c" * 24, **kw: object) -> object:
+def multiplier(
+    side: Side = Side.BUY, stake: str = "11", mult: int = 100, **kw: object
+) -> ContractOrder:
+    spec = ContractSpec(contract_family=ContractFamily.MULTIPLIER, multiplier=mult, **kw)  # type: ignore[arg-type]
+    return ContractOrder.build(spec, side, Decimal(stake))
+
+
+def rise_fall(
+    side: Side = Side.BUY,
+    stake: str = "1",
+    duration: int = 5,
+    unit: str = "m",
+    equals: bool = False,
+) -> ContractOrder:
+    spec = ContractSpec(
+        contract_family=ContractFamily.RISE_FALL,
+        duration=duration,
+        duration_unit=unit,
+        allow_equals=equals,
+    )
+    return ContractOrder.build(spec, side, Decimal(stake))
+
+
+def buy(adapter: DerivAdapter, cid: str = "c" * 24, **kw: object) -> OrderResult:
+    side = kw.pop("side", Side.BUY)
+    contract = kw.pop("contract", None) or multiplier(side)  # type: ignore[arg-type]
     request = OrderRequest(
         client_order_id=cid,
         symbol=str(kw.pop("symbol", "frxEURUSD")),
-        side=kw.pop("side", Side.BUY),  # type: ignore[arg-type]
+        side=side,  # type: ignore[arg-type]
         order_type=kw.pop("order_type", OrderType.MARKET),  # type: ignore[arg-type]
-        volume=Decimal(str(kw.pop("volume", "0.01"))),
+        volume=Decimal(1),
         stop_loss=kw.pop("stop_loss", Decimal("1.09500")),  # type: ignore[arg-type]
         take_profit=kw.pop("take_profit", Decimal("1.11000")),  # type: ignore[arg-type]
         price=kw.pop("price", None),  # type: ignore[arg-type]
+        contract=contract,  # type: ignore[arg-type]
     )
     return adapter.place_order(request)
+
+
+def buy_rf(adapter: DerivAdapter, cid: str = "r" * 24, **kw: object) -> OrderResult:
+    contract = kw.pop("contract", None) or rise_fall(kw.pop("side", Side.BUY))  # type: ignore[arg-type]
+    request = OrderRequest(
+        client_order_id=cid,
+        symbol=str(kw.pop("symbol", "R_100")),
+        side=contract.contract_type.side,  # type: ignore[union-attr]
+        order_type=OrderType.MARKET,
+        volume=Decimal(1),
+        stop_loss=None,
+        take_profit=None,
+        contract=contract,  # type: ignore[arg-type]
+    )
+    return adapter.place_order(request)
+
+
+def window(fake: FakeDeriv) -> tuple[datetime, datetime]:
+    now = datetime.fromtimestamp(fake.now, UTC)
+    return now - timedelta(days=1), now + timedelta(minutes=5)
 
 
 # ── connection & account ─────────────────────────────────────────────────
@@ -128,15 +185,51 @@ def test_symbols_are_normalised_with_categories(deriv: DerivAdapter) -> None:
     assert symbols["R_100"].quote_currency == "USD"
 
 
-def test_get_symbol_uses_lowest_multiplier_and_stake_limits(deriv: DerivAdapter) -> None:
+def test_symbols_are_one_contract_and_carry_market_status(
+    deriv: DerivAdapter, fake: FakeDeriv
+) -> None:
     info = deriv.get_symbol("EURUSD")  # canonical names resolve to frxEURUSD
     assert info.name == "frxEURUSD"
-    assert deriv.multiplier_for("frxEURUSD") == 100
-    # stake 1..2000 USD at x100; 1 lot = 100 000 EUR = 110 000 USD → 0.01..1.81 lots
-    assert info.volume_min == Decimal("0.01")
-    assert info.volume_max == Decimal("1.81")
-    assert info.contract_size == 100_000
-    assert deriv.get_symbol("R_100").contract_size == 1
+    assert info.volume_min == info.volume_max == Decimal(1)  # one contract, no lots
+    assert info.market_open is True and info.trade_allowed is True
+    fake.suspended.add("R_100")
+    deriv._active_at = 0  # type: ignore[attr-defined]
+    r100 = deriv.get_symbol("R_100")
+    assert r100.trade_allowed is False and r100.market_open is False
+    # active_symbols is no longer limited to multiplier symbols
+    request = next(r for r in fake.requests if "active_symbols" in r)
+    assert "contract_type" not in request
+
+
+def test_contract_capabilities_parse_contracts_for(deriv: DerivAdapter) -> None:
+    caps = deriv.contract_capabilities("R_100")
+    assert caps.rise_fall and caps.allow_equals
+    assert {(r.minimum, r.maximum) for r in caps.durations} == {("1t", "10t"), ("15s", "1d")}
+    assert caps.multipliers == (40, 100, 200, 300, 400)
+    assert caps.spot is False
+    # Higher/Lower (CALL with a barrier, 1d–365d) is not treated as Rise/Fall
+    assert all(r.maximum != "365d" for r in caps.durations)
+    spec = ContractSpec(contract_family=ContractFamily.RISE_FALL, duration=5, duration_unit="m")
+    assert caps.check(spec) is None
+    long = ContractSpec(contract_family=ContractFamily.RISE_FALL, duration=2, duration_unit="d")
+    assert "not offered" in (caps.check(long) or "")
+    ticks = ContractSpec(contract_family=ContractFamily.RISE_FALL, duration=11, duration_unit="t")
+    assert "1t–10t" in (caps.check(ticks) or "")
+    eur = deriv.contract_capabilities("frxEURUSD")
+    assert not eur.rise_fall and "Rise/Fall contracts are not offered" in (eur.check(spec) or "")
+    assert eur.check(ContractSpec(contract_family=ContractFamily.MULTIPLIER, multiplier=50))
+
+
+def test_quote_contract_reads_stake_limits_from_the_proposal(
+    deriv: DerivAdapter, fake: FakeDeriv
+) -> None:
+    quote = deriv.quote_contract("R_100", rise_fall())
+    assert (quote.stake_min, quote.stake_max) == (Decimal("0.35"), Decimal("50000.00"))
+    assert quote.payout == Decimal("1.95")
+    assert not fake.contracts  # pricing never buys
+    fake.stake_limits = False
+    missing = deriv.quote_contract("R_100", rise_fall())
+    assert missing.stake_min is None and "validation_params" in missing.detail
 
 
 def test_unknown_symbol_is_unavailable(deriv: DerivAdapter) -> None:
@@ -169,46 +262,223 @@ def test_candles_are_closed_bars_only(deriv: DerivAdapter, fake: FakeDeriv) -> N
     assert [b.time for b in bars] == sorted(b.time for b in bars)
 
 
-# ── trading ──────────────────────────────────────────────────────────────
+# ── Rise/Fall ────────────────────────────────────────────────────────────
 
 
-def test_market_buy_converts_prices_to_deriv_amounts(deriv: DerivAdapter, fake: FakeDeriv) -> None:
-    result = buy(deriv, volume="0.01")  # 1000 EUR ≈ 1100 USD notional → stake 11.00 at x100
-    assert result.status is OrderStatus.FILLED  # type: ignore[attr-defined]
+def test_rise_fall_buy_uses_proposal_then_buy_at_ask(deriv: DerivAdapter, fake: FakeDeriv) -> None:
+    result = buy_rf(deriv)
+    proposal = next(r for r in fake.requests if r.get("contract_type") == "CALL")
+    assert {k: proposal[k] for k in ("underlying_symbol", "basis", "amount", "currency")} == {
+        "underlying_symbol": "R_100",
+        "basis": "stake",
+        "amount": 1.0,
+        "currency": "USD",
+    }
+    assert (proposal["duration"], proposal["duration_unit"]) == (5, "m")
+    assert "symbol" not in proposal and "multiplier" not in proposal
+    purchase = next(r for r in fake.requests if "buy" in r)
+    assert purchase["price"] == 1.0  # no more than the ask price
+    fill = result.contract
+    assert fill is not None and fill.contract_type is ContractType.CALL
+    assert fill.buy_price == Decimal("1") and fill.payout == Decimal("1.95")
+    assert fill.contract_id == result.broker_position_id
+    assert fill.transaction_id and fill.longcode and "higher" in fill.longcode
+    assert fill.entry_spot == Decimal("637.4")
+    assert fill.expires_at == datetime.fromtimestamp(fake.now + 300, UTC)
+    position = deriv.get_positions()[0]
+    assert position.contract_type is ContractType.CALL and position.stake == Decimal("1.00")
+    assert position.payout == Decimal("1.95") and position.volume == 1
+
+
+def test_allow_equals_buys_calle_and_sell_buys_put(deriv: DerivAdapter, fake: FakeDeriv) -> None:
+    buy_rf(deriv, contract=rise_fall(equals=True))
+    buy_rf(deriv, cid="s" * 24, contract=rise_fall(Side.SELL))
+    types = sorted(c.contract_type for c in fake.contracts.values())
+    assert types == ["CALLE", "PUT"]
+
+
+def test_ask_above_the_stake_is_refused(deriv: DerivAdapter, fake: FakeDeriv) -> None:
+    fake.ask_markup = Decimal("0.05")
+    with pytest.raises(OrderRejectedError, match="never pays more than the stake"):
+        buy_rf(deriv)
+    assert not fake.contracts and not [r for r in fake.requests if "buy" in r]
+
+
+def test_unsupported_duration_is_refused_before_pricing(
+    deriv: DerivAdapter, fake: FakeDeriv
+) -> None:
+    with pytest.raises(OrderRejectedError, match="not offered"):
+        buy_rf(deriv, contract=rise_fall(duration=3, unit="d"))
+    assert not [r for r in fake.requests if r.get("contract_type") == "CALL"]
+
+
+def test_rise_fall_settles_won_and_lost_from_string_money_fields(
+    deriv: DerivAdapter, fake: FakeDeriv
+) -> None:
+    won = buy_rf(deriv)
+    lost = buy_rf(deriv, cid="t" * 24)
+    fake.expire(int(won.broker_position_id or 0), "640.00")
+    fake.expire(int(lost.broker_position_id or 0), "637.40")  # equal: CALL loses
+    deriv._portfolio_at = 0  # type: ignore[attr-defined]
+    assert deriv.get_positions() == []
+    deals = {d.position_id: d for d in deriv.get_deals(*window(fake)) if d.entry is DealEntry.OUT}
+    win, loss = deals[won.broker_position_id], deals[lost.broker_position_id]
+    assert (win.outcome, win.profit, win.reason) == ("WON", Decimal("0.95"), "EXPIRY")
+    assert win.payout == Decimal("1.95") and win.price == Decimal("640.00")
+    assert (loss.outcome, loss.profit) == ("LOST", Decimal("-1.00"))
+    assert loss.contract_type == "CALL"
+
+
+def test_rise_fall_early_close_only_when_valid_to_sell(
+    deriv: DerivAdapter, fake: FakeDeriv
+) -> None:
+    result = buy_rf(deriv)
+    contract = fake.contracts[int(result.broker_position_id or 0)]
+    contract.valid_to_sell = False
+    with pytest.raises(OrderRejectedError, match="settles at expiry"):
+        deriv.close_position(result.broker_position_id or "", "u" * 24)
+    assert not [r for r in fake.requests if "sell" in r]
+    contract.valid_to_sell = True
+    closed = deriv.close_position(result.broker_position_id or "", "u" * 24)
+    assert closed.status is OrderStatus.FILLED
+    exit_deal = next(d for d in deriv.get_deals(*window(fake)) if d.entry is DealEntry.OUT)
+    assert exit_deal.outcome == "SOLD" and exit_deal.reason == "CLIENT"
+
+
+def test_rise_fall_has_no_stop_to_modify(deriv: DerivAdapter) -> None:
+    result = buy_rf(deriv)
+    with pytest.raises(OrderRejectedError, match="Only Multiplier"):
+        deriv.modify_position(result.broker_position_id or "", Decimal("600"), None)
+
+
+def test_settled_while_offline_is_found_by_hint_without_rebuying(
+    deriv: DerivAdapter, fake: FakeDeriv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import fxrobot.broker_engine.adapters.deriv_client as client
+
+    monkeypatch.setattr(client, "REQUEST_TIMEOUT", 0.3)
+    fake.timeout_next_buy = True
+    sent_at = datetime.fromtimestamp(fake.now, UTC)
+    original = deriv._ws().request
+
+    def quick(payload: dict[str, object], timeout: float = 15) -> dict[str, object]:
+        return original(payload, timeout=0.3 if "buy" in payload else timeout)
+
+    monkeypatch.setattr(deriv._ws(), "request", quick)
+    with pytest.raises(OrderOutcomeUnknownError):
+        buy_rf(deriv, cid="v" * 24)
+    cid = next(iter(fake.contracts))
+    fake.expire(cid, "630")  # expired (lost) while we were away
+    fresh = make(fake)
+    fresh.connect()
+    hint = OrderHint("R_100", Side.BUY, Decimal(1), sent_at, contract_type=ContractType.CALL)
+    found = fresh.find_order_by_client_id("v" * 24, hint)
+    assert found is not None and found.broker_position_id == str(cid)
+    assert found.contract is not None and found.contract.buy_price == Decimal("1.00")
+    assert len([r for r in fake.requests if "buy" in r]) == 1  # never re-bought
+    # a PUT hint does not claim a CALL contract
+    other = OrderHint("R_100", Side.SELL, Decimal(1), sent_at, contract_type=ContractType.PUT)
+    assert fresh.find_order_by_client_id("w" * 24, other) is None
+    fresh.disconnect()
+
+
+def test_rate_limiter_refuses_before_sending() -> None:
+    clock = [0.0]
+    limiter = RateLimiter(
+        {"trading": ((60.0, 2),), "other": ((60.0, 100),)},
+        clock=lambda: clock[0],
+        sleep=lambda s: clock.__setitem__(0, clock[0] + s),
+        max_wait=1.0,
+    )
+    limiter.acquire("trading")
+    limiter.acquire("trading")
+
+    with pytest.raises(BrokerRateLimitError, match="nothing was sent"):
+        limiter.acquire("trading")
+    clock[0] = 59.5  # the oldest request leaves the window within max_wait
+    limiter.acquire("trading")
+    limiter.acquire(None)  # ping is never counted
+
+
+def test_rate_limited_buy_is_a_rejection(deriv: DerivAdapter, fake: FakeDeriv) -> None:
+    deriv._limiter = RateLimiter(  # type: ignore[attr-defined]
+        {
+            "trading": ((60.0, 1),),
+            "other": ((60.0, 1000),),
+            "account": ((60.0, 1000),),
+            "history": ((60.0, 1000),),
+        },
+        max_wait=0,
+    )
+    deriv._socket._limiter = deriv._limiter  # type: ignore[union-attr, attr-defined]
+    with pytest.raises(OrderRejectedError, match="budget"):
+        buy_rf(deriv)  # proposal uses the budget; the buy is refused before sending
+    assert not fake.contracts
+
+
+# ── Multipliers ──────────────────────────────────────────────────────────
+
+
+def test_multiplier_buy_uses_stake_and_converts_prices_to_amounts(
+    deriv: DerivAdapter, fake: FakeDeriv
+) -> None:
+    result = buy(deriv)  # stake 11 at ×100 → notional 1100
     proposal = next(
         r
         for r in fake.requests
         if "proposal" in r and "proposal_open_contract" not in r and "limit_order" in r
     )
     assert proposal["contract_type"] == "MULTUP" and proposal["multiplier"] == 100
-    assert proposal["amount"] == 11.0
+    assert proposal["amount"] == 11.0 and proposal["basis"] == "stake"
     # stop 50 pips away on 1100 notional: 1100 * 0.0050 / 1.1 = 5.00 USD
     assert proposal["limit_order"] == {"stop_loss": 5.0, "take_profit": 10.0}
-    contract = fake.contracts[int(result.broker_position_id)]  # type: ignore[attr-defined]
-    assert contract.stake == Decimal("11")
-    assert result.filled_volume == Decimal("0.0100")  # type: ignore[attr-defined]
-    assert result.fill_price == Decimal("1.1")  # type: ignore[attr-defined]
-    positions = deriv.get_positions()
-    assert len(positions) == 1
-    position = positions[0]
-    assert position.side is Side.BUY and position.volume == Decimal("0.0100")
+    assert fake.contracts[int(result.broker_position_id or 0)].stake == Decimal("11")
+    assert result.filled_volume == 1 and result.fill_price == Decimal("1.1")
+    assert result.contract is not None and result.contract.multiplier == 100
+    position = deriv.get_positions()[0]
+    assert position.side is Side.BUY and position.contract_type is ContractType.MULTUP
     assert position.stop_loss == Decimal("1.095") and position.take_profit == Decimal("1.11")
     assert position.client_order_id == "c" * 24
     assert deriv.get_account().balance == Decimal("9989")
+
+
+def test_explicit_money_amounts_win_over_strategy_prices(
+    deriv: DerivAdapter, fake: FakeDeriv
+) -> None:
+    buy(
+        deriv,
+        contract=multiplier(take_profit_amount=Decimal("3"), stop_loss_amount=Decimal("2")),
+    )
+    proposal = next(r for r in fake.requests if "limit_order" in r)
+    assert proposal["limit_order"] == {"stop_loss": 2.0, "take_profit": 3.0}
+
+
+def test_strategy_stop_beyond_the_stake_is_left_to_the_stop_out(
+    deriv: DerivAdapter, fake: FakeDeriv
+) -> None:
+    buy(deriv, stop_loss=Decimal("1.08000"))  # 1.8% move > the 1% stop out at ×100
+    proposal = next(r for r in fake.requests if "limit_order" in r)
+    assert "stop_loss" not in proposal["limit_order"]  # Deriv's stop out caps the loss
+
+
+def test_multiplier_not_offered_is_refused(deriv: DerivAdapter, fake: FakeDeriv) -> None:
+    with pytest.raises(OrderRejectedError, match="not offered"):
+        buy(deriv, contract=multiplier(mult=7))
+    assert not fake.contracts
+
+
+def test_lots_are_refused(deriv: DerivAdapter) -> None:
+    request = OrderRequest(
+        "x" * 24, "frxEURUSD", Side.BUY, OrderType.MARKET, Decimal("0.01"), Decimal("1.095"), None
+    )
+    with pytest.raises(OrderRejectedError, match="Rise/Fall or Multiplier"):
+        deriv.place_order(request)
 
 
 def test_sell_is_multdown(deriv: DerivAdapter, fake: FakeDeriv) -> None:
     buy(deriv, side=Side.SELL, stop_loss=Decimal("1.10500"), take_profit=Decimal("1.09000"))
     assert next(iter(fake.contracts.values())).contract_type == "MULTDOWN"
     assert deriv.get_positions()[0].side is Side.SELL
-
-
-def test_stop_beyond_the_stake_is_refused_before_sending(
-    deriv: DerivAdapter, fake: FakeDeriv
-) -> None:
-    with pytest.raises(OrderRejectedError, match="Stop loss is too far"):
-        buy(deriv, stop_loss=Decimal("1.08000"))  # 1.8% move > 1% allowed at x100
-    assert not fake.contracts
 
 
 def test_pending_orders_are_not_offered(deriv: DerivAdapter) -> None:
@@ -235,37 +505,33 @@ def test_equity_includes_open_contract_value(deriv: DerivAdapter, fake: FakeDeri
     assert position.unrealized_pnl == Decimal("5.5")
     account = deriv.get_account()
     assert account.equity == account.balance + Decimal("16.5")
-    assert result.status is OrderStatus.FILLED  # type: ignore[attr-defined]
+    assert result.status is OrderStatus.FILLED
 
 
 def test_close_position_sells_at_market_and_reports_the_deal(
     deriv: DerivAdapter, fake: FakeDeriv
 ) -> None:
     result = buy(deriv)
-    position_id = result.broker_position_id  # type: ignore[attr-defined]
+    position_id = result.broker_position_id or ""
     fake.set_price("frxEURUSD", "1.10220")  # +0.2% → +2.20
     closed = deriv.close_position(position_id, "d" * 24)
     assert closed.status is OrderStatus.FILLED
     assert closed.fill_price == Decimal("1.1022")
     assert deriv.get_positions() == []
-    deals = deriv.get_deals(
-        datetime.fromtimestamp(fake.now, UTC) - timedelta(days=1),
-        datetime.fromtimestamp(fake.now, UTC) + timedelta(minutes=5),
-    )
-    exits = [d for d in deals if d.entry is DealEntry.OUT]
+    exits = [d for d in deriv.get_deals(*window(fake)) if d.entry is DealEntry.OUT]
     assert len(exits) == 1 and exits[0].profit == Decimal("2.20")
-    assert exits[0].position_id == position_id
+    assert exits[0].position_id == position_id and exits[0].outcome == "SOLD"
 
 
 def test_partial_close_is_refused(deriv: DerivAdapter) -> None:
     result = buy(deriv)
     with pytest.raises(OrderRejectedError, match="partially"):
-        deriv.close_position(result.broker_position_id, "e" * 24, Decimal("0.005"))  # type: ignore[attr-defined]
+        deriv.close_position(result.broker_position_id or "", "e" * 24, Decimal("0.5"))
 
 
 def test_modify_converts_levels_to_amounts(deriv: DerivAdapter, fake: FakeDeriv) -> None:
     result = buy(deriv)
-    position_id = result.broker_position_id  # type: ignore[attr-defined]
+    position_id = result.broker_position_id or ""
     deriv.modify_position(position_id, Decimal("1.09780"), Decimal("1.11500"))
     contract = fake.contracts[int(position_id)]
     assert contract.stop_amount == Decimal("2.2")  # 0.2% of 1100
@@ -276,14 +542,10 @@ def test_modify_converts_levels_to_amounts(deriv: DerivAdapter, fake: FakeDeriv)
 
 def test_stop_loss_hit_at_broker_shows_as_sl_deal(deriv: DerivAdapter, fake: FakeDeriv) -> None:
     result = buy(deriv)
-    fake.close_externally(int(result.broker_position_id))  # type: ignore[attr-defined]
+    fake.close_externally(int(result.broker_position_id or 0))
     deriv._portfolio_at = 0  # type: ignore[attr-defined]
     assert deriv.get_positions() == []
-    deals = deriv.get_deals(
-        datetime.fromtimestamp(fake.now, UTC) - timedelta(days=1),
-        datetime.fromtimestamp(fake.now, UTC) + timedelta(minutes=5),
-    )
-    exit_deal = next(d for d in deals if d.entry is DealEntry.OUT)
+    exit_deal = next(d for d in deriv.get_deals(*window(fake)) if d.entry is DealEntry.OUT)
     assert exit_deal.reason == "SL" and exit_deal.profit == Decimal("-5.00")
 
 
@@ -306,18 +568,17 @@ def test_buy_timeout_is_unknown_and_reconciles_without_resending(
     monkeypatch.setattr(deriv._ws(), "request", quick)
     with pytest.raises(OrderOutcomeUnknownError):
         buy(deriv, cid="f" * 24)
-    buys = [r for r in fake.requests if "buy" in r]
-    assert len(buys) == 1
+    assert len([r for r in fake.requests if "buy" in r]) == 1
     # A restarted engine has no memory of the intent: it matches by hint.
     fresh = make(fake)
     fresh.connect()
     found = fresh.find_order_by_client_id(
-        "f" * 24, OrderHint("frxEURUSD", Side.BUY, Decimal("0.01"), sent_at)
+        "f" * 24,
+        OrderHint("frxEURUSD", Side.BUY, Decimal(1), sent_at, contract_type=ContractType.MULTUP),
     )
     assert found is not None and found.status is OrderStatus.FILLED
     assert found.broker_position_id == str(next(iter(fake.contracts)))
     assert len([r for r in fake.requests if "buy" in r]) == 1  # never re-sent
-    # The matched contract is now tied to our order id.
     assert fresh.get_positions()[0].client_order_id == "f" * 24
     fresh.disconnect()
 
@@ -334,19 +595,211 @@ def test_hint_does_not_match_other_symbols_or_old_contracts(
 ) -> None:
     buy(deriv, cid="g" * 24)
     long_ago = datetime.fromtimestamp(fake.now, UTC) - timedelta(hours=2)
+    up = ContractType.MULTUP
     assert (
         deriv.find_order_by_client_id(
-            "h" * 24, OrderHint("frxEURUSD", Side.BUY, Decimal(1), long_ago)
+            "h" * 24, OrderHint("frxEURUSD", Side.BUY, Decimal(1), long_ago, contract_type=up)
         )
         is None
     )
     now = datetime.fromtimestamp(fake.now, UTC)
     assert (
-        deriv.find_order_by_client_id("h" * 24, OrderHint("R_100", Side.BUY, Decimal(1), now))
+        deriv.find_order_by_client_id(
+            "h" * 24, OrderHint("R_100", Side.BUY, Decimal(1), now, contract_type=up)
+        )
         is None
     )
     # an already-claimed contract is never handed to a second order
     assert (
-        deriv.find_order_by_client_id("h" * 24, OrderHint("frxEURUSD", Side.BUY, Decimal(1), now))
+        deriv.find_order_by_client_id(
+            "h" * 24, OrderHint("frxEURUSD", Side.BUY, Decimal(1), now, contract_type=up)
+        )
         is None
     )
+
+
+def _drop_link_after_reply(monkeypatch: pytest.MonkeyPatch, request_key: str) -> None:
+    """Deriv answers `request_key`, then the link dies before anything else."""
+    original = FakeSocket.send
+
+    def send(self: FakeSocket, message: str) -> None:
+        original(self, message)
+        if request_key in json.loads(message):
+            self.drop()  # the reply is already queued
+
+    monkeypatch.setattr(FakeSocket, "send", send)
+
+
+def test_link_drop_after_the_buy_receipt_is_still_a_fill(
+    deriv: DerivAdapter, fake: FakeDeriv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deriv acknowledged the buy: a failed detail fetch must not report "not sent"."""
+    _drop_link_after_reply(monkeypatch, "buy")
+    result = buy(deriv, cid="a" * 24)
+    (contract_id,) = fake.contracts
+    assert result.status is OrderStatus.FILLED
+    assert result.broker_position_id == str(contract_id)
+    assert result.contract is not None
+    assert result.contract.buy_price == Decimal("11")  # from the receipt
+    assert result.contract.start_time == datetime.fromtimestamp(fake.now, UTC)
+
+
+def test_link_drop_after_the_sell_receipt_is_still_a_sale(
+    deriv: DerivAdapter, fake: FakeDeriv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = buy(deriv)
+    _drop_link_after_reply(monkeypatch, "sell")
+    closed = deriv.close_position(result.broker_position_id or "", "s" * 24)
+    assert closed.status is OrderStatus.FILLED
+    assert fake.contracts[int(result.broker_position_id or 0)].sold
+
+
+def _timed_out_rise_fall(
+    deriv: DerivAdapter, fake: FakeDeriv, monkeypatch: pytest.MonkeyPatch, cid: str
+) -> None:
+    import fxrobot.broker_engine.adapters.deriv_client as client
+
+    monkeypatch.setattr(client, "REQUEST_TIMEOUT", 0.3)
+    fake.timeout_next_buy = True
+    original = deriv._ws().request
+
+    def quick(payload: dict[str, object], timeout: float = 15) -> dict[str, object]:
+        return original(payload, timeout=0.3 if "buy" in payload else timeout)
+
+    monkeypatch.setattr(deriv._ws(), "request", quick)
+    with pytest.raises(OrderOutcomeUnknownError):
+        buy_rf(deriv, cid=cid)
+
+
+def test_history_failure_keeps_an_uncertain_order_unknown(
+    deriv: DerivAdapter, fake: FakeDeriv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concluding "not executed" needs BOTH portfolio and profit_table to be read."""
+    sent_at = datetime.fromtimestamp(fake.now, UTC)
+    _timed_out_rise_fall(deriv, fake, monkeypatch, "z" * 24)
+    (contract_id,) = fake.contracts
+    fake.expire(contract_id, "700")  # settled before we reconcile
+    fresh = make(fake)
+    fresh.connect()
+
+    def limited(*args: object, **kwargs: object) -> object:
+        raise BrokerRateLimitError("history budget used up")
+
+    hint = OrderHint("R_100", Side.BUY, Decimal(1), sent_at, contract_type=ContractType.CALL)
+    with monkeypatch.context() as patch:
+        patch.setattr(fresh, "get_deals", limited)
+        with pytest.raises(BrokerError):
+            fresh.find_order_by_client_id("z" * 24, hint)
+    found = fresh.find_order_by_client_id("z" * 24, hint)  # history readable again
+    assert found is not None and found.broker_position_id == str(contract_id)
+    fresh.disconnect()
+
+
+def test_contract_claimed_in_the_database_is_never_matched_after_restart(
+    deriv: DerivAdapter, fake: FakeDeriv
+) -> None:
+    """The adapter's in-memory claims are lost on restart; the database's are not."""
+    claimed = buy(deriv, cid="a" * 24)
+    deriv.disconnect()
+    fresh = make(fake)
+    fresh.connect()
+    now = datetime.fromtimestamp(fake.now, UTC)
+    up = ContractType.MULTUP
+    hint = OrderHint(
+        "frxEURUSD",
+        Side.BUY,
+        Decimal(1),
+        now,
+        contract_type=up,
+        claimed_ids=frozenset({claimed.broker_position_id or ""}),
+    )
+    assert fresh.find_order_by_client_id("b" * 24, hint) is None
+    fresh.disconnect()
+
+
+def test_reconciliation_prefers_the_contract_that_fits_the_order(
+    deriv: DerivAdapter, fake: FakeDeriv
+) -> None:
+    earlier = buy(deriv, cid="a" * 24, contract=multiplier(stake="12"))
+    fake.now += 2
+    ours = buy(deriv, cid="b" * 24, contract=multiplier(stake="11"))
+    deriv.disconnect()
+    fresh = make(fake)
+    fresh.connect()
+    sent_at = datetime.fromtimestamp(fake.now, UTC)
+    hint = OrderHint("frxEURUSD", Side.BUY, Decimal(1), sent_at, contract_type=ContractType.MULTUP)
+    with_stake = dataclasses.replace(hint, stake=Decimal("11.00"))
+    found = fresh.find_order_by_client_id("c" * 24, with_stake)
+    assert found is not None and found.broker_position_id == ours.broker_position_id
+    # Without a stake the closest purchase time wins (not simply the oldest contract).
+    found = fresh.find_order_by_client_id("d" * 24, hint)
+    assert found is not None and found.broker_position_id == earlier.broker_position_id
+    fresh.disconnect()
+
+
+def test_uncertain_orders_share_one_portfolio_and_history_read(fake: FakeDeriv) -> None:
+    """Deriv allows ~30 portfolio + profit_table calls a minute: one pass, one read."""
+    adapter = make(fake)
+    adapter.connect()
+    now = datetime.fromtimestamp(fake.now, UTC)
+
+    def calls(kind: str) -> int:
+        return len([r for r in fake.requests if kind in r])
+
+    before = calls("portfolio"), calls("profit_table")
+    for i in range(3):
+        hint = OrderHint(
+            "R_100",
+            Side.BUY,
+            Decimal(1),
+            now - timedelta(seconds=i),
+            contract_type=ContractType.CALL,
+        )
+        assert adapter.find_order_by_client_id(str(i) * 24, hint) is None
+    assert calls("portfolio") - before[0] <= 1
+    assert calls("profit_table") - before[1] == 1
+    adapter.disconnect()
+
+
+def test_rate_limited_contract_details_fail_the_history_read(
+    deriv: DerivAdapter, fake: FakeDeriv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never a deal with entry/exit 0 or a guessed exit reason: retry later instead."""
+    result = buy(deriv)
+    fake.close_externally(int(result.broker_position_id or 0))
+    fresh = make(fake)
+    fresh.connect()
+    original = fresh._ws().request
+
+    def limited(payload: dict[str, object], timeout: float = 15) -> dict[str, object]:
+        if "proposal_open_contract" in payload and "contract_id" in payload:
+            raise BrokerRateLimitError("budget used up")
+        return original(payload, timeout=timeout)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(fresh._ws(), "request", limited)
+        with pytest.raises(BrokerError, match="history unavailable"):
+            fresh.get_deals(*window(fake))
+    deal = next(d for d in fresh.get_deals(*window(fake)) if d.entry is DealEntry.OUT)
+    assert deal.reason == "SL" and deal.outcome == "LOST" and deal.price != 0
+    fresh.disconnect()
+
+
+def test_sold_contract_missing_from_profit_table_is_reported_from_its_details(
+    deriv: DerivAdapter, fake: FakeDeriv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """profit_table can lag a sale: the contract's own sold details carry the P/L."""
+    result = buy(deriv)
+    fake.set_price("frxEURUSD", "1.10220")  # +2.20
+    deriv.close_position(result.broker_position_id or "", "d" * 24)
+    original = deriv._ws().request
+
+    def lagging(payload: dict[str, object], timeout: float = 15) -> dict[str, object]:
+        if "profit_table" in payload:
+            return {"profit_table": {"count": 0, "transactions": []}}
+        return original(payload, timeout=timeout)
+
+    monkeypatch.setattr(deriv._ws(), "request", lagging)
+    exits = [d for d in deriv.get_deals(*window(fake)) if d.entry is DealEntry.OUT]
+    assert len(exits) == 1 and exits[0].position_id == result.broker_position_id
+    assert exits[0].profit == Decimal("2.20")

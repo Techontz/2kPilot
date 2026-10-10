@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Models\TradingAccount;
 use App\Services\Audit\AuditLogger;
 use App\Services\Engine\EngineClient;
+use App\Support\ContractSpec;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
@@ -15,6 +16,10 @@ use Illuminate\Validation\Rule;
  * Manual trading. Laravel authenticates, authorises and audits; the engine
  * runs the SAME risk engine and execution engine as the robot. There is no
  * path that skips risk validation.
+ *
+ * A ticket may carry a `contract` (App\Support\ContractSpec). Deriv accounts
+ * trade contracts — Rise/Fall 5 minutes when none is given; a stop loss and
+ * a volume are required for SPOT (Paper) tickets only.
  */
 class TradeController extends Controller
 {
@@ -34,7 +39,8 @@ class TradeController extends Controller
         $this->audit->record('trade.manual_ticket',
             $result['status'] === 'EXECUTED' ? AuditOutcome::Success : ($result['status'] === 'REJECTED' ? AuditOutcome::Denied : AuditOutcome::Failure),
             $request->user(), 'trading_account', $account->id, [
-                'symbol' => $ticket['symbol'], 'side' => $ticket['side'], 'volume' => $ticket['volume'],
+                'symbol' => $ticket['symbol'], 'side' => $ticket['side'], 'volume' => $ticket['volume'] ?? null,
+                'contract' => data_get($ticket, 'contract.contract_family', 'SPOT'), 'stake' => data_get($ticket, 'contract.stake'),
                 'result' => $result['status'], 'reason' => $result['rejection_reason'] ?? null,
                 'environment' => $account->environment->value,
             ]);
@@ -50,14 +56,21 @@ class TradeController extends Controller
             'symbol' => ['required', 'string', 'max:40'],
             'side' => ['required', Rule::in(['BUY', 'SELL'])],
             'order_type' => ['nullable', Rule::in(['MARKET', 'LIMIT', 'STOP'])],
-            'volume' => [$preview ? 'nullable' : 'required', 'numeric', 'gt:0', 'max:100000'],
-            'stop_loss' => ['required', 'numeric', 'gt:0'], // a stop loss is always required
+            'volume' => ['nullable', 'numeric', 'gt:0', 'max:100000'],
+            'stop_loss' => ['nullable', 'numeric', 'gt:0'],
             'take_profit' => ['nullable', 'numeric', 'gt:0'],
             'idempotency_key' => [$preview ? 'nullable' : 'required', 'string', 'min:16', 'max:64', 'regex:/^[A-Za-z0-9_-]+$/'],
             'confirm' => [$preview ? 'nullable' : 'accepted'],
-        ]);
-        $account = TradingAccount::query()->findOrFail($data['account_id']);
+            'contract' => ['nullable', 'array'],
+        ] + ContractSpec::rules('contract.'));
+        $account = TradingAccount::query()->ownedBy($request->user())->with('connection')->findOrFail($data['account_id']);
         $this->authorize('trade', $account);
+        $spot = ContractSpec::isSpot(ContractSpec::resolve($data['contract'] ?? [], $account));
+        $contract = ContractSpec::validate($data, $account, 'contract.', [
+            'stop_loss' => [$spot ? 'required' : 'nullable'], // SPOT: a stop loss is always required
+            'volume' => [$spot && ! $preview ? 'required' : 'nullable'],
+        ]);
+        $sendContract = isset($data['contract']) || ! $spot; // Deriv: the default contract
 
         return [$account, array_filter([
             'account_id' => $account->id,
@@ -65,8 +78,9 @@ class TradeController extends Controller
             'side' => $data['side'],
             'order_type' => $data['order_type'] ?? 'MARKET',
             'volume' => isset($data['volume']) ? (string) $data['volume'] : null,
-            'stop_loss' => (string) $data['stop_loss'],
+            'stop_loss' => isset($data['stop_loss']) ? (string) $data['stop_loss'] : null,
             'take_profit' => isset($data['take_profit']) ? (string) $data['take_profit'] : null,
+            'contract' => $sendContract ? (object) $contract : null,
             'idempotency_key' => $data['idempotency_key'] ?? null,
             'actor_id' => $request->user()->id,
             'actor_label' => $request->user()->email,

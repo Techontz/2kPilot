@@ -170,6 +170,7 @@ def compute(
         "avg_rr": _f(avg_win / -avg_loss) if avg_win and avg_loss else None,
         "max_consecutive_wins": best_w,
         "max_consecutive_losses": best_l,
+        "longest_losing_streak": best_l,
         "max_drawdown": _f(dd_amt),
         "max_drawdown_pct": _f(dd_pct),
         "total_costs": _f(sum((t.costs for t in ordered), Decimal(0))),

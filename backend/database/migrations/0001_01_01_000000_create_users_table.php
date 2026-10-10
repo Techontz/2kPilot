@@ -8,8 +8,11 @@ use Illuminate\Support\Facades\Schema;
 /**
  * Users and their login sessions.
  *
- * Accounts are created from the command line (`php artisan fx:user`), never
- * through public sign-up. MFA secrets and recovery codes are stored encrypted.
+ * Users sign up themselves (POST /api/auth/register) or are created from the
+ * command line (`php artisan tp:user`). Every broker connection, account,
+ * risk profile, backtest… belongs to exactly one user. Admins additionally
+ * operate the platform (emergency halt, Horizon). MFA secrets and recovery
+ * codes are stored encrypted.
  */
 return new class extends Migration
 {
@@ -20,7 +23,7 @@ return new class extends Migration
             $table->string('name', 120);
             $table->string('email', 320)->unique();
             $table->string('password');
-            $table->string('role', 16)->default('owner'); // owner | viewer
+            $table->string('role', 16)->default('user'); // user | admin
             $table->boolean('is_active')->default(true);
             $table->text('two_factor_secret')->nullable();
             $table->text('two_factor_recovery_codes')->nullable();
@@ -29,7 +32,7 @@ return new class extends Migration
             $table->rememberToken();
             $table->utcTimestamps();
         });
-        DB::statement("ALTER TABLE users ADD CONSTRAINT ck_users_role CHECK (role IN ('owner','viewer'))");
+        DB::statement("ALTER TABLE users ADD CONSTRAINT ck_users_role CHECK (role IN ('user','admin'))");
         DB::statement('ALTER TABLE users ADD CONSTRAINT ck_users_email_lowercase CHECK (CAST(email AS BINARY) = CAST(LOWER(email) AS BINARY))');
 
         Schema::create('sessions', function (Blueprint $table) {

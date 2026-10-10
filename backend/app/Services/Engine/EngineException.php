@@ -14,6 +14,7 @@ class EngineException extends RuntimeException
         string $message,
         public readonly int $status = 502,
         public readonly string $errorCode = 'engine_error',
+        public readonly array $details = [], // structured detail, e.g. ['problems' => [...]]
     ) {
         parent::__construct($message);
     }
@@ -26,6 +27,12 @@ class EngineException extends RuntimeException
             $this->status === 503 => 503,
             default => 502,
         };
+    }
+
+    /** Plain-English problems the engine listed (e.g. why a rule set is invalid). */
+    public function problems(): array
+    {
+        return array_values(array_filter((array) ($this->details['problems'] ?? []), 'is_string'));
     }
 
     public static function unreachable(): self

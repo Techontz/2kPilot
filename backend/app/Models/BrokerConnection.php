@@ -5,16 +5,17 @@ namespace App\Models;
 use App\Enums\AccountEnvironment;
 use App\Enums\ConnectionStatus;
 use App\Enums\ConnectorType;
+use App\Models\Concerns\BelongsToUser;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 /**
- * How 2kFX reaches a broker. `credentials_encrypted` holds AES-256-GCM
+ * How 2kPilot reaches a broker for one user. `credentials_encrypted` holds AES-256-GCM
  * ciphertext and is hidden from every serialisation.
  */
 class BrokerConnection extends BaseModel
 {
-    use HasUuids;
+    use BelongsToUser, HasUuids;
 
     protected $hidden = ['credentials_encrypted'];
 

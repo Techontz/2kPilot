@@ -2,19 +2,24 @@
 
 namespace App\Models;
 
+use App\Models\Concerns\BelongsToUser;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
-/** Risk limits assigned to trading accounts. NULL = this optional limit is off. */
+/**
+ * A user's risk limits, assigned to their trading accounts. NULL = this
+ * optional limit is off. Every user gets a "Beginner" profile at sign-up.
+ * Pip/lot limits apply to SPOT trades; contracts are sized by stake_amount.
+ */
 class RiskProfile extends BaseModel
 {
-    use HasUuids;
+    use BelongsToUser, HasUuids;
 
-    public const DEFAULT_NAME = 'Conservative (default)';
+    public const DEFAULT_NAME = 'Beginner';
 
     protected function casts(): array
     {
-        return ['allowed_sessions' => 'array'];
+        return ['allowed_sessions' => 'array', 'max_consecutive_losses' => 'integer'];
     }
 
     public function accounts(): HasMany

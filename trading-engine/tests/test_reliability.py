@@ -16,8 +16,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
 from fxrobot.broker_engine.adapters.paper import PaperBroker
-from fxrobot.broker_engine.errors import BrokerConnectionError
-from fxrobot.broker_engine.models import Candle, DealEntry, OrderRequest, Quote
+from fxrobot.broker_engine.errors import BrokerConnectionError, BrokerError
+from fxrobot.broker_engine.models import Candle, DealEntry, OrderHint, OrderRequest, Quote
 from fxrobot.db.types import utcnow
 from fxrobot.domain.market import Side, Timeframe
 from fxrobot.domain.trading import (
@@ -40,7 +40,10 @@ from fxrobot.models import (
     Trade,
     TradeEvent,
 )
+from fxrobot.risk_engine import DEFAULT_LIMITS
+from fxrobot.risk_engine.engine import evaluate as risk_evaluate
 from fxrobot.strategy_engine.base import SignalIntent
+from fxrobot.trading_engine.context import build_risk_context, load_controls
 from fxrobot.trading_engine.engine import TradingEngine
 from fxrobot.trading_engine.runner import _RunnerState
 from tests.conftest import SignedClient
@@ -397,7 +400,7 @@ def test_external_position_blocks_new_entries_until_closed(client: SignedClient,
     assert count(env.db, Order) == 0
     assert "reconciliation.mismatch" in notification_types(env.db)
 
-    # Closed outside 2kFX too: the tracked trade closes as MANUAL; entries resume.
+    # Closed outside 2kPilot too: the tracked trade closes as MANUAL; entries resume.
     env.broker.close_position(position_id, "manual-close-2")
     engine_for(client).tick_once()
     env.db.expire_all()
@@ -421,6 +424,15 @@ def test_unresolved_order_blocks_new_entries(client: SignedClient, env: Env) -> 
         signal=signal,
     )
     engine = engine_for(client)
+    lookups = 0
+    find = env.broker.find_order_by_client_id
+
+    def counting_find(*args: Any, **kwargs: Any) -> Any:
+        nonlocal lookups
+        lookups += 1
+        return find(*args, **kwargs)
+
+    env.broker.find_order_by_client_id = counting_find  # type: ignore[method-assign]
     for _ in range(6):
         env.broker.step(1)
         results = engine.tick_once()
@@ -428,9 +440,12 @@ def test_unresolved_order_blocks_new_entries(client: SignedClient, env: Env) -> 
     env.db.expire_all()
     assert count(env.db, StrategyEvaluation) == 0
     assert count(env.db, Signal) == 1  # only ours
+    # Six ticks in quick succession ask the broker once (history calls are rate-limited).
+    assert lookups == 1
 
     # After the grace period the broker's silence proves it never executed.
     order.submitted_at = utcnow() - timedelta(minutes=5)
+    order.last_reconciled_at = utcnow() - timedelta(minutes=1)  # the next lookup is due
     env.db.commit()
     env.broker.step(1)
     results = engine.tick_once()
@@ -469,13 +484,13 @@ def test_duplicate_signal_is_rejected_by_unique_constraint(env: Env) -> None:
 def _runner_args(client: SignedClient, env: Env) -> dict[str, Any]:
     assignment = env.db.get(StrategyAssignment, uuid.UUID(env.trading["assignment"]["id"]))
     version = env.db.get(StrategyVersion, uuid.UUID(env.trading["version"]["id"]))
-    state = env.db.get(SystemState, 1)
+    account = env.account()
     return {
-        "account": env.account(),
+        "account": account,
         "assignment": assignment,
         "version": version,
         "adapter": env.broker,
-        "state": state,
+        "controls": load_controls(env.db, account, live_locked=True),
         "rs": _RunnerState(),
     }
 
@@ -534,7 +549,7 @@ def test_malformed_candles_skip_evaluation(
     monkeypatch.setattr(env.broker, "get_candles", corrupt)
     engine = engine_for(client)
     for _ in range(8):  # two hours of M15 bars → at least two closed H1 entry bars
-        env.broker.step(1)
+        env.broker.step(15)
         assert engine.tick_once()[0].ok
     env.db.expire_all()
     evaluations = list(env.db.scalars(select(StrategyEvaluation)))
@@ -755,3 +770,205 @@ def test_released_lease_is_taken_immediately(client: SignedClient, env: Env) -> 
     finally:
         second._release_lease()
         second._pool.shutdown(wait=False)
+
+
+# ── no overlapping ticks ─────────────────────────────────────────────────
+
+
+def test_a_slow_tick_is_never_overlapped_by_the_next_cycle(
+    client: SignedClient, env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tick that outlives the cycle timeout keeps running (it cannot be
+    cancelled mid broker call); later cycles must skip that account instead of
+    starting a second, concurrent tick for it."""
+    import threading
+
+    from fxrobot.trading_engine import engine as engine_module
+    from fxrobot.trading_engine.runner import TickResult
+
+    monkeypatch.setattr(engine_module, "ACCOUNT_TICK_TIMEOUT", 0.2)
+    engine = engine_for(client)
+    account_id = env.account().id
+    release = threading.Event()
+    lock = threading.Lock()
+    running, most_concurrent, started = 0, 0, 0
+
+    def slow_tick(db: Session, aid: uuid.UUID) -> TickResult:
+        nonlocal running, most_concurrent, started
+        with lock:
+            running += 1
+            started += 1
+            most_concurrent = max(most_concurrent, running)
+        try:
+            release.wait(5)
+            return TickResult(aid, True, "ok")
+        finally:
+            with lock:
+                running -= 1
+
+    monkeypatch.setattr(engine.runner, "tick", slow_tick)
+    first = engine.run_cycle()
+    assert [r.detail for r in first] == ["tick timed out"]
+    for _ in range(3):
+        again = engine.run_cycle()
+        assert [(r.account_id, r.detail) for r in again] == [
+            (account_id, "previous tick still running")
+        ]
+    assert started == 1 and most_concurrent == 1
+    release.set()
+    for _ in range(50):  # the slow tick finishes and frees the account
+        if not engine._in_flight:
+            break
+        release.wait(0.05)
+    assert engine.run_cycle()[0].detail == "ok"
+    assert started == 2 and most_concurrent == 1
+
+
+def test_two_engine_processes_never_tick_the_same_account(
+    client: SignedClient, env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even when a leader loses its lease mid-tick (paused process, slow broker),
+    the per-account database lock keeps a second engine off that account."""
+    import threading
+
+    from fxrobot.trading_engine import engine as engine_module
+    from fxrobot.trading_engine.runner import TickResult
+
+    assert engine_module.LEASE.total_seconds() > engine_module.ACCOUNT_TICK_TIMEOUT
+    monkeypatch.setattr(engine_module, "ACCOUNT_TICK_TIMEOUT", 0.3)
+    monkeypatch.setattr(engine_module, "LEASE_RENEW_EVERY", 0.05)
+    app: Any = client.app
+    first = engine_for(client)
+    second = TradingEngine(app.state.session_factory, app.state.broker_manager, live_locked=True)
+    account_id = env.account().id
+    release = threading.Event()
+    second_ticked: list[uuid.UUID] = []
+    renewals = 0
+    renew = first._renew_lease
+
+    def counting_renew() -> None:
+        nonlocal renewals
+        renewals += 1
+        renew()
+
+    def slow_tick(db: Session, aid: uuid.UUID) -> TickResult:
+        release.wait(5)
+        return TickResult(aid, True, "ok")
+
+    def quick_tick(db: Session, aid: uuid.UUID) -> TickResult:
+        second_ticked.append(aid)
+        return TickResult(aid, True, "ok")
+
+    monkeypatch.setattr(first, "_renew_lease", counting_renew)
+    monkeypatch.setattr(first.runner, "tick", slow_tick)
+    monkeypatch.setattr(second.runner, "tick", quick_tick)
+    try:
+        assert [r.detail for r in first.run_cycle()] == ["tick timed out"]
+        assert renewals >= 2  # the lease was renewed while the tick ran
+        # The first engine's lease lapses while its tick is still running.
+        env.db.execute(
+            text(
+                "UPDATE system_state SET engine_lease_until = "
+                "UTC_TIMESTAMP(6) - INTERVAL 1 SECOND WHERE id = 1"
+            )
+        )
+        env.db.commit()
+        results = second.run_cycle()
+        assert second.is_leader
+        assert [(r.account_id, r.detail) for r in results] == [
+            (account_id, engine_module.ACCOUNT_LOCKED)
+        ]
+        assert second_ticked == []
+        release.set()
+        for _ in range(50):  # the first tick ends and frees the account lock
+            if not first._in_flight:
+                break
+            release.wait(0.05)
+        assert second.run_cycle()[0].detail == "ok"
+        assert second_ticked == [account_id]
+    finally:
+        release.set()
+        second._release_lease()
+        second._pool.shutdown(wait=False)
+
+
+# ── review regressions: uncertain orders and unsettled P/L ───────────────
+
+
+def test_failed_lookup_never_marks_an_uncertain_order_failed(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order = order_row(
+        env,
+        new_client_order_id(),
+        status=OrderStatus.UNKNOWN,
+        age=timedelta(minutes=10),  # long past the grace period
+        signal=make_signal(env),
+    )
+
+    def history_down(*_: Any, **__: Any) -> Any:
+        raise BrokerError("Deriv history unavailable: budget used up")
+
+    monkeypatch.setattr(env.broker, "find_order_by_client_id", history_down)
+    assert reconcile(env).orders_unresolved == 1
+    env.db.refresh(order)
+    assert order.status is OrderStatus.UNKNOWN
+    assert order.last_reconciled_at is not None  # the attempt counts for throttling
+
+
+def test_reconciliation_hint_excludes_broker_ids_the_database_already_claims(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a restart the adapter has forgotten its claims; the database has not."""
+    trade = open_trade(env)
+    order = order_row(
+        env,
+        new_client_order_id(),
+        status=OrderStatus.UNKNOWN,
+        age=timedelta(seconds=5),
+        signal=make_signal(env, side=Side.SELL),
+    )
+    hints: list[OrderHint] = []
+    find = env.broker.find_order_by_client_id
+
+    def spy(cid: str, hint: OrderHint | None = None) -> Any:
+        assert hint is not None
+        hints.append(hint)
+        return find(cid, hint)
+
+    monkeypatch.setattr(env.broker, "find_order_by_client_id", spy)
+    env.execution.reconcile_order(env.db, order, env.broker)
+    assert trade.broker_position_id in hints[0].claimed_ids
+    assert hints[0].stake == order.stake
+
+
+def test_trade_closed_without_pnl_blocks_entries_until_settled(env: Env) -> None:
+    trade = open_trade(env)
+    assert trade.broker_position_id is not None
+    env.broker.close_position(trade.broker_position_id, new_client_order_id())
+    # The broker's history does not have the closing deal yet.
+    env.execution.finalize_trade(env.db, trade, env.broker, deals=[])
+    assert trade.status is TradeStatus.CLOSED and trade.net_pnl is None
+
+    def settled_pnl_check() -> Any:
+        account = env.account()
+        ctx = build_risk_context(
+            env.db,
+            account=account,
+            adapter=env.broker,
+            controls=load_controls(env.db, account, live_locked=True),
+            symbol=env.broker.get_symbol("EURUSD"),
+            account_info=None,
+            broker_connected=True,
+        )
+        intent = _intent(env, Timeframe.M15.floor(ctx.now) - Timeframe.M15.delta)
+        decision = risk_evaluate(intent, ctx, DEFAULT_LIMITS)
+        return next(c for c in decision.checks if c.rule == "Settled P/L")
+
+    blocked = settled_pnl_check()
+    assert not blocked.passed and "no confirmed P/L yet" in blocked.detail
+    # Reconciliation retries the history and settles it.
+    assert reconcile(env).trades_closed >= 1
+    env.db.refresh(trade)
+    assert trade.net_pnl is not None and trade.outcome is not None
+    assert settled_pnl_check().passed

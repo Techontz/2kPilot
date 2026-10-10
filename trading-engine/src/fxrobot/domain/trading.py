@@ -8,7 +8,6 @@ from enum import StrEnum
 class ConnectorType(StrEnum):
     PAPER = "paper"  # internal simulator
     DERIV = "deriv"  # Deriv Options/Multipliers API (api.derivws.com)
-    MT5_BRIDGE = "mt5_bridge"  # MetaTrader 5 via the Windows bridge service
 
 
 class ConnectionStatus(StrEnum):
@@ -80,6 +79,7 @@ class ExitReason(StrEnum):
     EMERGENCY = "EMERGENCY"
     STRATEGY = "STRATEGY"
     BROKER = "BROKER"  # closed at the broker for a reason we could not classify
+    EXPIRED = "EXPIRED"  # a contract (Rise/Fall) settled at its expiry
     END_OF_TEST = "END_OF_TEST"  # backtests only
 
 
@@ -107,7 +107,7 @@ class BacktestKind(StrEnum):
 
 
 class DataSource(StrEnum):
-    BROKER = "broker"  # downloaded from a connected broker (e.g. MT5)
+    BROKER = "broker"  # downloaded from a connected broker (e.g. Deriv)
     CSV = "csv"  # imported by the user
     SYNTHETIC = "synthetic"  # generated for development/testing — NOT real market data
 

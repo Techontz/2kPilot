@@ -1,34 +1,50 @@
-"""Deriv adapter — Options/Multipliers API (developers.deriv.com, 2026 API).
+"""Deriv adapter — Options API (developers.deriv.com, 2026 API).
 
-How Deriv maps onto the 2kFX broker contract
---------------------------------------------
-Deriv trades forex, synthetic indices, commodities, indices and crypto through
-*multiplier* contracts (MULTUP = buy, MULTDOWN = sell). A multiplier position
-behaves like a leveraged position:
+How Deriv maps onto the 2kPilot broker contract
+--------------------------------------------------
+Deriv Options are CONTRACTS bought for a stake, not lots. Strategies still say
+BUY or SELL; the contract spec of the assignment decides what is bought:
 
-    profit = stake × multiplier × (price change ÷ entry price)  − commission
+* Rise/Fall   BUY → CALL (CALLE when "allow equals"), SELL → PUT (PUTE).
+  Bought with `proposal` {underlying_symbol, contract_type, basis: "stake",
+  amount, currency, duration, duration_unit} → `buy` {buy: <proposal id>,
+  price: <ask_price>}. It settles at expiry: won → payout − stake, lost →
+  −stake (CALL/PUT lose when the exit spot equals the entry spot).
+* Multipliers BUY → MULTUP, SELL → MULTDOWN, with `multiplier` and optional
+  `limit_order` {take_profit, stop_loss} MONEY amounts. Profit ≈ stake ×
+  multiplier × price change ÷ entry − commission; Deriv stops the contract out
+  before the loss exceeds the stake.
 
-2kFX keeps one vocabulary for every broker, so this adapter translates:
+Sizing is the stake (the risk profile's `stake_amount` or the assignment's
+own stake); `volume` is one contract. A strategy's stop/target PRICES are
+converted to money amounts for Multipliers when no amounts are configured.
 
-* volume  — expressed in **lots**, with MetaTrader-style contract sizes so a
-  risk profile ("max 1.0 lots") means the same on every broker:
-  forex 1 lot = 100,000 units of the base currency; gold/platinum 100 oz;
-  silver 5,000 oz; indices, synthetics and crypto 1 unit.
-  lots × contract size × price (in account currency) = notional = stake × multiplier.
-  The stake actually paid is `notional ÷ multiplier`, rounded down to cents.
-* stop loss / take profit — 2kFX uses PRICES; Deriv wants MONEY AMOUNTS.
-  amount = notional × |entry − level| ÷ entry. Deriv caps the stop-loss
-  amount at the stake (a stop further away is refused before sending).
-* pending orders — not offered by Deriv: refused, and advertised as
-  unsupported through `capabilities`.
-* idempotency — Deriv does not store a client order id. Every order intent is
+Safety
+* Prices are checked before buying: the buy is refused when Deriv's ask price
+  is above the stake (plus a cent of rounding) — we never pay more than asked.
+* Money fields of `proposal_open_contract` arrive as STRINGS and are parsed as
+  Decimal (never float); spots are `entry_spot` / `exit_spot`.
+* idempotency — Deriv does not store a client order id. Every intent is
   remembered, and after a timeout/restart reconciliation matches contracts by
-  symbol, direction and purchase time (`OrderHint`). An order whose outcome is
-  uncertain is never re-sent.
+  symbol, contract type, stake and purchase time (`OrderHint`), including
+  contracts that already settled (`profit_table`), skipping contracts the
+  database already ties to another order. An uncertain order is never re-sent,
+  and "no such contract" is only answered after BOTH `portfolio` and
+  `profit_table` were read; a failed read raises, so the order stays UNKNOWN.
+* Once Deriv acknowledged a buy/sell (the receipt has a contract id), later
+  failures (fetching the contract details) never turn it into "not executed":
+  the fill is built from the receipt and the details are synced later.
+* Early close is only attempted when Deriv says `is_valid_to_sell`; a Rise/Fall
+  that cannot be sold settles at expiry.
+* `contracts_for` (durations, multipliers) and `active_symbols`
+  (`exchange_is_open`, `is_trading_suspended`) are cached per symbol and drive
+  what can be traded. Stake limits are read from each proposal's
+  `validation_params.stake` — never hard-coded.
 
-The multiplier used for each symbol is the LOWEST the broker allows (widest
-room for a stop loss, least leverage) unless the connection settings choose
-another value from the broker's allowed list.
+Not verified against live servers (see docs/BROKERS.md): the exact
+`contracts_for` grouping of Rise/Fall vs Higher/Lower (we keep CALL/PUT entries
+without a barrier), `profit_table` money field types (parsed defensively), and
+the `status` values of multipliers closed by take profit / stop loss.
 """
 
 from __future__ import annotations
@@ -38,7 +54,7 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from decimal import ROUND_DOWN, ROUND_HALF_UP, ROUND_UP, Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from fxrobot.broker_engine.adapters.deriv_client import (
@@ -47,12 +63,14 @@ from fxrobot.broker_engine.adapters.deriv_client import (
     DerivApiError,
     DerivRest,
     DerivSocket,
+    RateLimiter,
     default_connector,
 )
 from fxrobot.broker_engine.errors import (
     BrokerAuthError,
     BrokerConnectionError,
     BrokerError,
+    BrokerRateLimitError,
     BrokerTimeoutError,
     InsufficientMarginError,
     InvalidBrokerResponseError,
@@ -82,16 +100,34 @@ from fxrobot.broker_engine.models import (
     SymbolInfo,
     Timeframe,
 )
+from fxrobot.domain.contracts import (
+    ContractCapabilities,
+    ContractFamily,
+    ContractFill,
+    ContractOrder,
+    ContractType,
+    DurationRange,
+    StakeQuote,
+    multiplier_limit_amounts,
+)
 from fxrobot.domain.modes import AccountEnvironment
-from fxrobot.market_data.conversion import conversion_rate
 
 CENT = Decimal("0.01")
+ASK_TOLERANCE = Decimal("0.01")  # rounding allowance between stake and ask price
 SYMBOLS_TTL = 600.0  # seconds
-SPEC_TTL = 600.0
+CONTRACTS_TTL = 600.0
 QUOTE_FRESH = 10.0
 PORTFOLIO_REFRESH = 30.0
 MATCH_BEFORE = timedelta(seconds=10)  # clock skew allowance when matching contracts
 MATCH_AFTER = timedelta(minutes=3)
+# One portfolio + profit_table read serves every uncertain order reconciled
+# within this many seconds (Deriv allows ~30 of those calls a minute).
+MATCH_REUSE = 10.0
+MATCH_HISTORY_SPAN = timedelta(hours=1)  # history read further back, so orders share it
+
+CONTRACT_TYPES = [t.value for t in ContractType]
+RISE_FALL_TYPES = ("CALL", "PUT", "CALLE", "PUTE")
+STATUS_OUTCOME = {"won": "WON", "lost": "LOST", "sold": "SOLD", "cancelled": "CANCELLED"}
 
 CATEGORIES = {
     "forex": "forex",
@@ -105,6 +141,7 @@ GRANULARITIES = {60, 120, 180, 300, 600, 900, 1800, 3600, 7200, 14400, 28800, 86
 
 
 def _dec(value: Any) -> Decimal | None:
+    """Deriv money fields are strings (sometimes numbers): always Decimal, never float."""
     if value is None or value == "":
         return None
     try:
@@ -117,6 +154,17 @@ def _epoch(value: Any) -> datetime | None:
     try:
         return datetime.fromtimestamp(int(value), tz=UTC)
     except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _flag(value: Any) -> bool:
+    return value in (1, True, "1")
+
+
+def _contract_type(value: Any) -> ContractType | None:
+    try:
+        return ContractType(str(value))
+    except ValueError:
         return None
 
 
@@ -139,11 +187,14 @@ class DerivAdapter(BrokerAdapter):
         historical_candles=True,
         trade_history=True,
         client_order_ids=False,
-        volume_unit="lots",
+        volume_unit="stake",
+        contract_families=("RISE_FALL", "MULTIPLIER"),
         notes=(
-            "Trades are Deriv multiplier contracts (MULTUP = buy, MULTDOWN = sell).",
-            "Volume is in lots (forex 1 lot = 100,000 units); stake = notional ÷ multiplier.",
-            "Deriv limits the stop-loss amount to the stake; there are no pending orders.",
+            "Trades are Deriv Options contracts bought for a stake: Rise/Fall "
+            "(CALL/PUT) or Multipliers (MULTUP/MULTDOWN).",
+            "A contract can lose at most its stake. Rise/Fall settles at expiry; "
+            "payouts vary with every price quote.",
+            "No pending orders and no partial closes.",
         ),
     )
 
@@ -158,6 +209,7 @@ class DerivAdapter(BrokerAdapter):
         rest: DerivRest | None = None,
         connector: Connector = default_connector,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        limiter: RateLimiter | None = None,
     ) -> None:
         if not account_id:
             raise ValueError("A Deriv account id is required")
@@ -165,24 +217,28 @@ class DerivAdapter(BrokerAdapter):
         self._rest = rest or DerivRest(token=token, app_id=app_id, token_kind=token_kind)
         self._connector = connector
         self._clock = clock
-        self._preferred_multiplier = multiplier
+        # Connection setting kept for older configurations: the multiplier a manual
+        # Multiplier ticket uses when it does not choose one.
+        self.default_multiplier = multiplier
+        self._limiter = limiter or RateLimiter()  # one budget per connection, across reconnects
         self._socket: DerivSocket | None = None
         self._account: DerivAccount | None = None
         self._lock = threading.RLock()
         # caches (filled from responses and streams)
         self._active: dict[str, dict[str, Any]] = {}
         self._active_at = 0.0
-        self._specs: dict[str, tuple[SymbolInfo, int, float]] = {}  # name -> (info, mult, at)
+        self._offered: dict[str, tuple[list[dict[str, Any]], float]] = {}  # contracts_for
         self._quotes: dict[str, Quote] = {}
         self._tick_subscribed: set[str] = set()
         self._contracts: dict[str, dict[str, Any]] = {}  # contract_id -> latest POC
         self._sold: dict[str, dict[str, Any]] = {}  # immutable details of closed contracts
-        self._units: dict[str, Decimal] = {}  # contract_id -> volume in lots (stable)
         self._balance: Decimal | None = None
         self._portfolio_at = 0.0
         # idempotency bookkeeping
         self._client_by_contract: dict[str, str] = {}
         self._contract_by_client: dict[str, str] = {}
+        # (history start, read at [monotonic], deals): shared by reconciliation matches
+        self._history: tuple[datetime, float, list[Deal]] | None = None
 
     # ── connection ───────────────────────────────────────────────────────
     def list_accounts(self) -> list[DerivAccount]:
@@ -202,7 +258,7 @@ class DerivAdapter(BrokerAdapter):
                 )
             self._account = account
             url = self._rest.otp_url(self.account_id)  # single-use, valid 120 s
-            socket = DerivSocket(url, connector=self._connector)
+            socket = DerivSocket(url, connector=self._connector, limiter=self._limiter)
             socket.on("tick", self._on_tick)
             socket.on("balance", self._on_balance)
             socket.on("proposal_open_contract", self._on_contract)
@@ -273,9 +329,9 @@ class DerivAdapter(BrokerAdapter):
         if not isinstance(poc, dict) or poc.get("contract_id") is None:
             return
         cid = str(poc["contract_id"])
-        if poc.get("is_sold"):
+        if _flag(poc.get("is_sold")) or str(poc.get("status") or "") in STATUS_OUTCOME:
             self._contracts.pop(cid, None)
-            self._sold[cid] = poc
+            self._sold[cid] = poc  # settled (expired, sold, stopped out): history from here
         else:
             self._contracts[cid] = poc
 
@@ -285,7 +341,7 @@ class DerivAdapter(BrokerAdapter):
             raise BrokerConnectionError("Not connected to Deriv")
         account = self._account
         if self.is_connected:  # cheap (100/min budget); the stream also keeps it fresh
-            with contextlib.suppress(BrokerTimeoutError):
+            with contextlib.suppress(BrokerTimeoutError, BrokerRateLimitError):
                 self._on_balance(self._ws().request({"balance": 1}))
         balance = self._balance if self._balance is not None else _dec(account.balance)
         if balance is None:
@@ -305,19 +361,21 @@ class DerivAdapter(BrokerAdapter):
             currency=account.currency,
             environment=environment,
             balance=balance,
-            # The stake of an open multiplier is already debited; its current
+            # The stake of an open contract is already debited; its current
             # value (bid price) is part of equity.
             equity=balance + open_value,
             trade_allowed=account.status == "active",
         )
 
+    @property
+    def currency(self) -> str:
+        return self._account.currency if self._account else "USD"
+
     # ── symbols ──────────────────────────────────────────────────────────
     def _active_symbols(self) -> dict[str, dict[str, Any]]:
         if self._active and time.monotonic() - self._active_at < SYMBOLS_TTL:
             return self._active
-        reply = self._ws().request(
-            {"active_symbols": "brief", "contract_type": ["MULTUP", "MULTDOWN"]}
-        )
+        reply = self._ws().request({"active_symbols": "brief"})
         items = reply.get("active_symbols")
         if not isinstance(items, list):
             raise InvalidBrokerResponseError("Deriv active_symbols response is malformed")
@@ -339,7 +397,7 @@ class DerivAdapter(BrokerAdapter):
         raise SymbolUnavailableError(f"Symbol {name} is not available on Deriv")
 
     @staticmethod
-    def _currencies(name: str, market: str) -> tuple[str, str, str]:
+    def _currencies(name: str) -> tuple[str, str, str]:
         """(canonical, base, quote) for a Deriv symbol."""
         if name.startswith("frx") and len(name) == 9:
             pair = name[3:]
@@ -350,10 +408,10 @@ class DerivAdapter(BrokerAdapter):
 
     def _base_info(self, item: dict[str, Any]) -> SymbolInfo:
         name = str(item["underlying_symbol"])
-        canonical, base, quote = self._currencies(name, str(item.get("market", "")))
+        canonical, base, quote = self._currencies(name)
         pip = _dec(item.get("pip_size")) or Decimal("0.01")
         digits = max(0, -pip.normalize().as_tuple().exponent)  # type: ignore[operator]
-        open_now = bool(item.get("exchange_is_open")) and not bool(item.get("is_trading_suspended"))
+        suspended = _flag(item.get("is_trading_suspended"))
         return SymbolInfo(
             name=name,
             description=str(item.get("underlying_symbol_name") or name),
@@ -361,78 +419,96 @@ class DerivAdapter(BrokerAdapter):
             quote_currency=quote,
             digits=digits,
             point=pip,
-            contract_size=contract_size_of(name),
-            volume_min=Decimal("0.01"),
-            volume_max=Decimal("1000000"),
-            volume_step=Decimal("0.01"),
-            trade_allowed=not bool(item.get("is_trading_suspended")),
+            contract_size=Decimal(1),
+            # One contract per order; lots do not apply to Options.
+            volume_min=Decimal(1),
+            volume_max=Decimal(1),
+            volume_step=Decimal(1),
+            trade_allowed=not suspended,
             canonical=canonical,
             category=CATEGORIES.get(str(item.get("market")), "other"),
-            market_open=open_now,
+            market_open=_flag(item.get("exchange_is_open")) and not suspended,
         )
 
     def get_symbols(self) -> list[SymbolInfo]:
-        """Instrument list (volume limits are refined per symbol by get_symbol)."""
         return [self._base_info(i) for i in self._active_symbols().values()]
 
-    def multiplier_for(self, name: str) -> int:
-        self.get_symbol(name)
-        return self._specs[self.resolve(name)][1]
-
     def get_symbol(self, name: str) -> SymbolInfo:
-        """Full specification: allowed multiplier and stake limits → volume limits."""
         broker_name = self.resolve(name)
-        cached = self._specs.get(broker_name)
-        if cached and time.monotonic() - cached[2] < SPEC_TTL:
-            fresh = self._base_info(self._active[broker_name])
-            return _with_status(cached[0], fresh.market_open, fresh.trade_allowed)
-        base = self._base_info(self._active[broker_name])
+        return self._base_info(self._active[broker_name])
+
+    # ── contracts offered (contracts_for) ────────────────────────────────
+    def _contracts_for(self, broker_name: str) -> list[dict[str, Any]]:
+        cached = self._offered.get(broker_name)
+        if cached and time.monotonic() - cached[1] < CONTRACTS_TTL:
+            return cached[0]
         reply = self._ws().request({"contracts_for": broker_name})
         offered = (reply.get("contracts_for") or {}).get("available") or []
-        ranges = [
-            [int(m) for m in (c.get("multiplier_range") or [])]
+        items = [c for c in offered if isinstance(c, dict)]
+        self._offered[broker_name] = (items, time.monotonic())
+        return items
+
+    def contract_capabilities(self, symbol: str) -> ContractCapabilities:
+        name = self.resolve(symbol)
+        item = self._active[name]
+        offered = self._contracts_for(name)
+        # Rise/Fall = CALL/PUT without a barrier (with a barrier they are Higher/Lower).
+        rise_fall = [
+            c
             for c in offered
-            if isinstance(c, dict) and c.get("contract_category") == "multiplier"
+            if str(c.get("contract_type")) in RISE_FALL_TYPES
+            and str(c.get("barriers") if c.get("barriers") is not None else 0) in ("0", "")
         ]
-        allowed = sorted({m for r in ranges for m in r})
-        if not allowed:
-            raise SymbolUnavailableError(f"Deriv offers no multiplier contracts on {name}")
-        multiplier = (
-            self._preferred_multiplier if self._preferred_multiplier in allowed else allowed[0]
+        durations: list[DurationRange] = []
+        for c in rise_fall:
+            lo, hi = c.get("min_contract_duration"), c.get("max_contract_duration")
+            if lo and hi:
+                rng = DurationRange(
+                    str(c.get("expiry_type")) if c.get("expiry_type") else None, str(lo), str(hi)
+                )
+                if rng not in durations:
+                    durations.append(rng)
+        multipliers = sorted(
+            {
+                int(m)
+                for c in offered
+                if str(c.get("contract_type")) in ("MULTUP", "MULTDOWN")
+                for m in (c.get("multiplier_range") or [])
+                if str(m).isdigit()
+            }
         )
-        stake_min, stake_max = Decimal(1), Decimal(1000)
-        with contextlib.suppress(DerivApiError):
-            proposal = self._proposal(broker_name, Side.BUY, Decimal(10), multiplier, None, None)
-            params = proposal.get("validation_params") or {}
-            stake = params.get("stake") or {}
-            stake_min = _dec(stake.get("min")) or stake_min
-            stake_max = _dec(stake.get("max")) or stake_max
-        rate = self._price_in_account(base, broker_name)
-        per_lot = rate * base.contract_size  # account-currency value of 1 lot
-        step = Decimal("0.01") if per_lot <= 1_000_000 else Decimal("0.0001")
-        if per_lot > 0:
-            vmin = (stake_min * multiplier / per_lot / step).to_integral_value(ROUND_UP) * step
-            vmax = (stake_max * multiplier / per_lot / step).to_integral_value(ROUND_DOWN) * step
-        else:
-            vmin, vmax = step, step
-        info = SymbolInfo(
-            name=base.name,
-            description=f"{base.description} (multiplier ×{multiplier})",
-            base_currency=base.base_currency,
-            quote_currency=base.quote_currency,
-            digits=base.digits,
-            point=base.point,
-            contract_size=base.contract_size,
-            volume_min=vmin,
-            volume_max=max(vmin, vmax),
-            volume_step=step,
-            trade_allowed=base.trade_allowed,
-            canonical=base.canonical,
-            category=base.category,
-            market_open=base.market_open,
+        offered_types = {str(c.get("contract_type")) for c in rise_fall}
+        types = tuple(t for t in RISE_FALL_TYPES if t in offered_types)
+        return ContractCapabilities(
+            symbol=name,
+            rise_fall=bool(durations) and {"CALL", "PUT"} <= set(types),
+            rise_fall_types=types,
+            durations=tuple(durations),
+            multipliers=tuple(multipliers),
+            spot=False,
+            market_open=_flag(item.get("exchange_is_open")),
+            trading_suspended=_flag(item.get("is_trading_suspended")),
+            notes=(
+                "From Deriv contracts_for (cached 10 minutes).",
+                "Payouts and stake limits come from each live price quote (proposal).",
+            ),
         )
-        self._specs[broker_name] = (info, multiplier, time.monotonic())
-        return info
+
+    def quote_contract(self, symbol: str, contract: ContractOrder) -> StakeQuote:
+        """Ask Deriv to price the contract (nothing is bought): stake limits and payout."""
+        name = self.resolve(symbol)
+        try:
+            proposal = self._proposal(name, contract, None)
+        except (DerivApiError, BrokerRateLimitError, InvalidBrokerResponseError) as exc:
+            return StakeQuote(None, None, detail=f"Deriv did not price it: {exc}")
+        stake = (proposal.get("validation_params") or {}).get("stake") or {}
+        return StakeQuote(
+            stake_min=_dec(stake.get("min")),
+            stake_max=_dec(stake.get("max")),
+            ask_price=_dec(proposal.get("ask_price")),
+            payout=_dec(proposal.get("payout")),
+            detail="" if stake else "Deriv's proposal had no validation_params.stake",
+        )
 
     # ── prices ───────────────────────────────────────────────────────────
     def get_quote(self, symbol: str) -> Quote:
@@ -457,27 +533,12 @@ class DerivAdapter(BrokerAdapter):
 
     def _is_open(self, name: str) -> bool:
         item = self._active.get(name) or {}
-        return bool(item.get("exchange_is_open"))
-
-    def _price_in_account(self, info: SymbolInfo, broker_name: str) -> Decimal:
-        """Value of ONE unit of the instrument in the account currency."""
-        currency = self._account.currency if self._account else "USD"
-        rate = conversion_rate(info.base_currency, currency, self._lookup)
-        if rate is not None:
-            return rate
-        quote = self.get_quote(broker_name)  # non-currency instrument quoted in USD
-        usd = conversion_rate(info.quote_currency, currency, self._lookup) or Decimal(1)
-        return quote.mid * usd
-
-    def _lookup(self, canonical: str) -> Quote | None:
-        try:
-            return self.get_quote(canonical)
-        except BrokerError:
-            return None
+        return _flag(item.get("exchange_is_open"))
 
     def get_candles(
         self, symbol: str, timeframe: Timeframe, start: datetime, end: datetime
     ) -> list[Candle]:
+        """Closed candles from `ticks_history` (style "candles") — public market data."""
         name = self.resolve(symbol)
         if timeframe.seconds not in GRANULARITIES:
             raise BrokerError(f"Deriv has no {timeframe} candles")
@@ -517,18 +578,22 @@ class DerivAdapter(BrokerAdapter):
     def _refresh_portfolio(self, *, force: bool = False) -> None:
         if not force and time.monotonic() - self._portfolio_at < PORTFOLIO_REFRESH:
             return
-        reply = self._ws().request({"portfolio": 1, "contract_type": ["MULTUP", "MULTDOWN"]})
+        reply = self._ws().request({"portfolio": 1, "contract_type": CONTRACT_TYPES})
         contracts = (reply.get("portfolio") or {}).get("contracts") or []
         open_ids = {str(c["contract_id"]) for c in contracts if c.get("contract_id") is not None}
         for cid in list(self._contracts):
             if cid not in open_ids:
-                self._contracts.pop(cid, None)  # closed; details come from history
+                self._contracts.pop(cid, None)  # settled; details come from history
         for cid in open_ids - set(self._contracts):
             self._fetch_contract(cid)
         self._portfolio_at = time.monotonic()
 
-    def _fetch_contract(self, contract_id: str) -> dict[str, Any] | None:
-        if contract_id in self._sold:
+    def _fetch_contract(
+        self, contract_id: str, *, refresh: bool = False, strict: bool = False
+    ) -> dict[str, Any] | None:
+        """Latest details of one contract; None when Deriv refuses (or, unless
+        `strict`, when our request budget is used up — strict callers retry later)."""
+        if contract_id in self._sold and not refresh:
             return self._sold[contract_id]
         try:
             reply = self._ws().request(
@@ -536,57 +601,41 @@ class DerivAdapter(BrokerAdapter):
             )
         except DerivApiError:
             return None
+        except BrokerRateLimitError:
+            if strict:
+                raise
+            return None
         self._on_contract(reply)
         poc = reply.get("proposal_open_contract")
         return poc if isinstance(poc, dict) else None
 
-    def _compute_volume(
-        self, info: SymbolInfo, stake: Decimal, multiplier: Decimal, entry: Decimal
-    ) -> Decimal:
-        """lots = notional ÷ (value of one lot in account currency) — the ONE formula
-        used for fills, positions and history, so volumes always agree."""
-        currency = self._account.currency if self._account else "USD"
-        if info.base_currency == currency:
-            rate = Decimal(1)
-        elif info.quote_currency == currency:
-            rate = entry
-        else:
-            rate = self._price_in_account(info, info.name)
-        if rate <= 0:
-            return Decimal(0)
-        return (stake * multiplier / rate / info.contract_size).quantize(Decimal("0.0001"))
-
-    def _units_of(self, contract_id: str, poc: dict[str, Any]) -> Decimal:
-        if contract_id in self._units:
-            return self._units[contract_id]
-        stake = _dec(poc.get("buy_price")) or Decimal(0)
-        multiplier = _dec(poc.get("multiplier")) or Decimal(0)
-        entry = _dec(poc.get("entry_spot")) or _dec(poc.get("current_spot")) or Decimal(0)
-        name = str(poc.get("underlying_symbol") or "")
-        units = Decimal(0)
-        if entry > 0 and name in self._active:
-            units = self._compute_volume(
-                self._base_info(self._active[name]), stake, multiplier, entry
-            )
-        self._units[contract_id] = units
-        return units
-
     def _position(self, contract_id: str, poc: dict[str, Any]) -> Position:
         limits = poc.get("limit_order") or {}
-        side = Side.BUY if poc.get("contract_type") == "MULTUP" else Side.SELL
+        ctype = _contract_type(poc.get("contract_type"))
+        side = ctype.side if ctype is not None else Side.BUY
         opened = _epoch(poc.get("date_start") or poc.get("purchase_time")) or self.now()
         entry = _dec(poc.get("entry_spot")) or _dec(poc.get("current_spot")) or Decimal(0)
+        multiplier = _dec(poc.get("multiplier"))
+        is_rise_fall = ctype is not None and ctype.family is ContractFamily.RISE_FALL
         return Position(
             position_id=contract_id,
             symbol=str(poc.get("underlying_symbol") or ""),
             side=side,
-            volume=self._units_of(contract_id, poc),
+            volume=Decimal(1),
             open_price=entry,
             open_time=opened,
             stop_loss=_dec((limits.get("stop_loss") or {}).get("value")),
             take_profit=_dec((limits.get("take_profit") or {}).get("value")),
             unrealized_pnl=_dec(poc.get("profit")) or Decimal(0),
             client_order_id=self._client_by_contract.get(contract_id),
+            contract_type=ctype,
+            stake=_dec(poc.get("buy_price")),
+            payout=_dec(poc.get("payout")) if is_rise_fall else None,
+            multiplier=int(multiplier) if multiplier else None,
+            expires_at=_epoch(poc.get("date_expiry")) if poc.get("date_expiry") else None,
+            is_valid_to_sell=_flag(poc.get("is_valid_to_sell"))
+            if poc.get("is_valid_to_sell") is not None
+            else None,
         )
 
     def get_positions(self) -> list[Position]:
@@ -594,13 +643,20 @@ class DerivAdapter(BrokerAdapter):
         return [self._position(cid, poc) for cid, poc in list(self._contracts.items())]
 
     def get_orders(self) -> list[Order]:
-        return []  # Deriv multipliers have no resting (pending) orders
+        return []  # Deriv contracts have no resting (pending) orders
 
     def get_deals(self, start: datetime, end: datetime) -> list[Deal]:
+        """Settled contracts from `profit_table` (also those settled while we were offline).
+
+        A contract we saw settle (its sold `proposal_open_contract`, with
+        `sell_price`) but that `profit_table` does not list yet is reported from
+        those cached details, so its P/L is never lost to history lag.
+        """
         deals: list[Deal] = []
+        listed: set[str] = set()
         offset = 0
-        while True:
-            try:
+        try:
+            while True:
                 reply = self._ws().request(
                     {
                         "profit_table": 1,
@@ -610,36 +666,61 @@ class DerivAdapter(BrokerAdapter):
                         "sort": "ASC",
                         "date_from": str(int(start.timestamp())),
                         "date_to": str(int(end.timestamp())),
-                        "contract_type": ["MULTUP", "MULTDOWN"],
+                        "contract_type": CONTRACT_TYPES,
                     }
                 )
-            except DerivApiError as exc:
-                raise BrokerError(f"Deriv history unavailable: {exc}") from exc
-            rows = (reply.get("profit_table") or {}).get("transactions") or []
-            for row in rows:
-                deals.extend(self._deals_for(row))
-            if len(rows) < 500:
-                return deals
-            offset += 500
+                rows = (reply.get("profit_table") or {}).get("transactions") or []
+                for row in rows:
+                    listed.add(str(row.get("contract_id")))
+                    deals.extend(self._deals_for(row))
+                if len(rows) < 500:
+                    break
+                offset += 500
+            for cid, poc in list(self._sold.items()):
+                row = _sold_row(poc)
+                opened, closed = _epoch(row["purchase_time"]), _epoch(row["sell_time"])
+                if (
+                    cid not in listed
+                    and row["sell_price"] is not None
+                    and opened is not None
+                    and closed is not None
+                    and opened <= end
+                    and closed >= start
+                ):
+                    deals.extend(self._deals_for(row))
+        except (DerivApiError, BrokerRateLimitError) as exc:
+            raise BrokerError(f"Deriv history unavailable: {exc}") from exc
+        return deals
 
     def _deals_for(self, row: dict[str, Any]) -> list[Deal]:
         cid = str(row.get("contract_id"))
-        poc = self._fetch_contract(cid) or {}
+        # strict: a rate-limited lookup must not record entry/exit 0 or guess the
+        # exit reason — the whole read fails and is retried on a later tick.
+        poc = self._fetch_contract(cid, strict=True) or {}
         buy, sell = _dec(row.get("buy_price")), _dec(row.get("sell_price"))
         if buy is None or sell is None:
             return []
-        side = (
-            Side.BUY
-            if (row.get("contract_type") or poc.get("contract_type")) == "MULTUP"
-            else Side.SELL
-        )
-        units = self._units_of(cid, poc) if poc else Decimal(0)
+        ctype = _contract_type(row.get("contract_type") or poc.get("contract_type"))
+        side = ctype.side if ctype is not None else Side.BUY
         entry = _dec(poc.get("entry_spot")) or Decimal(0)
         exit_price = _dec(poc.get("exit_spot")) or _dec(poc.get("current_spot")) or entry
         opened = _epoch(row.get("purchase_time")) or self.now()
         closed = _epoch(row.get("sell_time")) or self.now()
         symbol = str(row.get("underlying_symbol") or poc.get("underlying_symbol") or "")
         client = self._client_by_contract.get(cid)
+        profit = (sell - buy).quantize(CENT)  # Deriv prices already include commission
+        status = str(poc.get("status") or "").lower()
+        outcome = STATUS_OUTCOME.get(status) or ("WON" if profit > 0 else "LOST")
+        is_rise_fall = ctype is not None and ctype.family is ContractFamily.RISE_FALL
+        if is_rise_fall:
+            reason = "CLIENT" if status == "sold" else "EXPIRY"
+        else:
+            reason = _exit_reason(poc, side, exit_price)
+            # A Multiplier closed by its take profit / stop loss / stop out won or lost;
+            # one closed any other way (e.g. sold by us) is SOLD.
+            outcome = ("WON" if profit > 0 else "LOST") if reason in ("SL", "TP", "SO") else "SOLD"
+        payout = _dec(row.get("payout")) or _dec(poc.get("payout"))
+        type_name = ctype.value if ctype is not None else None
         return [
             Deal(
                 deal_id=f"{cid}-in",
@@ -648,11 +729,12 @@ class DerivAdapter(BrokerAdapter):
                 symbol=symbol,
                 side=side,
                 entry=DealEntry.IN,
-                volume=units,
+                volume=Decimal(1),
                 price=entry,
                 time=opened,
                 profit=Decimal(0),
                 client_order_id=client,
+                contract_type=type_name,
             ),
             Deal(
                 deal_id=f"{cid}-out",
@@ -661,13 +743,36 @@ class DerivAdapter(BrokerAdapter):
                 symbol=symbol,
                 side=side.opposite,
                 entry=DealEntry.OUT,
-                volume=units,
+                volume=Decimal(1),
                 price=exit_price,
                 time=closed,
-                profit=(sell - buy).quantize(CENT),  # Deriv prices already include commission
-                reason=_exit_reason(poc, side, exit_price),
+                profit=profit,
+                reason=reason,
+                outcome=outcome,
+                payout=payout if is_rise_fall else None,
+                contract_type=type_name,
             ),
         ]
+
+    def _fill_from(self, contract_id: str, poc: dict[str, Any]) -> ContractFill | None:
+        ctype = _contract_type(poc.get("contract_type"))
+        buy_price = _dec(poc.get("buy_price"))
+        if ctype is None or buy_price is None:
+            return None
+        multiplier = _dec(poc.get("multiplier"))
+        return ContractFill(
+            contract_id=contract_id,
+            contract_type=ctype,
+            buy_price=buy_price,
+            payout=_dec(poc.get("payout")) if ctype.family is ContractFamily.RISE_FALL else None,
+            transaction_id=str((poc.get("transaction_ids") or {}).get("buy") or "") or None,
+            start_time=_epoch(poc.get("date_start") or poc.get("purchase_time")),
+            expires_at=_epoch(poc.get("date_expiry")) if poc.get("date_expiry") else None,
+            longcode=str(poc.get("longcode")) if poc.get("longcode") else None,
+            multiplier=int(multiplier) if multiplier else None,
+            entry_spot=_dec(poc.get("entry_spot")),
+            commission=_dec(poc.get("commission")),
+        )
 
     def find_order_by_client_id(
         self, client_order_id: str, hint: OrderHint | None = None
@@ -686,47 +791,86 @@ class DerivAdapter(BrokerAdapter):
             status=OrderStatus.FILLED,
             broker_order_id=str((poc.get("transaction_ids") or {}).get("buy") or contract_id),
             broker_position_id=contract_id,
-            filled_volume=self._units_of(contract_id, poc) if poc else Decimal(0),
+            filled_volume=Decimal(1),
             fill_price=entry,
             time=_epoch(poc.get("date_start")),
             broker_message="Matched to Deriv contract during reconciliation",
+            contract=self._fill_from(contract_id, poc),
         )
 
     def _match_contract(self, hint: OrderHint) -> str | None:
-        """Find an unclaimed contract that matches what we sent (no client id at Deriv)."""
+        """Find an unclaimed contract that matches what we sent (no client id at Deriv).
+
+        Looks at open contracts first (and contracts we saw settle), then at
+        settled ones (`profit_table`): a Rise/Fall may already have expired by
+        the time we reconcile. Contracts claimed by another order — in memory or
+        in the database (`hint.claimed_ids`) — are never matched. Among several
+        candidates the one whose stake and purchase time best fit the order wins.
+
+        Raises BrokerError when `portfolio` or `profit_table` cannot be read:
+        "no match" is only answered when both were read for the window.
+        """
         if hint.submitted_at is None:
             return None
-        wanted_type = "MULTUP" if hint.side is Side.BUY else "MULTDOWN"
+        if hint.contract_type is not None:
+            wanted = {hint.contract_type.value}
+        else:
+            wanted = {"MULTUP" if hint.side is Side.BUY else "MULTDOWN"}
         try:
             symbol = self.resolve(hint.symbol)
-        except BrokerError:
+        except SymbolUnavailableError:
             symbol = hint.symbol
         lo, hi = hint.submitted_at - MATCH_BEFORE, hint.submitted_at + MATCH_AFTER
-        self._refresh_portfolio(force=True)
-        candidates: list[tuple[datetime, str]] = []
-        for cid, poc in self._contracts.items():
+        claimed = set(self._client_by_contract) | set(hint.claimed_ids)
+        if time.monotonic() - self._portfolio_at > MATCH_REUSE:
+            self._refresh_portfolio(force=True)
+        candidates: list[tuple[str, datetime, Decimal | None]] = []
+        for cid, poc in [*self._contracts.items(), *self._sold.items()]:
             when = _epoch(poc.get("purchase_time") or poc.get("date_start"))
             if (
-                cid not in self._client_by_contract
+                cid not in claimed
                 and poc.get("underlying_symbol") == symbol
-                and poc.get("contract_type") == wanted_type
+                and poc.get("contract_type") in wanted
                 and when is not None
                 and lo <= when <= hi
             ):
-                candidates.append((when, cid))
-        if not candidates:  # it may already have been closed (e.g. stopped out)
-            with contextlib.suppress(BrokerError):
-                for deal in self.get_deals(lo, hi + timedelta(days=1)):
-                    if (
-                        deal.entry is DealEntry.IN
-                        and deal.symbol == symbol
-                        and deal.side is hint.side
-                        and lo <= deal.time <= hi
-                        and deal.position_id
-                        and deal.position_id not in self._client_by_contract
-                    ):
-                        candidates.append((deal.time, deal.position_id))
-        return min(candidates)[1] if candidates else None
+                candidates.append((cid, when, _dec(poc.get("buy_price"))))
+        if not candidates:  # it may already have settled (expired, stopped out)
+            for deal in self._history_since(lo):
+                if (
+                    deal.entry is DealEntry.IN
+                    and deal.symbol == symbol
+                    and deal.contract_type in wanted
+                    and lo <= deal.time <= hi
+                    and deal.position_id
+                    and deal.position_id not in claimed
+                ):
+                    stake = _dec((self._sold.get(deal.position_id) or {}).get("buy_price"))
+                    candidates.append((deal.position_id, deal.time, stake))
+        if not candidates:
+            return None
+        sent = hint.submitted_at
+
+        def fit(item: tuple[str, datetime, Decimal | None]) -> tuple[int, float, str]:
+            cid, when, stake = item
+            stake_off = int(
+                hint.stake is not None and (stake is None or abs(stake - hint.stake) > CENT)
+            )
+            return stake_off, abs((when - sent).total_seconds()), cid
+
+        return min(candidates, key=fit)[0]
+
+    def _history_since(self, start: datetime) -> list[Deal]:
+        """Settled contracts since `start`, read once for all orders reconciled
+        together. Only reused when read AFTER the portfolio we just checked, so
+        a contract that settled in between is never missed."""
+        cached = self._history
+        if cached is not None and cached[0] <= start and cached[1] >= self._portfolio_at:
+            return cached[2]
+        begin = start - MATCH_HISTORY_SPAN
+        deals = self.get_deals(begin, self.now() + timedelta(days=1))
+        self._history = (begin, time.monotonic(), deals)
+        return deals
 
     def _remember(self, client_order_id: str, contract_id: str) -> None:
         self._contract_by_client[client_order_id] = contract_id
@@ -734,39 +878,28 @@ class DerivAdapter(BrokerAdapter):
 
     # ── trading ──────────────────────────────────────────────────────────
     def _proposal(
-        self,
-        name: str,
-        side: Side,
-        stake: Decimal,
-        multiplier: int,
-        stop_amount: Decimal | None,
-        take_amount: Decimal | None,
+        self, name: str, contract: ContractOrder, limit_order: dict[str, float] | None
     ) -> dict[str, Any]:
-        limit_order: dict[str, float] = {}
-        if stop_amount is not None:
-            limit_order["stop_loss"] = float(stop_amount)
-        if take_amount is not None:
-            limit_order["take_profit"] = float(take_amount)
         payload: dict[str, Any] = {
             "proposal": 1,
-            "contract_type": "MULTUP" if side is Side.BUY else "MULTDOWN",
+            "contract_type": contract.contract_type.value,
             "underlying_symbol": name,
-            "amount": float(stake),
             "basis": "stake",
-            "currency": self._account.currency if self._account else "USD",
-            "multiplier": multiplier,
+            "amount": float(contract.stake),
+            "currency": self.currency,
         }
-        if limit_order:
-            payload["limit_order"] = limit_order
+        if contract.family is ContractFamily.RISE_FALL:
+            payload["duration"] = contract.duration
+            payload["duration_unit"] = contract.duration_unit
+        else:
+            payload["multiplier"] = contract.multiplier
+            if limit_order:
+                payload["limit_order"] = limit_order
         reply = self._ws().request(payload)
         proposal = reply.get("proposal")
         if not isinstance(proposal, dict) or not proposal.get("id"):
             raise InvalidBrokerResponseError("Deriv proposal response is malformed")
         return proposal
-
-    @staticmethod
-    def _amount(notional: Decimal, entry: Decimal, level: Decimal) -> Decimal:
-        return (notional * abs(entry - level) / entry).quantize(CENT, ROUND_HALF_UP)
 
     def place_order(self, request: OrderRequest) -> OrderResult:
         if request.order_type is not OrderType.MARKET:
@@ -774,51 +907,72 @@ class DerivAdapter(BrokerAdapter):
                 "Deriv does not offer pending (limit/stop) orders — use a market order.",
                 broker_code="PendingOrdersUnsupported",
             )
+        contract = request.contract
+        if contract is None:
+            raise OrderRejectedError(
+                "Deriv trades Options contracts: choose Rise/Fall or Multiplier "
+                "(lot-based SPOT trading is Paper only).",
+                broker_code="ContractRequired",
+            )
+        if contract.contract_type.side is not request.side:
+            raise OrderRejectedError("Contract type does not match the order direction")
         try:
-            info = self.get_symbol(request.symbol)
-            name = info.name
-            multiplier = self._specs[name][1]
-            quote = self.get_quote(name)
-            rate = self._price_in_account(info, name)
-        except BrokerConnectionError:
-            raise
+            name = self.resolve(request.symbol)
+            problem = self.contract_capabilities(name).check(contract.as_spec())
+            limit_order: dict[str, float] = {}
+            if contract.family is ContractFamily.MULTIPLIER:
+                stop, take = contract.stop_loss_amount, contract.take_profit_amount
+                if stop is None and take is None and contract.multiplier:
+                    quote = self.get_quote(name)
+                    entry = quote.ask if request.side is Side.BUY else quote.bid
+                    stop, take = multiplier_limit_amounts(
+                        request.side,
+                        contract.stake,
+                        contract.multiplier,
+                        entry,
+                        request.stop_loss,
+                        request.take_profit,
+                    )
+                if stop is not None:
+                    limit_order["stop_loss"] = float(stop)
+                if take is not None:
+                    limit_order["take_profit"] = float(take)
         except DerivApiError as exc:
             raise _map_api_error(exc) from exc
-        entry = quote.ask if request.side is Side.BUY else quote.bid
-        stake = (request.volume * info.contract_size * rate / multiplier).quantize(CENT, ROUND_DOWN)
-        if stake <= 0:
-            raise OrderRejectedError("Volume is too small for a Deriv stake")
-        notional = stake * multiplier
-        stop_amount = (
-            self._amount(notional, entry, request.stop_loss) if request.stop_loss else None
-        )
-        take_amount = (
-            self._amount(notional, entry, request.take_profit) if request.take_profit else None
-        )
-        if stop_amount is not None and stop_amount > stake:
-            max_move = (Decimal(100) / multiplier).quantize(Decimal("0.01"))
-            raise OrderRejectedError(
-                f"Stop loss is too far for Deriv ×{multiplier}: the most a stop can risk is the "
-                f"stake ({stake} {self._account.currency if self._account else 'USD'}), "
-                f"i.e. a {max_move}% price move.",
-                broker_code="StopLossBeyondStake",
-            )
+        except BrokerRateLimitError as exc:
+            raise OrderRejectedError(str(exc), broker_code="RateLimited") from exc
+        except (SymbolUnavailableError, InvalidBrokerResponseError) as exc:
+            raise OrderRejectedError(str(exc)) from exc  # nothing was sent
+        except BrokerTimeoutError as exc:
+            raise BrokerConnectionError(f"Deriv did not answer before the order: {exc}") from exc
+        if problem:
+            raise OrderRejectedError(problem, broker_code="ContractNotOffered")
         # 1. Price the contract. A refusal here means nothing was bought.
         try:
-            proposal = self._proposal(
-                name, request.side, stake, multiplier, stop_amount, take_amount
-            )
+            proposal = self._proposal(name, contract, limit_order)
         except DerivApiError as exc:
             raise _map_api_error(exc) from exc
-        except BrokerTimeoutError as exc:
+        except BrokerRateLimitError as exc:
+            raise OrderRejectedError(str(exc), broker_code="RateLimited") from exc
+        except (BrokerTimeoutError, InvalidBrokerResponseError) as exc:
             raise BrokerConnectionError(f"Deriv did not price the order: {exc}") from exc
-        ask = _dec(proposal.get("ask_price")) or stake
+        ask = _dec(proposal.get("ask_price"))
+        if ask is None:
+            raise OrderRejectedError("Deriv's price quote had no ask price — nothing was bought")
+        if ask > contract.stake + ASK_TOLERANCE:
+            raise OrderRejectedError(
+                f"Deriv asks {ask} for a {contract.stake} {self.currency} stake — refused, "
+                "2kPilot never pays more than the stake.",
+                broker_code="AskAboveStake",
+            )
         sent_at = self.now()
-        # 2. Buy. From here on a lost link means the outcome is UNKNOWN.
+        # 2. Buy at no more than the quoted ask. From here on a lost link = UNKNOWN.
         try:
             reply = self._ws().request({"buy": proposal["id"], "price": float(ask)}, timeout=30)
         except DerivApiError as exc:
             raise _map_api_error(exc) from exc
+        except BrokerRateLimitError as exc:  # refused before sending
+            raise OrderRejectedError(str(exc), broker_code="RateLimited") from exc
         except BrokerError as exc:
             raise OrderOutcomeUnknownError(
                 f"Deriv buy not confirmed: {exc}", client_order_id=request.client_order_id
@@ -830,36 +984,74 @@ class DerivAdapter(BrokerAdapter):
             )
         contract_id = str(receipt["contract_id"])
         self._remember(request.client_order_id, contract_id)
-        poc = self._fetch_contract(contract_id) or {}
-        fill = _dec(poc.get("entry_spot")) or _dec(proposal.get("spot")) or entry
-        buy_price = _dec(receipt.get("buy_price")) or stake
-        units = self._compute_volume(info, buy_price, Decimal(multiplier), fill)
-        self._units[contract_id] = units
+        # Deriv acknowledged the buy: from here nothing may report "not bought".
+        # Details are a nicety — without them the receipt is the fill.
+        try:
+            poc = self._fetch_contract(contract_id) or {}
+        except BrokerError:
+            poc = {}
+        start = _epoch(receipt.get("start_time") or receipt.get("purchase_time")) or sent_at
+        buy_price = _dec(receipt.get("buy_price")) or ask
+        entry_spot = _dec(poc.get("entry_spot")) or _dec(proposal.get("spot"))
+        expires = _epoch(poc.get("date_expiry")) if poc.get("date_expiry") else None
+        is_rise_fall = contract.family is ContractFamily.RISE_FALL
+        fill = ContractFill(
+            contract_id=contract_id,
+            contract_type=contract.contract_type,
+            buy_price=buy_price,
+            payout=(_dec(receipt.get("payout")) or _dec(proposal.get("payout")))
+            if is_rise_fall
+            else None,
+            transaction_id=str(receipt.get("transaction_id") or "") or None,
+            start_time=start,
+            expires_at=expires or (contract.expires_at(start) if is_rise_fall else None),
+            longcode=str(receipt.get("longcode") or proposal.get("longcode") or "") or None,
+            multiplier=contract.multiplier,
+            duration=contract.duration,
+            duration_unit=contract.duration_unit,
+            entry_spot=entry_spot,
+            commission=_dec(poc.get("commission")),
+        )
         return OrderResult(
             client_order_id=request.client_order_id,
             status=OrderStatus.FILLED,
-            broker_order_id=str(receipt.get("transaction_id") or contract_id),
+            broker_order_id=fill.transaction_id or contract_id,
             broker_position_id=contract_id,
-            filled_volume=units,
-            fill_price=fill,
-            time=_epoch(receipt.get("start_time") or receipt.get("purchase_time")) or sent_at,
-            broker_message=f"Deriv ×{multiplier}, stake {buy_price}",
-            raw={"stake": str(buy_price), "multiplier": str(multiplier)},
+            filled_volume=Decimal(1),
+            fill_price=entry_spot,
+            time=start,
+            broker_message=(fill.longcode or f"Deriv {contract.contract_type.value}")[:500],
+            raw={"stake": str(buy_price), "contract_type": contract.contract_type.value},
+            contract=fill,
         )
 
     def close_position(
         self, position_id: str, client_order_id: str, volume: Decimal | None = None
     ) -> OrderResult:
-        poc = self._contracts.get(position_id) or self._fetch_contract(position_id)
+        poc = self._fetch_contract(position_id, refresh=True) or self._contracts.get(position_id)
         if poc is None:
             raise OrderRejectedError(f"Deriv contract {position_id} not found")
-        units = self._units_of(position_id, poc)
-        if volume is not None and volume < units:
-            raise OrderRejectedError("Deriv cannot partially close a multiplier contract")
+        if volume is not None and volume < 1:
+            raise OrderRejectedError("Deriv cannot partially close a contract")
+        if _flag(poc.get("is_sold")):
+            raise OrderRejectedError("This contract has already settled")
+        if poc.get("is_valid_to_sell") is not None and not _flag(poc.get("is_valid_to_sell")):
+            ctype = _contract_type(poc.get("contract_type"))
+            if ctype is not None and ctype.family is ContractFamily.RISE_FALL:
+                raise OrderRejectedError(
+                    "This contract settles at expiry: Deriv does not allow selling it now.",
+                    broker_code="NotValidToSell",
+                )
+            raise OrderRejectedError(
+                "Deriv does not allow selling this contract right now.",
+                broker_code="NotValidToSell",
+            )
         try:
             reply = self._ws().request({"sell": int(position_id), "price": 0}, timeout=30)
         except DerivApiError as exc:
             raise _map_api_error(exc) from exc
+        except BrokerRateLimitError as exc:
+            raise OrderRejectedError(str(exc), broker_code="RateLimited") from exc
         except BrokerError as exc:
             raise OrderOutcomeUnknownError(
                 f"Deriv sell not confirmed: {exc}", client_order_id=client_order_id
@@ -867,42 +1059,46 @@ class DerivAdapter(BrokerAdapter):
         receipt = reply.get("sell") or {}
         self._contracts.pop(position_id, None)
         self._sold.pop(position_id, None)  # refetch the final, sold state
-        details = self._fetch_contract(position_id) or {}
+        try:  # the sale is acknowledged: a failed detail fetch must not undo it
+            details = self._fetch_contract(position_id) or {}
+        except BrokerError:
+            details = {}
         price = _dec(details.get("exit_spot")) or _dec(details.get("current_spot"))
         return OrderResult(
             client_order_id=client_order_id,
             status=OrderStatus.FILLED,
             broker_order_id=str(receipt.get("transaction_id") or ""),
             broker_position_id=position_id,
-            filled_volume=units,
+            filled_volume=Decimal(1),
             fill_price=price,
             time=self.now(),
-            broker_message=f"Sold for {receipt.get('sold_for')}",
+            broker_message=f"Sold for {_dec(receipt.get('sold_for'))}",
         )
 
     def modify_position(
         self, position_id: str, stop_loss: Decimal | None, take_profit: Decimal | None
     ) -> OrderResult:
         poc = self._contracts.get(position_id) or self._fetch_contract(position_id)
-        if poc is None or poc.get("is_sold"):
+        if poc is None or _flag(poc.get("is_sold")):
             raise OrderRejectedError(f"Deriv contract {position_id} is not open")
+        ctype = _contract_type(poc.get("contract_type"))
+        if ctype is None or ctype.family is not ContractFamily.MULTIPLIER:
+            raise OrderRejectedError("Only Multiplier contracts have a stop loss / take profit")
         entry = _dec(poc.get("entry_spot"))
         stake = _dec(poc.get("buy_price"))
         multiplier = _dec(poc.get("multiplier"))
         if not entry or not stake or not multiplier:
             raise InvalidBrokerResponseError("Deriv contract details are incomplete")
         notional = stake * multiplier
-        side = Side.BUY if poc.get("contract_type") == "MULTUP" else Side.SELL
+        side = ctype.side
         if stop_loss is not None and (entry - stop_loss) * side.sign <= 0:
             raise OrderRejectedError("Stop loss must be on the losing side of the entry price")
-        stop_amount = self._amount(notional, entry, stop_loss) if stop_loss is not None else None
+        stop_amount = _amount(notional, entry, stop_loss) if stop_loss is not None else None
         if stop_amount is not None and stop_amount > stake:
             raise OrderRejectedError(
                 f"Stop loss too far: Deriv limits the stop-loss amount to the stake ({stake})."
             )
-        take_amount = (
-            self._amount(notional, entry, take_profit) if take_profit is not None else None
-        )
+        take_amount = _amount(notional, entry, take_profit) if take_profit is not None else None
         try:
             self._ws().request(
                 {
@@ -931,22 +1127,8 @@ class DerivAdapter(BrokerAdapter):
         raise OrderRejectedError("Deriv has no pending orders to cancel")
 
 
-def contract_size_of(name: str) -> Decimal:
-    """MetaTrader-style contract size for a Deriv symbol."""
-    if name.startswith("frx") and len(name) == 9:
-        base = name[3:6]
-        if base in ("XAU", "XPT", "XPD"):
-            return Decimal(100)
-        if base == "XAG":
-            return Decimal(5000)
-        return Decimal(100_000)
-    return Decimal(1)
-
-
-def _with_status(info: SymbolInfo, market_open: bool | None, trade_allowed: bool) -> SymbolInfo:
-    from dataclasses import replace
-
-    return replace(info, market_open=market_open, trade_allowed=trade_allowed)
+def _amount(notional: Decimal, entry: Decimal, level: Decimal) -> Decimal:
+    return (notional * abs(entry - level) / entry).quantize(CENT, ROUND_HALF_UP)
 
 
 def _exit_reason(poc: dict[str, Any], side: Side, exit_price: Decimal) -> str:
@@ -961,3 +1143,19 @@ def _exit_reason(poc: dict[str, Any], side: Side, exit_price: Decimal) -> str:
     if stop_out is not None and (stop_out - exit_price) * side.sign >= 0:
         return "SO"
     return "OTHER"
+
+
+def _sold_row(poc: dict[str, Any]) -> dict[str, Any]:
+    """A `profit_table`-shaped row from a settled contract's own details."""
+    return {
+        "contract_id": poc.get("contract_id"),
+        "transaction_id": (poc.get("transaction_ids") or {}).get("sell")
+        or (poc.get("transaction_ids") or {}).get("buy"),
+        "buy_price": poc.get("buy_price"),
+        "sell_price": poc.get("sell_price"),
+        "purchase_time": poc.get("purchase_time") or poc.get("date_start"),
+        "sell_time": poc.get("sell_time") or poc.get("exit_tick_time") or poc.get("date_expiry"),
+        "contract_type": poc.get("contract_type"),
+        "underlying_symbol": poc.get("underlying_symbol"),
+        "payout": poc.get("payout"),
+    }

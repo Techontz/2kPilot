@@ -23,11 +23,27 @@ return new class extends Migration
             $table->string('status_reason', 300)->nullable();
             $table->dateTime('last_bar_evaluated', 6)->nullable();
             $table->dateTime('last_signal_at', 6)->nullable();
+            // Contract specification: how the strategy's BUY/SELL signals are traded.
+            //  SPOT       lots + stop loss/take profit prices (Paper only)
+            //  RISE_FALL  BUY → CALL (CALLE with allow_equals), SELL → PUT (PUTE)
+            //  MULTIPLIER BUY → MULTUP, SELL → MULTDOWN
+            $table->string('contract_family', 16)->default('SPOT');
+            $table->unsignedInteger('duration')->nullable();               // RISE_FALL
+            $table->string('duration_unit', 1)->nullable();                // t | s | m | h | d
+            $table->boolean('allow_equals')->default(false);               // RISE_FALL: equal spots win
+            $table->decimal('stake', 12, 2)->nullable();                   // NULL = the risk profile's stake
+            $table->unsignedInteger('multiplier')->nullable();             // MULTIPLIER
+            $table->decimal('take_profit_amount', 14, 2)->nullable();      // MULTIPLIER, money
+            $table->decimal('stop_loss_amount', 14, 2)->nullable();        // MULTIPLIER, money
             $table->utcTimestamps();
 
             $table->unique(['account_id', 'strategy_id', 'symbol'], 'uq_assignments_target');
         });
         DB::statement("ALTER TABLE strategy_assignments ADD CONSTRAINT ck_strategy_assignments_status CHECK (status IN ('ENABLED','PAUSED'))");
+        DB::statement("ALTER TABLE strategy_assignments ADD CONSTRAINT ck_strategy_assignments_contract CHECK (contract_family IN ('RISE_FALL','MULTIPLIER','SPOT'))");
+        DB::statement("ALTER TABLE strategy_assignments ADD CONSTRAINT ck_strategy_assignments_unit CHECK (duration_unit IS NULL OR duration_unit IN ('t','s','m','h','d'))");
+        DB::statement("ALTER TABLE strategy_assignments ADD CONSTRAINT ck_strategy_assignments_rise_fall CHECK (contract_family <> 'RISE_FALL' OR (duration > 0 AND duration_unit IS NOT NULL))");
+        DB::statement("ALTER TABLE strategy_assignments ADD CONSTRAINT ck_strategy_assignments_multiplier CHECK (contract_family <> 'MULTIPLIER' OR multiplier > 0)");
 
         Schema::create('strategy_evaluations', function (Blueprint $table) {
             $table->id();

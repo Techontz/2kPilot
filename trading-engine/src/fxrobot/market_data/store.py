@@ -27,9 +27,13 @@ def get_or_create_dataset(
     source: DataSource,
     source_ref: str = "",
     description: str = "",
+    user_id: uuid.UUID | None = None,
 ) -> Dataset:
+    """The dataset of `user_id` (None = shared) with this identity, created if missing."""
+    owner = Dataset.user_id.is_(None) if user_id is None else Dataset.user_id == user_id
     dataset = db.scalar(
         select(Dataset).where(
+            owner,
             Dataset.symbol == symbol,
             Dataset.timeframe == timeframe,
             Dataset.source == source,
@@ -38,6 +42,7 @@ def get_or_create_dataset(
     )
     if dataset is None:
         dataset = Dataset(
+            user_id=user_id,
             symbol=symbol,
             timeframe=timeframe,
             source=source,

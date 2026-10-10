@@ -3,6 +3,18 @@
 `evaluate` is a pure function of (signal, context, limits) so live trading
 and backtesting run the exact same checks. Callers assemble `RiskContext`
 from their own state (database + broker live; simulation state in backtests).
+
+The switches are passed in, never looked up: the account OWNER's STOP switch,
+mode and LIVE authorisation, the platform halt, and the server LIVE lock.
+
+Contracts (Rise/Fall, Multipliers) are sized by a fixed stake instead of lots:
+the stake is the most a contract can lose (a Rise/Fall settles at expiry; a
+Multiplier is stopped out by the broker before the loss exceeds the stake), so
+a bounded stake satisfies the stop-loss requirement. Their extra checks are the
+broker's stake limits (read from the broker's price for the contract — never
+hard-coded; missing limits fail closed), the profile's stake cap and the money
+limits. Lot-based checks (stop distance, reward/risk, lot exposure, margin) do
+not apply to contracts.
 """
 
 from __future__ import annotations
@@ -13,6 +25,12 @@ from datetime import datetime, timedelta
 from decimal import ROUND_DOWN, Decimal
 from typing import Any
 
+from fxrobot.domain.contracts import (
+    ContractFamily,
+    ContractOrder,
+    ContractSpec,
+    StakeQuote,
+)
 from fxrobot.domain.market import Quote, Side, SymbolInfo
 from fxrobot.domain.modes import AccountEnvironment, TradingMode, environment_permitted
 from fxrobot.market_data.conversion import QuoteLookup, conversion_rate, point_value
@@ -32,9 +50,11 @@ class OpenExposure:
 @dataclass
 class RiskContext:
     now: datetime
-    mode: TradingMode
-    kill_switch_engaged: bool
-    live_trading_locked: bool
+    mode: TradingMode  # the account owner's operating mode
+    kill_switch_engaged: bool  # the account owner's own STOP switch
+    platform_halted: bool  # admin emergency halt for every user
+    live_trading_locked: bool  # server hard lock (LIVE_TRADING_ENABLED=false)
+    live_authorized: bool  # the owner's LIVE authorisation covers this account and its limits
     account_environment: AccountEnvironment
     account_trading_enabled: bool
     broker_connected: bool
@@ -60,6 +80,19 @@ class RiskContext:
     # A manual ticket from the Trade page: same rules, but there is no strategy
     # bar whose age must be checked, and the person chooses the volume.
     manual: bool = False
+    # ── contracts ──
+    contract: ContractSpec = field(default_factory=ContractSpec)
+    # Why the broker cannot trade this contract on this symbol (capabilities), if so.
+    contract_problem: str | None = None
+    # The broker's price for the contract (stake limits); None = not available.
+    stake_quote: StakeQuote | None = None
+    # Losses in a row among trades closed TODAY (UTC); resets at midnight.
+    consecutive_losses_today: int = 0
+    # Why the LIVE authorisation does not cover this account (shown when it does not).
+    live_authorization_problem: str | None = None
+    # Closed trades whose P/L the broker has not confirmed yet: the loss limits
+    # cannot be trusted until they are settled, so they block new entries.
+    unsettled_trades: int = 0
 
 
 @dataclass(frozen=True)
@@ -80,6 +113,8 @@ class RiskDecision:
     risk_amount: Decimal | None = None
     max_slippage_points: int | None = None
     halt_account: bool = False  # a hard limit (drawdown) was breached: stop this account
+    contract: ContractOrder | None = None  # set for approved contract trades (volume = 1)
+    payout: Decimal | None = None  # Rise/Fall: what the broker quoted to pay if it wins
 
     @property
     def rejection_reason(self) -> str | None:
@@ -93,6 +128,9 @@ class RiskDecision:
 Rule = Callable[[SignalIntent, RiskContext, RiskLimits], RuleResult]
 
 
+CENT = Decimal("0.01")
+
+
 def _pct(value: Decimal) -> str:
     return f"{value.quantize(Decimal('0.01'))}%"
 
@@ -101,10 +139,27 @@ def _pips(distance: Decimal, symbol: SymbolInfo) -> Decimal:
     return (abs(distance) / symbol.pip_size).quantize(Decimal("0.1"))
 
 
+def _money(value: Decimal, currency: str) -> str:
+    return f"{value.quantize(Decimal('0.01'))} {currency}"
+
+
+def resolved_stake(c: RiskContext, lim: RiskLimits) -> Decimal:
+    """The stake of the next contract: the contract spec's own stake, else the profile's."""
+    return c.contract.stake if c.contract.stake is not None else lim.stake_amount
+
+
+def _is_contract(c: RiskContext) -> bool:
+    return c.contract.contract_family.is_contract
+
+
 # ── individual rules (each pure, each explainable) ───────────────────────
 
 
 def rule_kill_switch(_: SignalIntent, c: RiskContext, __: RiskLimits) -> RuleResult:
+    if c.platform_halted:
+        return RuleResult(
+            "Kill switch", False, "trading is halted platform-wide by an administrator"
+        )
     return RuleResult(
         "Kill switch",
         not c.kill_switch_engaged,
@@ -116,6 +171,13 @@ def rule_mode(_: SignalIntent, c: RiskContext, __: RiskLimits) -> RuleResult:
     ok = environment_permitted(c.mode, c.account_environment)
     if ok and c.account_environment is AccountEnvironment.LIVE and c.live_trading_locked:
         return RuleResult("Operating mode", False, "LIVE account but the LIVE hard lock is on")
+    if ok and c.account_environment is AccountEnvironment.LIVE and not c.live_authorized:
+        return RuleResult(
+            "Operating mode",
+            False,
+            c.live_authorization_problem
+            or "LIVE trading has not been authorised by the account owner",
+        )
     return RuleResult(
         "Operating mode",
         ok,
@@ -141,7 +203,24 @@ def rule_broker(_: SignalIntent, c: RiskContext, __: RiskLimits) -> RuleResult:
     )
 
 
-def rule_stop_loss(s: SignalIntent, _: RiskContext, __: RiskLimits) -> RuleResult:
+def rule_contract(_: SignalIntent, c: RiskContext, __: RiskLimits) -> RuleResult:
+    if c.contract_problem:
+        return RuleResult("Contract supported", False, c.contract_problem)
+    return RuleResult("Contract supported", True, c.contract.label())
+
+
+def rule_stop_loss(s: SignalIntent, c: RiskContext, __: RiskLimits) -> RuleResult:
+    family = c.contract.contract_family
+    if family is ContractFamily.RISE_FALL:
+        return RuleResult(
+            "Stop loss required", True, "bounded: a Rise/Fall can lose at most its stake"
+        )
+    if family is ContractFamily.MULTIPLIER:
+        return RuleResult(
+            "Stop loss required",
+            True,
+            "bounded: the broker stops a Multiplier out before it loses more than its stake",
+        )
     if s.stop_loss is None or s.stop_loss <= 0:
         return RuleResult("Stop loss required", False, "signal has no stop loss")
     if (s.entry_price - s.stop_loss) * s.side.sign <= 0:
@@ -176,6 +255,8 @@ def rule_data_fresh(s: SignalIntent, c: RiskContext, lim: RiskLimits) -> RuleRes
 def rule_market_open(_: SignalIntent, c: RiskContext, lim: RiskLimits) -> RuleResult:
     if not c.check_market_hours:
         return RuleResult("Market open", True, "not checked (simulation)")
+    if not c.symbol.trade_allowed:
+        return RuleResult("Market open", False, f"trading on {c.symbol.name} is suspended (broker)")
     if c.symbol.market_open is not None:  # the broker told us
         if not c.symbol.market_open:
             return RuleResult("Market open", False, f"{c.symbol.name} market is closed (broker)")
@@ -220,6 +301,8 @@ def rule_spread(_: SignalIntent, c: RiskContext, lim: RiskLimits) -> RuleResult:
 
 
 def rule_stop_distance(s: SignalIntent, c: RiskContext, lim: RiskLimits) -> RuleResult:
+    if _is_contract(c):
+        return RuleResult("Stop distance", True, "not applicable: contracts are sized by stake")
     pips = _pips(s.risk_distance, c.symbol)
     if lim.min_stop_pips is not None and pips < lim.min_stop_pips:
         return RuleResult("Stop distance", False, f"{pips} pips < min {lim.min_stop_pips}")
@@ -228,7 +311,9 @@ def rule_stop_distance(s: SignalIntent, c: RiskContext, lim: RiskLimits) -> Rule
     return RuleResult("Stop distance", True, f"{pips} pips")
 
 
-def rule_reward_risk(s: SignalIntent, _: RiskContext, lim: RiskLimits) -> RuleResult:
+def rule_reward_risk(s: SignalIntent, c: RiskContext, lim: RiskLimits) -> RuleResult:
+    if _is_contract(c):
+        return RuleResult("Reward/risk", True, "not applicable: the contract fixes the payout")
     rr = s.reward_risk
     if lim.min_reward_risk is None:
         return RuleResult("Reward/risk", True, "no minimum" if rr is None else f"1:{rr:.2f}")
@@ -281,6 +366,18 @@ def rule_drawdown(_: SignalIntent, c: RiskContext, lim: RiskLimits) -> RuleResul
     return RuleResult("Max drawdown", True, f"drawdown {_pct(dd)} of {_pct(lim.max_drawdown_pct)}")
 
 
+def rule_settlement(_: SignalIntent, c: RiskContext, __: RiskLimits) -> RuleResult:
+    """A closed trade without a confirmed P/L could hide a loss the limits must count."""
+    if c.unsettled_trades:
+        return RuleResult(
+            "Settled P/L",
+            False,
+            f"{c.unsettled_trades} closed trade(s) have no confirmed P/L yet — new trades are "
+            "blocked until the broker's history settles them",
+        )
+    return RuleResult("Settled P/L", True, "every closed trade has a confirmed P/L")
+
+
 def rule_cooldown(_: SignalIntent, c: RiskContext, lim: RiskLimits) -> RuleResult:
     if lim.cooldown_after_losses is None or lim.cooldown_minutes is None:
         return RuleResult("Loss cooldown", True, "no cooldown")
@@ -294,6 +391,84 @@ def rule_cooldown(_: SignalIntent, c: RiskContext, lim: RiskLimits) -> RuleResul
                 f"{c.consecutive_losses} losses in a row — paused for {mins} more min",
             )
     return RuleResult("Loss cooldown", True, f"{c.consecutive_losses} consecutive losses")
+
+
+def rule_daily_loss_amount(_: SignalIntent, c: RiskContext, lim: RiskLimits) -> RuleResult:
+    name = "Daily loss amount"
+    if lim.max_daily_loss_amount is None:
+        return RuleResult(name, True, "no limit")
+    limit = lim.max_daily_loss_amount
+    lost = max(Decimal(0), -(c.realized_pnl_today + c.unrealized_pnl))
+    if lost >= limit:
+        return RuleResult(
+            name,
+            False,
+            f"lost {_money(lost, c.account_currency)} today, limit "
+            f"{_money(limit, c.account_currency)} — no new trades until 00:00 UTC",
+        )
+    if _is_contract(c):
+        # Worst case: every open contract loses its whole stake, then this one too.
+        if any(p.risk_amount is None for p in c.open_positions):
+            return RuleResult(name, False, "risk of an open position is unknown")
+        open_risk = sum((p.risk_amount or Decimal(0) for p in c.open_positions), Decimal(0))
+        stake = resolved_stake(c, lim)
+        worst = max(Decimal(0), open_risk - c.realized_pnl_today) + stake
+        if worst > limit:
+            held = (
+                f" plus {_money(open_risk, c.account_currency)} in open contracts"
+                if open_risk
+                else ""
+            )
+            return RuleResult(
+                name,
+                False,
+                f"losing this {_money(stake, c.account_currency)} stake{held} would take "
+                f"today's loss to {_money(worst, c.account_currency)}, above the limit "
+                f"{_money(limit, c.account_currency)}",
+            )
+    return RuleResult(
+        name,
+        True,
+        f"lost {_money(lost, c.account_currency)} of {_money(limit, c.account_currency)} today",
+    )
+
+
+def rule_losing_streak(_: SignalIntent, c: RiskContext, lim: RiskLimits) -> RuleResult:
+    name = "Losing streak"
+    if lim.max_consecutive_losses is None:
+        return RuleResult(name, True, "no limit")
+    if c.consecutive_losses_today >= lim.max_consecutive_losses:
+        return RuleResult(
+            name,
+            False,
+            f"{c.consecutive_losses_today} losses in a row today (max "
+            f"{lim.max_consecutive_losses}) — trading halted until 00:00 UTC",
+        )
+    return RuleResult(
+        name,
+        True,
+        f"{c.consecutive_losses_today} losses in a row today (max {lim.max_consecutive_losses})",
+    )
+
+
+def rule_profit_target(_: SignalIntent, c: RiskContext, lim: RiskLimits) -> RuleResult:
+    name = "Daily profit target"
+    if lim.daily_profit_target_amount is None:
+        return RuleResult(name, True, "no target")
+    target = lim.daily_profit_target_amount
+    if c.realized_pnl_today >= target:
+        return RuleResult(
+            name,
+            False,
+            f"target reached: +{_money(c.realized_pnl_today, c.account_currency)} of "
+            f"{_money(target, c.account_currency)} — stopping for today",
+        )
+    return RuleResult(
+        name,
+        True,
+        f"{_money(c.realized_pnl_today, c.account_currency)} of "
+        f"{_money(target, c.account_currency)} today",
+    )
 
 
 def rule_trades_per_day(_: SignalIntent, c: RiskContext, lim: RiskLimits) -> RuleResult:
@@ -323,6 +498,7 @@ RULES: tuple[Rule, ...] = (
     rule_mode,
     rule_account_enabled,
     rule_broker,
+    rule_contract,
     rule_stop_loss,
     rule_data_fresh,
     rule_market_open,
@@ -334,7 +510,11 @@ RULES: tuple[Rule, ...] = (
     rule_daily_loss,
     rule_weekly_loss,
     rule_drawdown,
+    rule_settlement,
     rule_cooldown,
+    rule_losing_streak,
+    rule_daily_loss_amount,
+    rule_profit_target,
     rule_trades_per_day,
     rule_open_positions,
 )
@@ -440,6 +620,94 @@ def rule_margin(volume: Decimal, c: RiskContext) -> RuleResult:
     return RuleResult("Margin", True, f"needs {required:.2f} of {c.free_margin:.2f} free")
 
 
+def rule_stake(c: RiskContext, lim: RiskLimits) -> RuleResult:
+    """The stake must fit the profile cap, the balance and the BROKER's stake limits.
+
+    The broker's limits come from its price for this exact contract (Deriv:
+    `proposal.validation_params.stake`). If the broker did not report them we
+    cannot know the stake is acceptable, so the trade is refused (fail closed).
+    """
+    name = "Stake"
+    ccy = c.account_currency
+    stake = resolved_stake(c, lim)
+    if stake <= 0:
+        return RuleResult(name, False, "stake must be positive")
+    if lim.max_stake_amount is not None and stake > lim.max_stake_amount:
+        return RuleResult(
+            name,
+            False,
+            f"{_money(stake, ccy)} is above the profile's maximum stake "
+            f"{_money(lim.max_stake_amount, ccy)}",
+        )
+    spec = c.contract
+    if (
+        spec.contract_family is ContractFamily.MULTIPLIER
+        and spec.stop_loss_amount is not None
+        and spec.stop_loss_amount > stake
+    ):
+        return RuleResult(
+            name,
+            False,
+            f"the stop-loss amount {_money(spec.stop_loss_amount, ccy)} is larger than the stake "
+            f"{_money(stake, ccy)}",
+        )
+    if c.balance is None or stake > c.balance:
+        return RuleResult(name, False, f"{_money(stake, ccy)} is more than the balance")
+    # The stake is the most a contract can lose: it must fit the per-trade budget
+    # like any other trade. Refused, never shrunk to fit.
+    budget = c.balance * lim.risk_per_trade_pct / 100
+    if stake > budget:
+        return RuleResult(
+            name,
+            False,
+            f"{_money(stake, ccy)} is above the {lim.risk_per_trade_pct.normalize()}% per-trade "
+            f"budget ({budget.quantize(CENT, rounding=ROUND_DOWN)} {ccy} of a "
+            f"{_money(c.balance, ccy)} balance) — lower the stake or raise risk per trade",
+        )
+    quote = c.stake_quote
+    if quote is None or quote.stake_min is None or quote.stake_max is None:
+        why = f" ({quote.detail})" if quote is not None and quote.detail else ""
+        return RuleResult(
+            name, False, f"the broker did not report its stake limits for this contract{why}"
+        )
+    if stake < quote.stake_min or stake > quote.stake_max:
+        return RuleResult(
+            name,
+            False,
+            f"{_money(stake, ccy)} is outside the broker's stake range "
+            f"{_money(quote.stake_min, ccy)}–{_money(quote.stake_max, ccy)}",
+        )
+    payout = (
+        f", pays {_money(quote.payout, ccy)} if it wins"
+        if quote.payout is not None and spec.contract_family is ContractFamily.RISE_FALL
+        else ""
+    )
+    label = " (simulated)" if quote.simulated else ""
+    return RuleResult(
+        name,
+        True,
+        f"{_money(stake, ccy)} at risk{payout}; broker range "
+        f"{_money(quote.stake_min, ccy)}–{_money(quote.stake_max, ccy)}{label}",
+    )
+
+
+def rule_open_risk(stake: Decimal, c: RiskContext, lim: RiskLimits) -> RuleResult:
+    """Total money at risk (open trades + this stake) as % of equity."""
+    if lim.max_total_risk_pct is None:
+        return RuleResult("Total exposure", True, "no limit")
+    if any(p.risk_amount is None for p in c.open_positions):
+        return RuleResult("Total exposure", False, "risk of an open position is unknown")
+    if c.equity is None or c.equity <= 0:
+        return RuleResult("Total exposure", False, "equity unknown")
+    open_risk = sum((p.risk_amount or Decimal(0) for p in c.open_positions), Decimal(0)) + stake
+    pct = open_risk / c.equity * 100
+    if pct > lim.max_total_risk_pct:
+        return RuleResult(
+            "Total exposure", False, f"open risk {_pct(pct)} > max {_pct(lim.max_total_risk_pct)}"
+        )
+    return RuleResult("Total exposure", True, f"open risk {_pct(pct)} after this trade")
+
+
 def _run_rule(rule: Rule, signal: SignalIntent, ctx: RiskContext, limits: RiskLimits) -> RuleResult:
     """A rule that cannot be evaluated (malformed input) FAILS instead of crashing."""
     try:
@@ -506,6 +774,8 @@ def evaluate(
     halt = any(c.rule == "Max drawdown" and not c.passed and "reached" in c.detail for c in checks)
     if not all(c.passed for c in checks):
         return RiskDecision(False, checks, halt_account=halt)
+    if _is_contract(ctx):
+        return _evaluate_contract(signal, ctx, limits, checks)
     try:
         sizing = (
             size_position(signal, ctx, limits)
@@ -526,3 +796,22 @@ def evaluate(
     if limits.max_slippage_pips is not None:
         slippage = int(limits.max_slippage_pips * ctx.symbol.pip_size / ctx.symbol.point)
     return RiskDecision(True, checks, sizing.volume, sizing.risk_amount, slippage)
+
+
+def _evaluate_contract(
+    signal: SignalIntent, ctx: RiskContext, limits: RiskLimits, checks: list[RuleResult]
+) -> RiskDecision:
+    """Stake sizing: one contract, risking exactly its stake."""
+    try:
+        checks.append(rule_stake(ctx, limits))
+        if checks[-1].passed:
+            checks.append(rule_open_risk(resolved_stake(ctx, limits), ctx, limits))
+    except (ArithmeticError, TypeError, ValueError, AttributeError) as exc:
+        detail = f"could not be evaluated ({type(exc).__name__})"
+        checks.append(RuleResult("Stake", False, detail))
+    if not all(c.passed for c in checks):
+        return RiskDecision(False, checks)
+    stake = resolved_stake(ctx, limits).quantize(Decimal("0.01"))
+    order = ContractOrder.build(ctx.contract, signal.side, stake)
+    payout = ctx.stake_quote.payout if ctx.stake_quote is not None else None
+    return RiskDecision(True, checks, Decimal(1), stake, None, contract=order, payout=payout)

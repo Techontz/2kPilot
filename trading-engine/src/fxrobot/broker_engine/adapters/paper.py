@@ -2,7 +2,7 @@
 
 An internal simulator implementing the full `BrokerAdapter` contract so the
 entire pipeline (strategy → risk → execution → reconciliation → journal)
-runs without MetaTrader 5. It is always reported as PAPER; nothing it does
+runs without a broker. It is always reported as PAPER; nothing it does
 is ever presented as a broker execution.
 
 Realism choices (documented in docs/BROKERS.md):
@@ -11,6 +11,18 @@ Realism choices (documented in docs/BROKERS.md):
 * Stops/targets are evaluated on every completed base bar. If a bar touches
   both, the STOP is assumed first (conservative). Gaps fill at the bar open.
 * Orders are idempotent by client_order_id.
+
+Contracts (simulated, labelled PAPER):
+* Rise/Fall — the stake is paid up front; at expiry the exit price is the
+  close of the first simulated bar at or after expiry (tick durations count
+  simulated bars as ticks). Won = stake × `rise_fall_payout_ratio` profit
+  (default 0.95, a SIMULATED payout — real payouts vary per quote); equal
+  prices lose CALL/PUT and win CALLE/PUTE. Durations shorter than one
+  simulated bar are refused. Rise/Fall cannot be closed early on paper.
+* Multipliers — P/L = stake × multiplier × (price ÷ entry − 1) × direction,
+  never below −stake (stop out). Take profit / stop loss money amounts are
+  checked on each bar's high/low, stop first; optional commission % of
+  stake × multiplier (default 0).
 """
 
 from __future__ import annotations
@@ -53,6 +65,18 @@ from fxrobot.broker_engine.models import (
     SymbolInfo,
     Timeframe,
 )
+from fxrobot.domain.contracts import (
+    ContractCapabilities,
+    ContractFamily,
+    ContractFill,
+    ContractOrder,
+    ContractType,
+    DurationRange,
+    StakeQuote,
+    multiplier_limit_amounts,
+    multiplier_pnl,
+    rise_fall_won,
+)
 from fxrobot.domain.modes import AccountEnvironment
 from fxrobot.market_data.conversion import conversion_rate
 
@@ -68,6 +92,13 @@ class PaperConfig:
     leverage: int = 100
     commission_per_lot: Decimal = Decimal("3.5")  # per side
     slippage_points: int = 0
+    # Simulated contracts
+    rise_fall_payout_ratio: Decimal = Decimal("0.95")  # profit per 1 of stake when won
+    multiplier_commission_pct: Decimal = Decimal(0)  # % of stake × multiplier
+    stake_min: Decimal = Decimal("0.01")
+    stake_max: Decimal = Decimal(100_000)
+    multipliers: tuple[int, ...] = (5, 10, 20, 50, 100)
+    max_tick_duration: int = 10
 
 
 @dataclass
@@ -96,6 +127,30 @@ class _Pos:
 
 
 @dataclass
+class _Contract:
+    id: str
+    symbol: str
+    contract_type: ContractType
+    stake: Decimal
+    entry: Decimal
+    open_time: datetime
+    client_order_id: str | None
+    payout: Decimal | None = None  # Rise/Fall
+    expires_at: datetime | None = None  # time-based Rise/Fall
+    ticks_left: int | None = None  # tick-based Rise/Fall (simulated bars)
+    multiplier: int | None = None
+    take_amount: Decimal | None = None
+    stop_amount: Decimal | None = None
+    commission: Decimal = Decimal(0)
+    duration: int | None = None
+    duration_unit: str | None = None
+
+    @property
+    def is_rise_fall(self) -> bool:
+        return self.contract_type.family is ContractFamily.RISE_FALL
+
+
+@dataclass
 class _Pending:
     id: str
     symbol: str
@@ -113,6 +168,7 @@ class _Pending:
 class _Account:
     balance: Decimal
     positions: dict[str, _Pos] = field(default_factory=dict)
+    contracts: dict[str, _Contract] = field(default_factory=dict)
     pending: dict[str, _Pending] = field(default_factory=dict)
     deals: list[Deal] = field(default_factory=list)
     results: dict[str, OrderResult] = field(default_factory=dict)
@@ -124,7 +180,12 @@ class PaperBroker(BrokerAdapter):
     connector_id = "paper"
     is_simulated = True
     capabilities = BrokerCapabilities(
-        notes=("Simulated broker: no real money, fills are modelled, not real.",),
+        contract_families=("SPOT", "RISE_FALL", "MULTIPLIER"),
+        notes=(
+            "Simulated broker: no real money, fills are modelled, not real.",
+            "Contracts are simulated: Rise/Fall pays a configured ratio (default 0.95), "
+            "not a live quote.",
+        ),
     )
 
     def __init__(
@@ -180,14 +241,14 @@ class PaperBroker(BrokerAdapter):
     def now(self) -> datetime:
         return self.market.now()
 
-    def advance(self) -> None:
+    def advance(self, until: datetime | None = None) -> None:
         with self._lock:
-            bars = self.market.advance()
+            bars = self.market.advance(until)
             if bars:
                 self._process_bars(bars)
 
     def step(self, bars: int = 1) -> None:
-        """Manually advance the simulation (tests, fast-forward)."""
+        """Manually advance the simulation by `bars` base bars (tests, fast-forward)."""
         with self._lock:
             self._process_bars(self.market.step(bars))
 
@@ -215,6 +276,9 @@ class PaperBroker(BrokerAdapter):
         spec = self._specs[symbol]
         notional_base = volume * spec.contract_size
         rate = self._rate(spec.base_currency)
+        if rate is None and spec.quote_currency == self.config.currency:
+            quote = self._quote(symbol)  # an index quoted in the account currency
+            rate = quote.mid if quote is not None else None
         if rate is None:
             raise OrderRejectedError(f"No conversion rate for {spec.base_currency}")
         return notional_base * rate / Decimal(self.config.leverage)
@@ -233,11 +297,11 @@ class PaperBroker(BrokerAdapter):
         self._require_link_only()
         with self._lock:
             unrealized, margin = self._totals()
-            equity = self._acct.balance + unrealized
+            equity = self._acct.balance + unrealized + self._contracts_value()
             return AccountInfo(
                 account_id=self.config.account_id,
                 name="Paper account",
-                server=f"2kFX Paper ({self.market.label})",
+                server=f"2kPilot Paper ({self.market.label})",
                 currency=self.config.currency,
                 environment=AccountEnvironment.PAPER,
                 balance=_money(self._acct.balance),
@@ -294,6 +358,7 @@ class PaperBroker(BrokerAdapter):
                         client_order_id=p.client_order_id,
                     )
                 )
+            out.extend(self._contract_position(c) for c in self._acct.contracts.values())
             return out
 
     def get_orders(self) -> list[Order]:
@@ -359,7 +424,7 @@ class PaperBroker(BrokerAdapter):
         spec = self._specs.get(request.symbol)
         if spec is None:
             raise SymbolUnavailableError(f"Symbol {request.symbol} is not available")
-        if not self.market.is_open():
+        if not self.market.is_open(request.symbol):
             raise MarketClosedError("Market is closed")
         vol = request.volume
         if vol < spec.volume_min or vol > spec.volume_max:
@@ -377,6 +442,8 @@ class PaperBroker(BrokerAdapter):
             raise OrderRejectedError("Invalid stops: take profit on the wrong side of price")
 
     def _execute(self, request: OrderRequest) -> OrderResult:
+        if request.contract is not None:
+            return self._buy_contract(request, request.contract)
         spec = self._validate(request)
         quote = self._quote(request.symbol)
         if quote is None:
@@ -545,6 +612,9 @@ class PaperBroker(BrokerAdapter):
     ) -> OrderResult:
         self._require()
         with self._lock:
+            contract = self._acct.contracts.get(position_id)
+            if contract is not None:
+                return self._modify_contract(contract, stop_loss, take_profit)
             pos = self._acct.positions.get(position_id)
             if pos is None:
                 raise NotFoundError(f"Position {position_id} not found")
@@ -572,10 +642,17 @@ class PaperBroker(BrokerAdapter):
                 if client_order_id in self._acct.close_ids:
                     return existing  # idempotent repeat of the same close
                 raise OrderRejectedError("client_order_id was already used for a different request")
+            contract = self._acct.contracts.get(position_id)
+            if contract is not None:
+                result = self._sell_contract(contract, client_order_id)
+                self._acct.results[client_order_id] = result
+                self._acct.close_ids.add(client_order_id)
+                self._changed()
+                return result
             pos = self._acct.positions.get(position_id)
             if pos is None:
                 raise NotFoundError(f"Position {position_id} not found")
-            if not self.market.is_open():
+            if not self.market.is_open(pos.symbol):
                 raise MarketClosedError("Market is closed")
             price = self._exit_price(pos)
             if price is None:
@@ -620,6 +697,8 @@ class PaperBroker(BrokerAdapter):
         changed = False
         for symbol, bar in bars:
             spec = self._specs[symbol]
+            for contract in [c for c in self._acct.contracts.values() if c.symbol == symbol]:
+                changed |= self._settle_on_bar(contract, bar)
             spread = Decimal(bar.spread_points or 0) * spec.point
             for pos in [p for p in self._acct.positions.values() if p.symbol == symbol]:
                 exit_ = self._bar_exit(pos, bar, spread)
@@ -720,6 +799,302 @@ class PaperBroker(BrokerAdapter):
             closed = True
         return closed
 
+    # ── contracts (simulated Rise/Fall and Multipliers) ──────────────────
+    def contract_capabilities(self, symbol: str) -> ContractCapabilities:
+        spec = self._specs.get(symbol)
+        if spec is None:
+            raise SymbolUnavailableError(f"Symbol {symbol} is not available")
+        bar = self.market.base_timeframe.seconds
+        return ContractCapabilities(
+            symbol=symbol,
+            rise_fall=True,
+            rise_fall_types=("CALL", "PUT", "CALLE", "PUTE"),
+            durations=(
+                DurationRange("tick", "1t", f"{self.config.max_tick_duration}t"),
+                DurationRange("intraday", f"{bar}s", "365d"),
+            ),
+            multipliers=self.config.multipliers,
+            spot=True,
+            market_open=self.market.is_open(symbol),
+            simulated=True,
+            notes=(
+                "PAPER: simulated contracts. One tick = one simulated "
+                f"{self.market.base_timeframe} bar; time durations settle at the first "
+                "simulated price at or after expiry.",
+                f"Rise/Fall pays {self.config.rise_fall_payout_ratio} × stake profit when won "
+                "(simulated; real payouts vary).",
+            ),
+        )
+
+    def quote_contract(self, symbol: str, contract: ContractOrder) -> StakeQuote:
+        payout = None
+        if contract.family is ContractFamily.RISE_FALL:
+            payout = _money(contract.stake * (1 + self.config.rise_fall_payout_ratio))
+        return StakeQuote(
+            stake_min=self.config.stake_min,
+            stake_max=self.config.stake_max,
+            ask_price=contract.stake,
+            payout=payout,
+            simulated=True,
+        )
+
+    def _buy_contract(self, request: OrderRequest, order: ContractOrder) -> OrderResult:
+        symbol = request.symbol
+        if symbol not in self._specs:
+            raise SymbolUnavailableError(f"Symbol {symbol} is not available")
+        if not self.market.is_open(symbol):
+            raise MarketClosedError("Market is closed")
+        problem = self.contract_capabilities(symbol).check(order.as_spec())
+        if problem:
+            raise OrderRejectedError(problem)
+        if order.contract_type.side is not request.side:
+            raise OrderRejectedError("Contract type does not match the order direction")
+        if not self.config.stake_min <= order.stake <= self.config.stake_max:
+            raise OrderRejectedError(
+                f"Stake must be between {self.config.stake_min} and {self.config.stake_max}"
+            )
+        if order.stake > self._acct.balance:
+            raise InsufficientMarginError("Stake is larger than the balance")
+        quote = self._quote(symbol)
+        if quote is None:
+            raise MarketClosedError("No price available")
+        now = self.market.now()
+        entry = quote.bid  # the last simulated price (spot)
+        contract = _Contract(
+            id=self._new_id(),
+            symbol=symbol,
+            contract_type=order.contract_type,
+            stake=order.stake,
+            entry=entry,
+            open_time=now,
+            client_order_id=request.client_order_id,
+            duration=order.duration,
+            duration_unit=order.duration_unit,
+        )
+        if order.family is ContractFamily.RISE_FALL:
+            contract.payout = _money(order.stake * (1 + self.config.rise_fall_payout_ratio))
+            if order.duration_unit == "t":
+                contract.ticks_left = order.duration
+            else:
+                contract.expires_at = order.expires_at(now)
+        else:
+            mult = order.multiplier or 1
+            contract.multiplier = mult
+            stop, take = order.stop_loss_amount, order.take_profit_amount
+            if stop is None and take is None:
+                stop, take = multiplier_limit_amounts(
+                    request.side, order.stake, mult, entry, request.stop_loss, request.take_profit
+                )
+            contract.stop_amount, contract.take_amount = stop, take
+            contract.commission = _money(
+                order.stake * mult * self.config.multiplier_commission_pct / 100
+            )
+        self._acct.contracts[contract.id] = contract
+        self._acct.balance -= order.stake
+        order_id = self._new_id()
+        self._add_deal(
+            Deal(
+                self._new_id(),
+                order_id,
+                contract.id,
+                symbol,
+                request.side,
+                DealEntry.IN,
+                Decimal(1),
+                entry,
+                now,
+                Decimal(0),
+                client_order_id=request.client_order_id,
+                reason="EXPERT",
+                contract_type=order.contract_type.value,
+            )
+        )
+        fill = ContractFill(
+            contract_id=contract.id,
+            contract_type=order.contract_type,
+            buy_price=order.stake,
+            payout=contract.payout,
+            transaction_id=order_id,
+            start_time=now,
+            expires_at=contract.expires_at,
+            longcode=_longcode(contract),
+            multiplier=contract.multiplier,
+            duration=order.duration,
+            duration_unit=order.duration_unit,
+            entry_spot=entry,
+            commission=contract.commission or None,
+        )
+        return OrderResult(
+            client_order_id=request.client_order_id,
+            status=OrderStatus.FILLED,
+            broker_order_id=order_id,
+            broker_position_id=contract.id,
+            filled_volume=Decimal(1),
+            fill_price=entry,
+            broker_code="PAPER_FILLED",
+            broker_message="Simulated contract (PAPER)",
+            time=now,
+            contract=fill,
+        )
+
+    def _contract_pnl(self, c: _Contract, price: Decimal) -> Decimal:
+        if c.is_rise_fall or c.multiplier is None:
+            return Decimal(0)  # a Rise/Fall is not marked to market on paper
+        return multiplier_pnl(c.contract_type, c.stake, c.multiplier, c.entry, price)
+
+    def _contracts_value(self) -> Decimal:
+        total = Decimal(0)
+        for c in self._acct.contracts.values():
+            quote = self._quote(c.symbol)
+            pnl = self._contract_pnl(c, quote.bid) if quote is not None else Decimal(0)
+            total += c.stake + pnl
+        return total
+
+    def _contract_position(self, c: _Contract) -> Position:
+        quote = self._quote(c.symbol)
+        pnl = self._contract_pnl(c, quote.bid) if quote is not None else Decimal(0)
+        return Position(
+            position_id=c.id,
+            symbol=c.symbol,
+            side=c.contract_type.side,
+            volume=Decimal(1),
+            open_price=c.entry,
+            open_time=c.open_time,
+            stop_loss=self._level(c, c.stop_amount, losing=True),
+            take_profit=self._level(c, c.take_amount, losing=False),
+            unrealized_pnl=_money(pnl),
+            client_order_id=c.client_order_id,
+            contract_type=c.contract_type,
+            stake=c.stake,
+            payout=c.payout,
+            multiplier=c.multiplier,
+            expires_at=c.expires_at,
+            is_valid_to_sell=not c.is_rise_fall,
+        )
+
+    @staticmethod
+    def _level(c: _Contract, amount: Decimal | None, *, losing: bool) -> Decimal | None:
+        """Price at which a Multiplier's money amount is reached."""
+        if amount is None or not c.multiplier:
+            return None
+        move = amount / (c.stake * c.multiplier) * c.entry
+        sign = c.contract_type.side.sign * (-1 if losing else 1)
+        return c.entry + sign * move
+
+    def _settle_on_bar(self, c: _Contract, bar: Candle) -> bool:
+        if c.is_rise_fall:
+            if c.ticks_left is not None:
+                c.ticks_left -= 1
+                if c.ticks_left > 0:
+                    return False
+            elif c.expires_at is None or bar.time + self.market.base_timeframe.delta < c.expires_at:
+                return False
+            won = rise_fall_won(c.contract_type, c.entry, bar.close)
+            profit = (c.payout or c.stake) - c.stake if won else -c.stake
+            self._settle(c, bar.close, profit, "WON" if won else "LOST", "EXPIRY")
+            return True
+        mult = c.multiplier or 1
+        sign = c.contract_type.side.sign
+        worst, best = (bar.low, bar.high) if sign > 0 else (bar.high, bar.low)
+
+        def pnl(price: Decimal) -> Decimal:
+            return multiplier_pnl(c.contract_type, c.stake, mult, c.entry, price)
+
+        stop = min(c.stop_amount, c.stake) if c.stop_amount is not None else c.stake
+        reason = "SL" if c.stop_amount is not None and c.stop_amount < c.stake else "SO"
+        # Like Deriv, the stop loss / stop out acts on the profit NET of commission:
+        # it triggers when the price move has lost (stop − commission).
+        fee = c.commission
+        if pnl(bar.open) - fee <= -stop:  # gapped through the stop: filled at the (worse) open
+            loss = pnl(bar.open)
+            self._settle(c, bar.open, loss, "LOST", reason)
+            return True
+        if pnl(worst) - fee <= -stop:  # stop first when a bar touches both
+            move = max(stop - fee, Decimal(0))
+            price = (self._level(c, move, losing=True) if move else c.entry) or worst
+            self._settle(c, price, -move, "LOST", reason)
+            return True
+        if c.take_amount is not None and pnl(best) >= c.take_amount:
+            price = self._level(c, c.take_amount, losing=False) or best
+            self._settle(c, price, c.take_amount, "WON", "TP")
+            return True
+        return False
+
+    def _settle(
+        self,
+        c: _Contract,
+        price: Decimal,
+        profit: Decimal,
+        outcome: str,
+        reason: str,
+        client_order_id: str | None = None,
+    ) -> Deal:
+        net = max(profit - c.commission, -c.stake)
+        net = _money(net)
+        self._acct.balance += c.stake + net
+        del self._acct.contracts[c.id]
+        deal = Deal(
+            self._new_id(),
+            None,
+            c.id,
+            c.symbol,
+            c.contract_type.side.opposite,
+            DealEntry.OUT,
+            Decimal(1),
+            price,
+            self.market.now(),
+            net,
+            client_order_id=client_order_id or c.client_order_id,
+            reason=reason,
+            outcome=outcome,
+            payout=c.payout,
+            contract_type=c.contract_type.value,
+        )
+        self._add_deal(deal)
+        return deal
+
+    def _sell_contract(self, c: _Contract, client_order_id: str) -> OrderResult:
+        if c.is_rise_fall:
+            raise OrderRejectedError(
+                "This contract settles at expiry: paper Rise/Fall contracts cannot be sold early."
+            )
+        if not self.market.is_open(c.symbol):
+            raise MarketClosedError("Market is closed")
+        quote = self._quote(c.symbol)
+        if quote is None:
+            raise MarketClosedError("No price available")
+        profit = self._contract_pnl(c, quote.bid)
+        deal = self._settle(c, quote.bid, profit, "SOLD", "CLIENT", client_order_id)
+        return OrderResult(
+            client_order_id,
+            OrderStatus.FILLED,
+            broker_order_id=deal.deal_id,
+            broker_position_id=c.id,
+            filled_volume=Decimal(1),
+            fill_price=quote.bid,
+            broker_code="PAPER_FILLED",
+            broker_message="Simulated contract sale (PAPER)",
+            time=self.market.now(),
+        )
+
+    def _modify_contract(
+        self, c: _Contract, stop_loss: Decimal | None, take_profit: Decimal | None
+    ) -> OrderResult:
+        if c.is_rise_fall or c.multiplier is None:
+            raise OrderRejectedError("A Rise/Fall contract has no stop loss or take profit")
+        stop, take = multiplier_limit_amounts(
+            c.contract_type.side, c.stake, c.multiplier, c.entry, stop_loss, take_profit
+        )
+        c.stop_amount, c.take_amount = stop, take
+        self._changed()
+        return OrderResult(
+            c.client_order_id,
+            OrderStatus.FILLED,
+            broker_position_id=c.id,
+            broker_message="Contract limits modified (PAPER)",
+            time=self.market.now(),
+        )
+
     # ── persistence ──────────────────────────────────────────────────────
     def _new_id(self) -> str:
         value = self._acct.next_id
@@ -745,6 +1120,7 @@ class PaperBroker(BrokerAdapter):
             "balance": str(a.balance),
             "next_id": a.next_id,
             "positions": [_pos_to_json(p) for p in a.positions.values()],
+            "contracts": [_contract_to_json(c) for c in a.contracts.values()],
             "pending": [_pending_to_json(o) for o in a.pending.values()],
             "deals": [_deal_to_json(d) for d in a.deals[-1000:]],
             "results": {k: _result_to_json(v) for k, v in list(a.results.items())[-2000:]},
@@ -756,6 +1132,7 @@ class PaperBroker(BrokerAdapter):
         a.balance = Decimal(state["balance"])
         a.next_id = int(state["next_id"])
         a.positions = {p["id"]: _pos_from_json(p) for p in state.get("positions", [])}
+        a.contracts = {c["id"]: _contract_from_json(c) for c in state.get("contracts", [])}
         a.pending = {o["id"]: _pending_from_json(o) for o in state.get("pending", [])}
         a.deals = [_deal_from_json(d) for d in state.get("deals", [])]
         a.results = {k: _result_from_json(v) for k, v in state.get("results", {}).items()}
@@ -810,6 +1187,63 @@ def _pos_from_json(d: dict[str, Any]) -> _Pos:
     )
 
 
+def _longcode(c: _Contract) -> str:
+    if c.is_rise_fall:
+        term = (
+            f"{c.duration} simulated ticks"
+            if c.ticks_left is not None
+            else f"{c.duration}{c.duration_unit}"
+        )
+        word = "higher" if c.contract_type.side is Side.BUY else "lower"
+        equal = " or equal" if c.contract_type in (ContractType.CALLE, ContractType.PUTE) else ""
+        return (
+            f"PAPER: wins {c.payout} if {c.symbol} ends {word}{equal} than {c.entry} after {term}."
+        )
+    return f"PAPER: {c.symbol} ×{c.multiplier} {c.contract_type.value}, stake {c.stake}."
+
+
+def _contract_to_json(c: _Contract) -> dict[str, Any]:
+    return {
+        "id": c.id,
+        "symbol": c.symbol,
+        "contract_type": c.contract_type.value,
+        "stake": str(c.stake),
+        "entry": str(c.entry),
+        "open_time": c.open_time.isoformat(),
+        "client_order_id": c.client_order_id,
+        "payout": _s(c.payout),
+        "expires_at": c.expires_at.isoformat() if c.expires_at else None,
+        "ticks_left": c.ticks_left,
+        "multiplier": c.multiplier,
+        "take_amount": _s(c.take_amount),
+        "stop_amount": _s(c.stop_amount),
+        "commission": str(c.commission),
+        "duration": c.duration,
+        "duration_unit": c.duration_unit,
+    }
+
+
+def _contract_from_json(d: dict[str, Any]) -> _Contract:
+    return _Contract(
+        id=d["id"],
+        symbol=d["symbol"],
+        contract_type=ContractType(d["contract_type"]),
+        stake=Decimal(d["stake"]),
+        entry=Decimal(d["entry"]),
+        open_time=datetime.fromisoformat(d["open_time"]),
+        client_order_id=d.get("client_order_id"),
+        payout=_d(d.get("payout")),
+        expires_at=datetime.fromisoformat(d["expires_at"]) if d.get("expires_at") else None,
+        ticks_left=d.get("ticks_left"),
+        multiplier=d.get("multiplier"),
+        take_amount=_d(d.get("take_amount")),
+        stop_amount=_d(d.get("stop_amount")),
+        commission=Decimal(d.get("commission", "0")),
+        duration=d.get("duration"),
+        duration_unit=d.get("duration_unit"),
+    )
+
+
 def _pending_to_json(o: _Pending) -> dict[str, Any]:
     return {
         "id": o.id,
@@ -856,6 +1290,9 @@ def _deal_to_json(x: Deal) -> dict[str, Any]:
         "swap": str(x.swap),
         "client_order_id": x.client_order_id,
         "reason": x.reason,
+        "outcome": x.outcome,
+        "payout": _s(x.payout),
+        "contract_type": x.contract_type,
     }
 
 
@@ -875,6 +1312,9 @@ def _deal_from_json(d: dict[str, Any]) -> Deal:
         Decimal(d["swap"]),
         client_order_id=d["client_order_id"],
         reason=d["reason"],
+        outcome=d.get("outcome"),
+        payout=_d(d.get("payout")),
+        contract_type=d.get("contract_type"),
     )
 
 

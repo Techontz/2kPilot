@@ -8,6 +8,7 @@ execution engine do that.
 from fxrobot.strategy_engine.base import (
     Check,
     Evaluation,
+    ExitDecision,
     MarketView,
     Outcome,
     SignalIntent,
@@ -18,6 +19,7 @@ from fxrobot.strategy_engine.registry import get_strategy, list_strategies
 __all__ = [
     "Check",
     "Evaluation",
+    "ExitDecision",
     "MarketView",
     "Outcome",
     "SignalIntent",

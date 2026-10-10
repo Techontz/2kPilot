@@ -1,4 +1,10 @@
-"""Risk limits. `None` disables an optional limit; mandatory rules cannot be disabled."""
+"""Risk limits. `None` disables an optional limit; mandatory rules cannot be disabled.
+
+Pip and lot limits apply to SPOT trades (Paper). Contract trades (Rise/Fall,
+Multipliers) are sized by `stake_amount` — the most one contract can lose —
+and bounded by the money limits (stake cap, daily loss amount, losing streak,
+daily profit target), which apply to every trade.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +13,12 @@ from decimal import Decimal
 from typing import Any
 
 # Limits that can never be switched off (None is refused rather than crashing later).
-MANDATORY = frozenset({"risk_per_trade_pct", "allowed_sessions", "max_data_age_seconds"})
+MANDATORY = frozenset(
+    {"risk_per_trade_pct", "allowed_sessions", "max_data_age_seconds", "stake_amount"}
+)
+MONEY_FIELDS = frozenset(
+    {"stake_amount", "max_stake_amount", "max_daily_loss_amount", "daily_profit_target_amount"}
+)
 
 
 @dataclass(frozen=True)
@@ -22,7 +33,7 @@ class RiskLimits:
     max_daily_loss_pct: Decimal | None = Decimal("2.0")
     max_weekly_loss_pct: Decimal | None = Decimal("4.0")
     max_drawdown_pct: Decimal | None = Decimal("10.0")
-    max_trades_per_day: int | None = 5
+    max_trades_per_day: int | None = 20
     max_spread_pips: Decimal | None = Decimal("2.5")
     max_slippage_pips: Decimal | None = Decimal("1.5")
     min_stop_pips: Decimal | None = Decimal("8")
@@ -35,6 +46,12 @@ class RiskLimits:
     cooldown_after_losses: int | None = 3
     cooldown_minutes: int | None = 240
     max_data_age_seconds: int = 120
+    # ── stake-based limits (account currency) ──
+    stake_amount: Decimal = Decimal("1.00")  # fixed stake per contract
+    max_stake_amount: Decimal | None = Decimal("5.00")
+    max_daily_loss_amount: Decimal | None = None  # money, in addition to max_daily_loss_pct
+    max_consecutive_losses: int | None = 3  # halt new trades for the rest of the UTC day
+    daily_profit_target_amount: Decimal | None = None  # stop for the day once reached
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> RiskLimits:
@@ -55,6 +72,7 @@ class RiskLimits:
                 values[f.name] = tuple(str(s).upper() for s in raw)
             elif (
                 f.name in ("risk_per_trade_pct",)
+                or f.name in MONEY_FIELDS
                 or "pct" in f.name
                 or "pips" in f.name
                 or "lots" in f.name
@@ -93,6 +111,16 @@ class RiskLimits:
             value = getattr(self, name)
             if value is not None and parse_hhmm(value) is None:
                 raise ValueError(f"{name} must be HH:MM (UTC)")
+        if not Decimal(0) < self.stake_amount <= Decimal(100_000):
+            raise ValueError("stake_amount must be between 0 and 100000")
+        if self.max_stake_amount is not None and self.stake_amount > self.max_stake_amount:
+            raise ValueError("stake_amount cannot exceed max_stake_amount")
+        for name in ("max_stake_amount", "max_daily_loss_amount", "daily_profit_target_amount"):
+            value = getattr(self, name)
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} must be positive")
+        if self.max_consecutive_losses is not None and self.max_consecutive_losses < 1:
+            raise ValueError("max_consecutive_losses must be at least 1")
         valid = {"ASIA", "LONDON", "OVERLAP", "NEW_YORK"}
         if not set(self.allowed_sessions) <= valid:
             raise ValueError(f"allowed_sessions must be within {sorted(valid)}")

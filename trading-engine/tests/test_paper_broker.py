@@ -7,6 +7,7 @@ price (and therefore every P&L figure) is exact.
 
 from __future__ import annotations
 
+import itertools
 import json
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -140,7 +141,7 @@ def test_paper_account_is_always_paper_and_simulated() -> None:
     account = broker.get_account()
     assert account.environment is AccountEnvironment.PAPER
     assert broker.is_simulated is True
-    assert account.server == "2kFX Paper (REPLAY)"
+    assert account.server == "2kPilot Paper (REPLAY)"
     assert account.balance == D("10000.00")
     assert account.margin == D("0.00")
     assert account.margin_level is None
@@ -667,25 +668,27 @@ class FakeWall:
 
 
 def test_step_never_runs_past_real_time() -> None:
-    real_now = SIM_START + timedelta(minutes=37)
+    real_now = SIM_START + timedelta(minutes=37, seconds=30)
     market = SyntheticMarket(
         seed=1, symbols=("EURUSD",), start=SIM_START, seconds_per_bar=0, utcnow=lambda: real_now
     )
     broker = PaperBroker(market)
     broker.connect()
     broker.step(50)
-    assert broker.now() == SIM_START + 2 * M15  # floor(10:37) = 10:30
+    assert broker.now() == SIM_START + timedelta(minutes=37)  # floor(10:37:30) = 10:37
     broker.step(10)
-    assert broker.now() == SIM_START + 2 * M15
+    assert broker.now() == SIM_START + timedelta(minutes=37)
     # Candles never include bars that have not closed in simulated time.
-    candles = broker.get_candles(
-        "EURUSD", Timeframe.M15, SIM_START - timedelta(hours=1), SIM_START + timedelta(days=1)
-    )
+    later = SIM_START + timedelta(days=1)
+    candles = broker.get_candles("EURUSD", Timeframe.M15, SIM_START - timedelta(hours=1), later)
     assert candles[-1].time == SIM_START + M15
     assert all(c.time + M15 <= broker.now() for c in candles)
+    minutes = broker.get_candles("EURUSD", Timeframe.M1, SIM_START, later)
+    assert minutes[-1].time == SIM_START + timedelta(minutes=36)
 
 
 def test_advance_paced_by_wall_clock_and_capped() -> None:
+    """`seconds_per_bar` is wall seconds per 15 simulated minutes (1-minute steps)."""
     wall = FakeWall()
     market = SyntheticMarket(
         seed=1, symbols=("EURUSD",), start=SIM_START, seconds_per_bar=2.0, wall_clock=wall
@@ -694,15 +697,100 @@ def test_advance_paced_by_wall_clock_and_capped() -> None:
     broker.connect()
     broker.advance()
     assert broker.now() == SIM_START
-    wall.t = 5.0  # 2 whole bars elapsed
+    wall.t = 5.0  # 2.5 × 15 minutes elapsed → 37 whole minutes
     broker.advance()
-    assert broker.now() == SIM_START + 2 * M15
-    wall.t = 5.9  # carry-over: 5.9 - 4.0 < 2 → still nothing
+    assert broker.now() == SIM_START + timedelta(minutes=37)
+    wall.t = 5.05  # carry-over: less than one more minute
     broker.advance()
-    assert broker.now() == SIM_START + 2 * M15
+    assert broker.now() == SIM_START + timedelta(minutes=37)
     wall.t = 10_000.0
     broker.advance()
-    assert broker.now() == SIM_START + (2 + MAX_STEPS_PER_ADVANCE) * M15
+    assert broker.now() == SIM_START + timedelta(minutes=37 + MAX_STEPS_PER_ADVANCE)
+
+
+def test_advance_stops_at_the_strategy_bar_close() -> None:
+    """The engine caps each advance at the next close of the strategy's timeframe,
+    so a fast-forwarding account evaluates every candle (none is skipped)."""
+    wall = FakeWall()
+    market = SyntheticMarket(
+        seed=1, symbols=("EURUSD",), start=SIM_START, seconds_per_bar=2.0, wall_clock=wall
+    )
+    broker = PaperBroker(market)
+    broker.connect()
+    m5 = Timeframe.M5
+    closes = []
+    for tick in range(1, 7):
+        wall.t = 2.0 * tick  # 15 simulated minutes per tick if nothing held it back
+        broker.advance(m5.floor(broker.now()) + m5.delta)
+        closes.append(broker.now())
+    assert closes == [SIM_START + timedelta(minutes=5 * i) for i in range(1, 7)]
+    # Without a cap the same wall time covers 15 minutes per tick.
+    wall.t += 2.0
+    broker.advance()
+    assert broker.now() == closes[-1] + M15
+
+
+def test_paper_prices_do_not_depend_on_when_the_market_was_built() -> None:
+    """Prices are a pure function of (seed, symbol, time): starting the simulation
+    elsewhere, restarting it, or a different 'today' never changes a bar."""
+    early = SyntheticMarket(
+        seed=4, symbols=("EURUSD",), start=SIM_START - timedelta(days=40), seconds_per_bar=0
+    )
+    late = SyntheticMarket(seed=4, symbols=("EURUSD",), start=SIM_START, seconds_per_bar=0)
+    early.cursor = late.cursor
+    window = (SIM_START - timedelta(days=3), SIM_START)
+    for tf in (Timeframe.M1, Timeframe.M5, Timeframe.H1):
+        assert early.candles("EURUSD", tf, *window) == late.candles("EURUSD", tf, *window)
+    assert early.quote("EURUSD", early.symbols()[0]) == late.quote("EURUSD", late.symbols()[0])
+    other_seed = SyntheticMarket(seed=5, symbols=("EURUSD",), start=SIM_START, seconds_per_bar=0)
+    assert other_seed.candles("EURUSD", Timeframe.H1, *window) != late.candles(
+        "EURUSD", Timeframe.H1, *window
+    )
+
+
+def test_paper_timeframes_are_consistent_aggregations_of_one_minute_bars() -> None:
+    from fxrobot.market_data.resample import resample
+
+    market = SyntheticMarket(seed=2, symbols=("EURUSD", "R_75"), start=SIM_START, seconds_per_bar=0)
+    # Cross a weekend: 2025-02-28 is a Friday.
+    start = datetime(2025, 2, 27, tzinfo=UTC)
+    end = SIM_START
+    for symbol in ("EURUSD", "R_75"):
+        m1 = market.candles(symbol, Timeframe.M1, start, end)
+        assert all(
+            b.time - a.time == timedelta(minutes=1) or symbol == "EURUSD"
+            for a, b in itertools.pairwise(m1)
+        )
+        for tf in (Timeframe.M5, Timeframe.M15, Timeframe.H1, Timeframe.H4, Timeframe.D1):
+            got = market.candles(symbol, tf, start, end)
+            assert got, (symbol, tf)
+            assert got == resample(m1, tf, until=end), (symbol, tf)
+        m5 = market.candles(symbol, Timeframe.M5, start, end)
+        m15 = market.candles(symbol, Timeframe.M15, start, end)
+        assert m15 == resample(m5, Timeframe.M15, until=end)
+    # FX hides the weekend; the index trades around the clock.
+    fx = market.candles("EURUSD", Timeframe.H1, start, end)
+    assert not any(c.time.weekday() == 5 for c in fx)
+    index = market.candles("R_75", Timeframe.H1, start, end)
+    assert any(c.time.weekday() == 5 for c in index)
+
+
+def test_quotes_and_settlement_read_the_same_one_minute_bars() -> None:
+    broker = make_paper()
+    bar = broker.get_candles(
+        "EURUSD", Timeframe.M1, broker.now() - timedelta(hours=1), broker.now()
+    )[-1]
+    quote = broker.get_quote("EURUSD")
+    assert bar.time == broker.now() - timedelta(minutes=1)
+    assert quote.bid == bar.close
+    assert quote.ask == bar.close + D(bar.spread_points or 0) * D("0.00001")
+    broker.step(1)
+    assert (
+        broker.get_quote("EURUSD").bid
+        == broker.get_candles(
+            "EURUSD", Timeframe.M1, broker.now() - timedelta(minutes=5), broker.now()
+        )[-1].close
+    )
 
 
 def test_zero_pacing_never_advances_automatically() -> None:

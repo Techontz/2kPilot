@@ -21,14 +21,23 @@ abstract class TestCase extends BaseTestCase
         $this->withHeaders(['Accept' => 'application/json', 'Origin' => 'http://localhost:3421', 'Referer' => 'http://localhost:3421/']);
     }
 
-    protected function owner(array $attributes = []): User
+    private ?User $me = null;
+
+    /** The user most tests act as (created on first use, provisioned like a sign-up). */
+    protected function me(): User
     {
-        return User::factory()->create($attributes);
+        return $this->me ??= $this->user();
     }
 
-    protected function viewer(): User
+    /** A new user with their Beginner risk profile and trading state (stopped, DEMO). */
+    protected function user(array $attributes = []): User
     {
-        return User::factory()->viewer()->create();
+        return User::factory()->provisioned()->create($attributes);
+    }
+
+    protected function admin(): User
+    {
+        return User::factory()->admin()->provisioned()->create();
     }
 
     /** Fake the trading engine: ['/internal/path' => response array | callable]. */

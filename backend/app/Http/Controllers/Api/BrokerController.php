@@ -47,7 +47,7 @@ class BrokerController extends Controller
     public function index(Request $request): JsonResponse
     {
         $this->authorize('viewAny', BrokerConnection::class);
-        $connections = BrokerConnection::query()->with(['accounts.riskProfile', 'accounts.assignments.strategy'])->orderBy('created_at')->get();
+        $connections = BrokerConnection::query()->ownedBy($request->user())->with(['accounts.riskProfile', 'accounts.assignments.strategy'])->orderBy('created_at')->get();
 
         return response()->json($connections->map(fn (BrokerConnection $c) => [
             'id' => $c->id,
@@ -149,7 +149,10 @@ class BrokerController extends Controller
     /** Deriv redirects the browser here with ?code&state. */
     public function derivOAuthCallback(Request $request): RedirectResponse
     {
-        $front = rtrim((string) config('fx.frontend_url'), '/').'/brokers/new';
+        $front = rtrim((string) config('tradepilot.frontend_url'), '/').'/settings/brokers/new';
+        if (! $request->user()?->is_active) {
+            return redirect()->away($front.'?deriv=signed_out');
+        }
         $pkce = $request->session()->pull('deriv.pkce');
         if ($request->filled('error')) {
             return redirect()->away($front.'?deriv=cancelled');
@@ -190,7 +193,7 @@ class BrokerController extends Controller
         ]);
         $type = ConnectorType::from($data['connector_type']);
         $values = array_merge($data['settings'] ?? [], array_filter($data['credentials'] ?? [], fn ($v) => $v !== null && $v !== ''));
-        [$settings, $sealed] = $this->brokers->prepare($type, $values, $type === ConnectorType::Deriv ? $this->oauthCredentials($request) : null);
+        [$settings, $sealed] = $this->brokers->prepare($type, $values, $type === ConnectorType::Deriv ? $this->oauthCredentials($request) : null, $request->user());
 
         return [$type, AccountEnvironment::from($data['expected_environment']), $settings, $sealed];
     }

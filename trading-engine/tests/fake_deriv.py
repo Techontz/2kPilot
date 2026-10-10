@@ -4,8 +4,10 @@ It implements the calls the adapter uses with the response shapes documented
 at developers.deriv.com (2026 API): accounts/OTP over REST; balance, ticks,
 ticks_history, active_symbols, contracts_for, proposal, buy, portfolio,
 proposal_open_contract, contract_update, sell and profit_table over the
-WebSocket. Contracts follow multiplier arithmetic, so P/L, stop-loss levels
-and balances behave like the real thing.
+WebSocket. Multipliers follow multiplier arithmetic, so P/L, stop-loss levels
+and balances behave like the real thing. Rise/Fall (CALL/PUT/CALLE/PUTE)
+contracts are priced with a fixed payout and settled by `expire()`. Money
+fields of proposal_open_contract are STRINGS, as in Deriv's schema.
 
 Faults can be injected: market closed, buy timeouts, link drops after a buy.
 """
@@ -68,10 +70,20 @@ class Contract:
     sell_price: Decimal | None = None
     exit_spot: Decimal | None = None
     sell_time: int | None = None
+    # Rise/Fall
+    payout: Decimal | None = None
+    duration: int | None = None
+    duration_unit: str | None = None
+    status: str = "open"
+    valid_to_sell: bool = True
 
     @property
     def sign(self) -> int:
-        return 1 if self.contract_type == "MULTUP" else -1
+        return 1 if self.contract_type in ("MULTUP", "CALL", "CALLE") else -1
+
+    @property
+    def rise_fall(self) -> bool:
+        return self.contract_type in ("CALL", "PUT", "CALLE", "PUTE")
 
     def level(self, amount: Decimal | None, losing: bool) -> str | None:
         if amount is None:
@@ -97,6 +109,10 @@ class FakeDeriv:
     prices: dict[str, Decimal] = field(
         default_factory=lambda: {k: Decimal(v["price"]) for k, v in SYMBOLS.items()}  # type: ignore[arg-type]
     )
+    payout_ratio: Decimal = Decimal("0.95")  # Rise/Fall: profit per 1 of stake when won
+    ask_markup: Decimal = Decimal(0)  # added to the ask price (to test "ask above stake")
+    stake_limits: bool = True  # include validation_params.stake in proposals
+    suspended: set[str] = field(default_factory=set)
 
     # ── REST ─────────────────────────────────────────────────────────────
     def transport(self) -> httpx.MockTransport:
@@ -172,12 +188,18 @@ class FakeDeriv:
         return self.prices[symbol]
 
     def _profit(self, c: Contract) -> Decimal:
+        if c.rise_fall:
+            if c.sold:
+                return ((c.sell_price or Decimal(0)) - c.stake).quantize(Decimal("0.01"))
+            return Decimal(0)
         price = c.exit_spot if c.sold and c.exit_spot is not None else self.price(c.symbol)
         return (c.stake * c.multiplier * (price - c.entry) / c.entry * c.sign).quantize(
             Decimal("0.01")
         )
 
     def _poc(self, c: Contract) -> dict[str, Any]:
+        if c.rise_fall:
+            return self._poc_rise_fall(c)
         profit = self._profit(c)
         limit: dict[str, Any] = {}
         if c.stop_amount is not None:
@@ -212,6 +234,50 @@ class FakeDeriv:
             "sell_price": str(c.sell_price) if c.sell_price is not None else None,
             "sell_time": c.sell_time,
         }
+
+    def _poc_rise_fall(self, c: Contract) -> dict[str, Any]:
+        secs = {"s": 1, "m": 60, "h": 3600, "d": 86400}.get(c.duration_unit or "", 0)
+        poc: dict[str, Any] = {
+            "contract_id": c.contract_id,
+            "contract_type": c.contract_type,
+            "currency": "USD",
+            "underlying_symbol": c.symbol,
+            "buy_price": f"{c.stake:.2f}",
+            "payout": f"{c.payout:.2f}",
+            "bid_price": f"{(c.sell_price if c.sold else c.stake) or 0:.2f}",
+            "profit": f"{self._profit(c):.2f}",
+            "entry_spot": str(c.entry),
+            "current_spot": str(self.price(c.symbol)),
+            "exit_spot": str(c.exit_spot) if c.exit_spot is not None else None,
+            "date_start": c.purchase_time,
+            "purchase_time": c.purchase_time,
+            "is_sold": 1 if c.sold else 0,
+            "is_expired": 1 if c.sold else 0,
+            "is_valid_to_sell": 1 if (c.valid_to_sell and not c.sold) else 0,
+            "status": c.status,
+            "longcode": f"Win payout if {c.symbol} is strictly higher than entry spot.",
+            "transaction_ids": {"buy": c.contract_id * 2},
+            "sell_price": f"{c.sell_price:.2f}" if c.sell_price is not None else None,
+            "sell_time": c.sell_time,
+        }
+        if secs:  # tick contracts have no date_expiry
+            poc["date_expiry"] = c.purchase_time + (c.duration or 0) * secs
+        return poc
+
+    def expire(self, contract_id: int, exit_price: str) -> None:
+        """Settle a Rise/Fall at expiry (as Deriv does, without any request from us)."""
+        c = self.contracts[contract_id]
+        exit_ = Decimal(exit_price)
+        won = {
+            "CALL": exit_ > c.entry,
+            "CALLE": exit_ >= c.entry,
+            "PUT": exit_ < c.entry,
+            "PUTE": exit_ <= c.entry,
+        }[c.contract_type]
+        c.exit_spot, c.sold, c.sell_time = exit_, True, self.now
+        c.status = "won" if won else "lost"
+        c.sell_price = c.payout if won else Decimal("0.00")
+        self.balance += c.sell_price or Decimal(0)
 
     def close_externally(self, contract_id: int) -> None:
         """Simulate the broker closing a contract (stop loss hit)."""
@@ -259,26 +325,55 @@ class FakeDeriv:
                         "submarket": spec["submarket"],
                         "pip_size": float(Decimal(spec["pip"])),  # type: ignore[arg-type]
                         "exchange_is_open": 0 if name in self.market_closed else 1,
-                        "is_trading_suspended": 0,
+                        "is_trading_suspended": 1 if name in self.suspended else 0,
                     }
                     for name, spec in SYMBOLS.items()
                 ],
             )
         if "contracts_for" in msg:
             spec = SYMBOLS[msg["contracts_for"]]
-            return reply(
-                "contracts_for",
+            available: list[dict[str, Any]] = [
                 {
-                    "available": [
+                    "contract_category": "multiplier",
+                    "contract_type": t,
+                    "multiplier_range": spec["multipliers"],
+                }
+                for t in ("MULTUP", "MULTDOWN")
+            ]
+            if msg["contracts_for"] == "R_100":  # Rise/Fall offered on the synthetic index
+                for t in ("CALL", "PUT", "CALLE", "PUTE"):
+                    available.append(
                         {
-                            "contract_category": "multiplier",
+                            "contract_category": "callput",
                             "contract_type": t,
-                            "multiplier_range": spec["multipliers"],
+                            "expiry_type": "tick",
+                            "barriers": 0,
+                            "min_contract_duration": "1t",
+                            "max_contract_duration": "10t",
                         }
-                        for t in ("MULTUP", "MULTDOWN")
-                    ]
-                },
-            )
+                    )
+                    available.append(
+                        {
+                            "contract_category": "callput",
+                            "contract_type": t,
+                            "expiry_type": "intraday",
+                            "barriers": 0,
+                            "min_contract_duration": "15s",
+                            "max_contract_duration": "1d",
+                        }
+                    )
+                # Higher/Lower: same types WITH a barrier — not Rise/Fall.
+                available.append(
+                    {
+                        "contract_category": "callput",
+                        "contract_type": "CALL",
+                        "expiry_type": "daily",
+                        "barriers": 1,
+                        "min_contract_duration": "1d",
+                        "max_contract_duration": "365d",
+                    }
+                )
+            return reply("contracts_for", {"available": available})
         if "ticks" in msg:
             symbol = msg["ticks"]
             if symbol in self.market_closed:
@@ -322,6 +417,8 @@ class FakeDeriv:
                     "This market is presently closed.",
                     "MarketIsClosed",
                 )
+            if msg["contract_type"] in ("CALL", "PUT", "CALLE", "PUTE"):
+                return self._rise_fall_proposal(socket, msg, reply)
             if msg["multiplier"] not in spec["multipliers"]:  # type: ignore[operator]
                 return error(
                     "proposal",
@@ -360,6 +457,10 @@ class FakeDeriv:
             stake = Decimal(str(proposal["amount"]))
             if stake > self.balance:
                 return error("buy", "InsufficientBalance", "Your account balance is insufficient.")
+            if Decimal(str(msg.get("price", 0))) < stake + self.ask_markup:
+                return error("buy", "PriceMoved", "The price has changed.")
+            if proposal["contract_type"] in ("CALL", "PUT", "CALLE", "PUTE"):
+                return self._rise_fall_buy(socket, proposal, reply)
             limits = proposal.get("limit_order") or {}
             self.next_id += 1
             contract = Contract(
@@ -441,6 +542,23 @@ class FakeDeriv:
             contract = self.contracts.get(int(msg["sell"]))
             if contract is None or contract.sold:
                 return error("sell", "InvalidSellContractProposal", "Contract already sold.")
+            if contract.rise_fall:
+                if not contract.valid_to_sell:
+                    return error("sell", "InvalidSellContractProposal", "Resale not offered.")
+                contract.sold, contract.status = True, "sold"
+                contract.exit_spot = self.price(contract.symbol)
+                contract.sell_price = (contract.stake * Decimal("0.5")).quantize(Decimal("0.01"))
+                contract.sell_time = self.now
+                self.balance += contract.sell_price
+                return reply(
+                    "sell",
+                    {
+                        "contract_id": contract.contract_id,
+                        "sold_for": f"{contract.sell_price:.2f}",
+                        "transaction_id": contract.contract_id * 3,
+                        "balance_after": float(self.balance),
+                    },
+                )
             profit = self._profit(contract)
             contract.sold = True
             contract.exit_spot = self.price(contract.symbol)
@@ -468,13 +586,67 @@ class FakeDeriv:
                     "sell_time": c.sell_time,
                     "contract_type": c.contract_type,
                     "underlying_symbol": c.symbol,
-                    "payout": 0,
+                    "payout": float(c.payout or 0),
                 }
                 for c in self.contracts.values()
                 if c.sold
             ]
             return reply("profit_table", {"count": len(rows), "transactions": rows})
         return error(str(next(iter(msg))), "UnrecognisedRequest", "Unrecognised request.")
+
+    def _rise_fall_proposal(self, socket: FakeSocket, msg: dict[str, Any], reply: Any) -> Any:
+        symbol = msg["underlying_symbol"]
+        stake = Decimal(str(msg["amount"]))
+        proposal_id = f"prop-{len(self.requests)}"
+        socket.proposals[proposal_id] = msg
+        body: dict[str, Any] = {
+            "id": proposal_id,
+            "ask_price": float(stake + self.ask_markup),
+            "payout": float((stake * (1 + self.payout_ratio)).quantize(Decimal("0.01"))),
+            "spot": float(self.price(symbol)),
+            "longcode": f"Win payout if {symbol} is strictly higher than entry spot.",
+            "commission": "0",
+        }
+        if self.stake_limits:
+            body["validation_params"] = {"stake": {"min": "0.35", "max": "50000.00"}}
+        return reply("proposal", body)
+
+    def _rise_fall_buy(self, socket: FakeSocket, proposal: dict[str, Any], reply: Any) -> Any:
+        stake = Decimal(str(proposal["amount"]))
+        self.next_id += 1
+        contract = Contract(
+            contract_id=self.next_id,
+            symbol=proposal["underlying_symbol"],
+            contract_type=proposal["contract_type"],
+            stake=stake,
+            multiplier=0,
+            entry=self.price(proposal["underlying_symbol"]),
+            purchase_time=self.now,
+            stop_amount=None,
+            take_amount=None,
+            payout=(stake * (1 + self.payout_ratio)).quantize(Decimal("0.01")),
+            duration=int(proposal["duration"]),
+            duration_unit=str(proposal["duration_unit"]),
+        )
+        self.contracts[contract.contract_id] = contract
+        self.balance -= stake
+        if self.timeout_next_buy:
+            self.timeout_next_buy = False
+            return None
+        return reply(
+            "buy",
+            {
+                "contract_id": contract.contract_id,
+                "transaction_id": contract.contract_id * 2,
+                "buy_price": float(stake),
+                "payout": float(contract.payout or 0),
+                "balance_after": float(self.balance),
+                "start_time": self.now,
+                "purchase_time": self.now,
+                "longcode": f"Win payout if {contract.symbol} is strictly higher than entry spot.",
+                "shortcode": f"{contract.contract_type}_{contract.symbol}",
+            },
+        )
 
 
 class FakeSocket:

@@ -7,24 +7,30 @@ synchronously while stepping the simulated market.
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 from typing import Any
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from fxrobot.broker_engine.adapters.paper import PaperBroker
+from fxrobot.db.types import utcnow
+from fxrobot.domain.modes import AccountEnvironment, TradingMode
 from fxrobot.domain.trading import OrderStatus, SignalStatus, TradeStatus
 from fxrobot.models import (
     Notification,
     Order,
+    RiskProfile,
     Signal,
     StrategyEvaluation,
     SystemState,
     Trade,
     TradeEvent,
     TradingAccount,
+    UserTradingState,
 )
+from fxrobot.trading_engine.context import load_controls
 from fxrobot.trading_engine.engine import TradingEngine
 from tests import factories
 from tests.conftest import SignedClient
@@ -85,12 +91,13 @@ def paper_broker(client: SignedClient, connection_id: str) -> PaperBroker:
 def run_until(
     client: SignedClient, connection_id: str, db: Session, predicate: Any, max_bars: int = 2000
 ) -> None:
-    """Advance one M15 bar per engine tick — like the live engine, which ticks
-    every couple of seconds, so signals are evaluated right after bars close."""
+    """Advance one M15 bar (15 one-minute bars) per engine tick — like the live
+    engine, which ticks every couple of seconds and stops at each close of the
+    strategy's timeframe, so signals are evaluated right after bars close."""
     engine = engine_for(client)
     broker = paper_broker(client, connection_id)
     for i in range(max_bars):
-        broker.step(1)
+        broker.step(15)
         engine.tick_once()
         if i % 4 == 0:
             db.expire_all()
@@ -189,23 +196,127 @@ def test_kill_switch_stops_strategy_evaluation(
     assert db.scalar(select(func.count()).select_from(Signal)) == 0
 
 
-def test_disabled_account_signals_are_rejected_by_risk(
+def _tick_details(client: SignedClient) -> dict[uuid.UUID, str]:
+    return {r.account_id: r.detail for r in engine_for(client).tick_once()}
+
+
+def test_another_users_stop_never_stops_my_account(
+    client: SignedClient, db: Session, trading: dict[str, Any]
+) -> None:
+    mine = uuid.UUID(trading["account"]["id"])
+    other = factories.make_user(db)
+    theirs = factories.paper_account(db, owner=other)
+    factories.enable_account(db, theirs, factories.risk_profile(db, owner=other, **LOOSE_RISK))
+    # The other user starts stopped (as after sign-up): only their account is held.
+    details = _tick_details(client)
+    assert details[mine] == "ok"
+    assert details[theirs.id] == "monitoring (trading stopped)"
+    factories.resume_trading(db, other)
+    factories.stop_trading(db)  # now the default user stops; the other keeps trading
+    details = _tick_details(client)
+    assert details[mine] == "monitoring (trading stopped)"
+    assert details[theirs.id] == "ok"
+
+
+def test_platform_halt_stops_every_users_account(
+    client: SignedClient, db: Session, trading: dict[str, Any]
+) -> None:
+    factories.halt_platform(db)
+    broker = paper_broker(client, trading["account"]["connection_id"])
+    for _ in range(120):
+        broker.step(1)
+        results = engine_for(client).tick_once()
+    assert "halted platform-wide" in results[0].detail
+    assert db.scalar(select(func.count()).select_from(StrategyEvaluation)) == 0
+    factories.halt_platform(db, halted=False)
+    assert _tick_details(client)[uuid.UUID(trading["account"]["id"])] == "ok"
+
+
+def test_accounts_trade_only_in_their_owners_mode(
+    client: SignedClient, db: Session, trading: dict[str, Any]
+) -> None:
+    account_id = uuid.UUID(trading["account"]["id"])
+    # LIVE mode trades LIVE accounts only — never this PAPER account.
+    factories.stop_trading(db)
+    factories.set_mode(db, TradingMode.LIVE, authorized=True)
+    factories.resume_trading(db)
+    assert _tick_details(client)[account_id] == (
+        "monitoring (PAPER account not traded in LIVE mode)"
+    )
+    # A LIVE account in LIVE mode still needs the server lock off and the authorisation.
+    account = db.get(TradingAccount, account_id)
+    assert account is not None
+    account.environment = AccountEnvironment.LIVE
+    db.commit()
+    assert "LIVE hard lock" in _tick_details(client)[account_id]
+    app: Any = client.app
+    app.state.trading_engine.runner.live_locked = False
+    factories.set_mode(db, TradingMode.LIVE, authorized=False)
+    assert "not been authorised" in _tick_details(client)[account_id]
+    factories.set_mode(db, TradingMode.LIVE, authorized=True, account=account)
+    assert _tick_details(client)[account_id] == "ok"
+
+
+def test_live_authorization_is_bound_to_the_account_and_its_limits(
+    db: Session, trading: dict[str, Any]
+) -> None:
+    """Real money needs an authorisation for THIS account, with THIS risk profile,
+    as the profile stood when the owner authorised it."""
+    account = db.get(TradingAccount, uuid.UUID(trading["account"]["id"]))
+    assert account is not None
+    account.environment = AccountEnvironment.LIVE
+    db.commit()
+    mismatch = "Real-money authorization doesn't cover this account/limits — re-authorize"
+
+    def blocked() -> str | None:
+        db.expire_all()
+        live = db.get(TradingAccount, account.id)
+        assert live is not None
+        return load_controls(db, live, live_locked=False).blocking_reason(live.environment)
+
+    factories.set_mode(db, TradingMode.LIVE, authorized=False)
+    assert "not been authorised" in (blocked() or "")
+    # Authorised, but not for this account.
+    factories.set_mode(db, TradingMode.LIVE, authorized=True)
+    detail = blocked() or ""
+    assert mismatch in detail and "another account" in detail
+
+    factories.set_mode(db, TradingMode.LIVE, authorized=True, account=account)
+    assert blocked() is None
+
+    # The limits were edited after the authorisation.
+    db.execute(update(UserTradingState).values(live_authorized_at=utcnow() - timedelta(minutes=1)))
+    profile = db.get(RiskProfile, account.risk_profile_id)
+    assert profile is not None
+    profile.max_open_positions = 5  # updated_at moves to now
+    db.commit()
+    detail = blocked() or ""
+    assert mismatch in detail and "edited" in detail
+
+    # Re-authorised, then a different profile is assigned to the account.
+    factories.set_mode(db, TradingMode.LIVE, authorized=True, account=account)
+    assert blocked() is None
+    other = factories.risk_profile(db, **LOOSE_RISK)
+    account.risk_profile_id = other.id
+    db.commit()
+    detail = blocked() or ""
+    assert mismatch in detail and "risk profile was changed" in detail
+
+
+def test_disabled_account_is_monitored_but_never_traded(
     client: SignedClient, db: Session, trading: dict[str, Any]
 ) -> None:
     account = db.get(TradingAccount, uuid.UUID(trading["account"]["id"]))
     assert account is not None
     account.trading_enabled = False
     db.commit()
-    run_until(
-        client,
-        trading["account"]["connection_id"],
-        db,
-        lambda: db.scalar(select(func.count()).select_from(Signal)) > 0,
-    )
-    signal = db.scalars(select(Signal)).first()
-    assert signal is not None
-    assert signal.status is SignalStatus.REJECTED
-    assert "Account trading enabled" in (signal.rejection_reason or "")
+    broker = paper_broker(client, trading["account"]["connection_id"])
+    for _ in range(200):
+        broker.step(1)
+        results = engine_for(client).tick_once()
+    assert results[0].detail == "monitoring (trading disabled for this account)"
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(StrategyEvaluation)) == 0
     assert db.scalar(select(func.count()).select_from(Order)) == 0
 
 

@@ -41,18 +41,22 @@ class SignalIntent:
     timeframe: Timeframe
     bar_time: datetime  # open time of the closed bar that produced the signal
     entry_price: Decimal  # reference price (signal bar close); actual fill may differ
-    stop_loss: Decimal
+    # Strategies always set a stop. Only a manual Rise/Fall ticket has none:
+    # the contract's stake is its maximum loss.
+    stop_loss: Decimal | None
     take_profit: Decimal | None
     reasons: list[str]
     entry_type: OrderType = OrderType.MARKET
 
     @property
     def risk_distance(self) -> Decimal:
+        if self.stop_loss is None:
+            return Decimal(0)
         return abs(self.entry_price - self.stop_loss)
 
     @property
     def reward_risk(self) -> Decimal | None:
-        if self.take_profit is None or self.risk_distance == 0:
+        if self.take_profit is None or self.stop_loss is None or self.risk_distance == 0:
             return None
         return abs(self.take_profit - self.entry_price) / self.risk_distance
 
@@ -69,6 +73,15 @@ class Evaluation:
         return [c.as_dict() for c in self.checks]
 
 
+@dataclass(frozen=True)
+class ExitDecision:
+    """A strategy's opinion on an OPEN trade: close it now (early exit) or keep it."""
+
+    close: bool
+    summary: str
+    checks: list[Check] = field(default_factory=list)
+
+
 class MarketView(Protocol):
     """What a strategy may see: CLOSED candles only, as of the decision time."""
 
@@ -83,6 +96,9 @@ class Strategy(ABC):
     code_version: ClassVar[str]
     description: ClassVar[str]
     Params: ClassVar[type[BaseModel]]
+    # True: the engine registers a shared template (version 1 = defaults) on
+    # start-up. The `rules` strategy's templates are seeded by Laravel instead.
+    seeds_template: ClassVar[bool] = True
 
     def parse_params(self, raw: dict[str, Any]) -> BaseModel:
         return self.Params.model_validate(raw)
@@ -100,3 +116,14 @@ class Strategy(ABC):
 
     @abstractmethod
     def evaluate(self, view: MarketView, params: Any) -> Evaluation: ...
+
+    def has_exit_rules(self, params: Any) -> bool:
+        """True when `evaluate_exit` can ask to close open trades early."""
+        return False
+
+    def evaluate_exit(self, view: MarketView, params: Any, side: Side) -> ExitDecision | None:
+        """Early-exit check for an open Spot/Multiplier trade (None = no exit rules).
+
+        Rise/Fall contracts are never closed early: they settle at expiry.
+        """
+        return None

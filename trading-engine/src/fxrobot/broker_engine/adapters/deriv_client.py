@@ -14,6 +14,13 @@ Two channels:
 `req_id` and hands subscription messages (ticks, balance, open contracts) to
 handlers. Adapter methods stay synchronous, like every other adapter.
 
+Every request is counted against Deriv's documented WebSocket budgets
+(`RateLimiter`): proposal + proposal_open_contract + buy + sell 360/min and
+14,400/h; balance + statement 100/min, 2,000/h; portfolio + profit_table
+30/min, 1,500/h; everything else 220/min, 14,400/h; ping is not counted.
+A request that would exceed a budget waits briefly, then is refused BEFORE
+it is sent (`BrokerRateLimitError`) — so a refused buy never executed.
+
 Nothing here logs tokens; error messages never include request headers.
 """
 
@@ -25,6 +32,7 @@ import json
 import logging
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -36,6 +44,7 @@ from fxrobot.broker_engine.errors import (
     BrokerAuthError,
     BrokerConnectionError,
     BrokerError,
+    BrokerRateLimitError,
     BrokerTimeoutError,
     InvalidBrokerResponseError,
 )
@@ -166,6 +175,85 @@ class DerivRest:
         return url
 
 
+# ── rate limits ──────────────────────────────────────────────────────────
+
+# (window seconds, max requests) per category — developers.deriv.com limits.
+BUDGETS: dict[str, tuple[tuple[float, int], ...]] = {
+    "trading": ((60.0, 360), (3600.0, 14_400)),
+    "account": ((60.0, 100), (3600.0, 2_000)),
+    "history": ((60.0, 30), (3600.0, 1_500)),
+    "other": ((60.0, 220), (3600.0, 14_400)),
+}
+CATEGORIES = {
+    "proposal": "trading",
+    "proposal_open_contract": "trading",
+    "buy": "trading",
+    "sell": "trading",
+    "balance": "account",
+    "statement": "account",
+    "portfolio": "history",
+    "profit_table": "history",
+}
+MAX_WAIT = 2.0  # seconds a request may wait for budget before it is refused
+
+
+def category_of(payload: dict[str, Any]) -> str | None:
+    """Budget category of a request (None = not counted, e.g. ping)."""
+    if "ping" in payload:
+        return None
+    first = next(iter(payload), "")
+    if "proposal_open_contract" in payload:
+        return "trading"
+    return CATEGORIES.get(first, "other")
+
+
+class RateLimiter:
+    """Sliding-window request budgets for one Deriv connection. Thread-safe."""
+
+    def __init__(
+        self,
+        budgets: dict[str, tuple[tuple[float, int], ...]] | None = None,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+        max_wait: float = MAX_WAIT,
+    ) -> None:
+        self._budgets = budgets or BUDGETS
+        self._clock = clock
+        self._sleep = sleep
+        self._max_wait = max_wait
+        self._sent: dict[str, deque[float]] = {}
+        self._lock = threading.Lock()
+
+    def acquire(self, category: str | None) -> None:
+        if category is None:
+            return
+        windows = self._budgets.get(category) or self._budgets["other"]
+        waited = 0.0
+        while True:
+            with self._lock:
+                now = self._clock()
+                sent = self._sent.setdefault(category, deque())
+                longest = max(w for w, _ in windows)
+                while sent and now - sent[0] >= longest:
+                    sent.popleft()
+                wait = 0.0
+                for window, limit in windows:
+                    recent = [t for t in sent if now - t < window]
+                    if len(recent) >= limit:
+                        wait = max(wait, recent[len(recent) - limit] + window - now)
+                if wait <= 0:
+                    sent.append(now)
+                    return
+            if waited + wait > self._max_wait:
+                raise BrokerRateLimitError(
+                    f"Deriv request budget for {category} requests is used up; "
+                    f"try again in {int(wait) + 1}s (nothing was sent)"
+                )
+            self._sleep(wait)
+            waited += wait
+
+
 # ── WebSocket ────────────────────────────────────────────────────────────
 
 
@@ -198,7 +286,14 @@ Handler = Callable[[dict[str, Any]], None]
 class DerivSocket:
     """One authenticated WebSocket. Thread-safe request/response by req_id."""
 
-    def __init__(self, url: str, *, connector: Connector = default_connector) -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        connector: Connector = default_connector,
+        limiter: RateLimiter | None = None,
+    ) -> None:
+        self._limiter = limiter or RateLimiter()
         self._ws = connector(url)
         self._ids = itertools.count(1)
         self._send_lock = threading.Lock()
@@ -224,6 +319,7 @@ class DerivSocket:
         """Send and wait for the matching reply. Raises DerivApiError for API errors."""
         if self._closed.is_set():
             raise BrokerConnectionError("Deriv connection is closed")
+        self._limiter.acquire(category_of(payload))  # raises before anything is sent
         req_id = next(self._ids)
         event: threading.Event = threading.Event()
         box: list[dict[str, Any]] = []

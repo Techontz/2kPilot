@@ -7,8 +7,8 @@
 export type Decimal = string;
 export type AccountEnvironment = "PAPER" | "DEMO" | "LIVE" | "UNKNOWN";
 export type ConnectionStatus = "CONNECTED" | "DISCONNECTED" | "RECONNECTING" | "ERROR";
-export type ConnectorType = "paper" | "deriv" | "mt5_bridge";
-export type TradingMode = "BACKTEST" | "DEMO" | "LIVE";
+export type ConnectorType = "paper" | "deriv";
+export type TradingMode = "DEMO" | "LIVE";
 export type EngineState = "offline" | "running" | "degraded";
 export type Side = "BUY" | "SELL";
 export type Severity = "info" | "success" | "warning" | "critical";
@@ -17,7 +17,7 @@ export interface User {
   id: string;
   name: string;
   email: string;
-  role: "owner" | "viewer";
+  role: "user" | "admin";
   mfa_enabled: boolean;
   mfa_required: boolean;
   last_login_at: string | null;
@@ -29,10 +29,29 @@ export interface TradingStatus {
   kill_switch_reason: string | null;
   kill_switch_changed_at: string | null;
   live_trading_locked: boolean;
+  live_authorized_at: string | null;
+  platform_halted: boolean;
+  platform_halt_reason: string | null;
   engine_state: EngineState;
   engine_detail: string;
   engine_heartbeat_at: string | null;
   new_orders_permitted: boolean;
+  /** Typed phrase required to authorise LIVE (PUT /api/trading/mode). */
+  live_confirmation_phrase?: string;
+  /** The one LIVE account the authorisation covers. */
+  live_authorized_account_id?: string | null;
+  /** Why real-money authorisation was last taken away (profile edited, MFA off, …); cleared by a new authorisation. */
+  live_revoked_reason?: string | null;
+  live_revoked_at?: string | null;
+}
+
+/** Body of PUT /api/trading/mode. LIVE also needs the user's LIVE account (with a risk profile) to authorise. */
+export interface TradingModeRequest {
+  mode: TradingMode;
+  password?: string | null;
+  confirmation_phrase?: string | null;
+  account_id?: string;
+  mfa_code?: string | null;
 }
 
 export interface Capabilities {
@@ -175,24 +194,62 @@ export interface Trade {
   slippage_pips: Decimal | null;
   session: string | null;
   is_simulated: boolean;
+  // Contract trades (Rise/Fall, Multipliers); null for Spot.
+  contract_family?: ContractFamily | null;
+  contract_type?: string | null;
+  broker_contract_id?: string | null;
+  stake?: Decimal | null;
+  payout?: Decimal | null;
+  multiplier?: number | null;
+  duration?: number | null;
+  duration_unit?: DurationUnit | null;
+  expires_at?: string | null;
+  entry_spot?: Decimal | null;
+  exit_spot?: Decimal | null;
+  fees?: Decimal | null;
+  outcome?: TradeOutcome | null;
+  longcode?: string | null;
+  duration_seconds?: number | null;
 }
 
-/** Raw trade rows (Overview) use the database shape. */
-export interface TradeRow {
-  id: string;
+export type TradeOutcome = "OPEN" | "WON" | "LOST" | "SOLD" | "CANCELLED";
+
+/** Trade rows on Home use the same shape as History. */
+export type TradeRow = Trade;
+
+// ── Contracts ───────────────────────────────────────────────────────────
+
+export type ContractFamily = "RISE_FALL" | "MULTIPLIER" | "SPOT";
+export type DurationUnit = "t" | "s" | "m" | "h" | "d";
+
+/** How a BUY/SELL is traded (canonical form; fields that don't apply are null). */
+export interface ContractSpec {
+  contract_family: ContractFamily;
+  duration: number | null;
+  duration_unit: DurationUnit | null;
+  allow_equals: boolean;
+  stake: Decimal | null;
+  multiplier: number | null;
+  take_profit_amount: Decimal | null;
+  stop_loss_amount: Decimal | null;
+}
+
+/** GET /api/markets/contracts — what a symbol offers on an account. */
+export interface ContractOffer {
+  account: { id: string; label: string; environment: AccountEnvironment };
+  provider: string;
   symbol: string;
-  side: Side;
-  volume: Decimal;
-  entry_price: Decimal;
-  entry_time: string;
-  exit_price: Decimal | null;
-  exit_time: string | null;
-  exit_reason: string | null;
-  net_pnl: Decimal | null;
-  unrealized_pnl: Decimal | null;
-  stop_loss: Decimal | null;
-  take_profit: Decimal | null;
-  is_simulated: boolean;
+  simulated: boolean;
+  market_open: boolean | null;
+  trading_suspended: boolean;
+  families: {
+    RISE_FALL: { available: boolean; contract_types: string[]; allow_equals: boolean; durations: { expiry_type: string | null; min: string; max: string }[] };
+    MULTIPLIER: { available: boolean; contract_types: string[]; multipliers: number[] };
+    SPOT: { available: boolean };
+  };
+  default_contract: ContractSpec;
+  notes: string[];
+  fetched_at?: string;
 }
 
 export interface Order {
@@ -259,6 +316,34 @@ export interface Paginated<T> {
   total: number;
 }
 
+export interface Blocker {
+  code: string;
+  message: string;
+}
+
+export interface ActiveStrategy {
+  assignment_id: string;
+  strategy_id: string;
+  strategy: string | null;
+  version: number | null;
+  symbol: string;
+  contract: ContractSpec;
+  contract_summary: string;
+  status_reason: string | null;
+  last_bar_evaluated: string | null;
+  last_signal_at: string | null;
+}
+
+export interface SetupChecklist {
+  has_broker: boolean;
+  has_account: boolean;
+  has_strategy: boolean;
+  has_backtest: boolean;
+  has_active_strategy: boolean;
+  trading_started: boolean;
+  mfa_enabled: boolean;
+}
+
 export interface Overview {
   account: {
     id: string;
@@ -272,7 +357,19 @@ export interface Overview {
     trading_enabled: boolean;
     synced_at: string | null;
     risk_profile: string | null;
+    risk_profile_id?: string | null;
+    balance?: Decimal | null;
+    equity?: Decimal | null;
+    broker_account_id?: string;
+    connection_id?: string;
+    last_connected_at?: string | null;
   } | null;
+  broker?: { name: string; connector_type: ConnectorType; connection_status: ConnectionStatus; connection_detail: string | null; last_connected_at: string | null } | null;
+  active_strategies?: ActiveStrategy[];
+  blockers?: Blocker[];
+  daily_pnl?: { date: string; net_pnl: number; trades: number }[];
+  balance_history?: { t: string; balance: number; equity: number }[];
+  setup?: SetupChecklist;
   figures?: {
     balance: number | null;
     equity: number | null;
@@ -379,10 +476,11 @@ export interface TicketResult {
 
 export interface StrategyVersion {
   id: string;
-  strategy_id: string;
+  strategy_id?: string;
   version: number;
   code_version: string;
   parameters: Record<string, unknown>;
+  rules_text?: string | null;
   notes: string;
   created_at: string;
 }
@@ -392,12 +490,20 @@ export interface Assignment {
   strategy_id: string;
   strategy_version_id: string;
   version: number | null;
-  account: { id: string; label: string; environment: AccountEnvironment } | null;
+  account: { id: string; label: string; environment: AccountEnvironment; connector_type?: ConnectorType | null } | null;
   symbol: string;
+  contract?: ContractSpec;
   status: "ENABLED" | "PAUSED";
   status_reason: string | null;
   last_bar_evaluated: string | null;
   last_signal_at: string | null;
+}
+
+/** Result of POST /api/strategies/{id}/activate. */
+export interface ActivationResult extends Assignment {
+  contract_check: { verified: boolean; detail?: string } | null;
+  blockers: Blocker[];
+  will_trade: boolean;
 }
 
 export interface JsonSchemaProperty {
@@ -412,18 +518,190 @@ export interface JsonSchemaProperty {
   allOf?: { $ref: string }[];
 }
 
+export type StrategySource = "template" | "builder" | "ai" | "import" | "copy" | "code" | (string & {});
+
+export interface StrategyDetails {
+  how_it_works?: string;
+  struggles?: string;
+  difficulty?: "beginner" | "intermediate" | "advanced" | (string & {});
+  disclaimer?: string;
+  educational?: boolean;
+  suggested_symbols?: string[];
+  suggested_timeframe?: Timeframe;
+  suggested_contract?: Partial<ContractSpec> & { contract_family: ContractFamily };
+  suggested_contract_note?: string;
+}
+
+export interface PerformanceStats {
+  trades: number;
+  wins: number;
+  win_rate: number | null;
+  net_pnl: number;
+  net_pnl_30d: number;
+  last_trade_at: string | null;
+}
+
+export interface BacktestHeadline {
+  id: string;
+  name: string;
+  symbol: string;
+  timeframe: string;
+  net_pnl: number | null;
+  return_pct: number | null;
+  win_rate: number | null;
+  trades: number | null;
+  max_drawdown: number | null;
+  max_drawdown_pct: number | null;
+  contract_family: ContractFamily | null;
+  run_at: string | null;
+}
+
 export interface Strategy {
   id: string;
   key: string;
+  slug?: string | null;
   name: string;
   description: string;
+  summary?: string | null;
+  details?: StrategyDetails | null;
+  source?: StrategySource;
+  built_in: boolean;
+  editable?: boolean;
+  archived?: boolean;
+  copied_from_id?: string | null;
   code_version: string | null;
   parameter_schema: { properties: Record<string, JsonSchemaProperty>; $defs?: Record<string, { enum?: string[] }> } | null;
+  latest_version?: StrategyVersion | null;
+  rules_text?: string | null;
   versions: StrategyVersion[];
   assignments: Assignment[];
+  performance?: { demo: PerformanceStats; live: PerformanceStats | null };
+  backtest?: BacktestHeadline | null;
   live_trades: number;
   live_net_pnl: number;
   last_backtest: { id: string; status: string; metrics: Metrics | null } | null;
+}
+
+/** Export / import file (GET /api/strategies/{id}/export, POST /api/strategies/import). */
+export interface StrategyFile {
+  format: "tradepilot.strategy";
+  schema_version: 1;
+  name: string;
+  description?: string | null;
+  rules: RuleSet;
+}
+
+/** POST /api/strategies/draft — never saved; reviewed in the builder. */
+export interface StrategyDraft {
+  rules: RuleSet | null;
+  rules_text: string | null;
+  explanation: string;
+  warnings: string[];
+  unsupported: string[];
+  notes: string[];
+  model: string | null;
+}
+
+// ── Rule sets (schema_version 1) ────────────────────────────────────────
+
+export type Timeframe = "M1" | "M5" | "M15" | "M30" | "H1" | "H4" | "D1";
+export type PriceField = "open" | "high" | "low" | "close";
+export type OperatorKey = "crosses_above" | "crosses_below" | "gt" | "gte" | "lt" | "lte" | "between";
+
+/** Exactly one of price / value / indicator. Stored versions may carry explicit nulls. */
+export interface Operand {
+  price?: PriceField | null;
+  value?: number | null;
+  indicator?: string | null;
+  params?: Record<string, number | string> | null;
+  output?: string | null;
+}
+
+export interface Condition {
+  left: Operand;
+  op: OperatorKey;
+  right?: Operand | null;
+  low?: Operand | null;
+  high?: Operand | null;
+  within_bars?: number | null;
+}
+
+export interface ConditionGroup {
+  all?: Condition[] | null;
+  any?: Condition[] | null;
+}
+
+export interface StopRule {
+  type: "atr" | "pips";
+  atr_period?: number;
+  multiple?: number;
+  pips?: number | null;
+}
+
+export interface TargetRule {
+  type: "rr" | "atr" | "pips";
+  ratio?: number;
+  atr_period?: number;
+  multiple?: number;
+  pips?: number | null;
+}
+
+export interface RuleSet {
+  schema_version: 1;
+  timeframe: Timeframe;
+  entry: { buy?: ConditionGroup | null; sell?: ConditionGroup | null };
+  filters?: Condition[];
+  exit?: {
+    stop?: StopRule;
+    target?: TargetRule | null;
+    close_buy_when?: ConditionGroup | null;
+    close_sell_when?: ConditionGroup | null;
+  };
+}
+
+/** GET /api/strategies/catalog — drives the visual builder. */
+export interface RulesCatalog {
+  schema_version: number;
+  timeframes: Timeframe[];
+  price_fields: { key: PriceField; label: string }[];
+  indicators: CatalogIndicator[];
+  operators: CatalogOperator[];
+  groups: { key: "all" | "any"; label: string }[];
+  stop_types: { key: StopRule["type"]; label: string; fields: string[] }[];
+  target_types: { key: TargetRule["type"]; label: string; fields: string[] }[];
+  limits: { max_conditions: number; min_period: number; max_period: number; max_within_bars: number; max_constant: number };
+  contract_notes: Partial<Record<ContractFamily, string>>;
+  ai_drafting_available?: boolean;
+}
+
+export interface CatalogParam {
+  key: string;
+  label: string;
+  type: "integer" | "number" | "source";
+  default: number | string;
+  description: string;
+  min?: number | null;
+  max?: number | null;
+  options?: PriceField[];
+}
+
+export interface CatalogIndicator {
+  key: string;
+  label: string;
+  short: string;
+  description: string;
+  params: CatalogParam[];
+  outputs: { key: string; label: string; scale: string; meaning: string }[];
+  default_output: string;
+  notes: string[];
+}
+
+export interface CatalogOperator {
+  key: OperatorKey;
+  label: string;
+  description: string;
+  operands: ("right" | "low" | "high")[];
+  supports_within_bars?: boolean;
 }
 
 export interface Evaluation {
@@ -462,6 +740,20 @@ export interface Metrics {
   by_session: GroupStat[];
   by_side: GroupStat[];
   by_strategy: GroupStat[];
+  longest_losing_streak?: number;
+  largest_win?: number | null;
+  largest_loss?: number | null;
+  breakeven?: number;
+  // Contract backtests
+  contract?: ContractSpec;
+  payout_ratio?: number;
+  payout_ratio_is_estimate?: boolean;
+  commission_pct?: number;
+  outcomes?: Partial<Record<"WON" | "LOST" | "SOLD", number>>;
+  notes?: string[];
+  signals?: number;
+  rejections?: Record<string, number>;
+  strategy_exits?: number;
 }
 
 export interface GroupStat {
@@ -520,11 +812,11 @@ export interface Backtest {
   initial_capital: Decimal;
   progress: number;
   metrics: Metrics | null;
-  report: { warnings?: string[]; [key: string]: unknown } | null;
+  report: { warnings?: string[]; notes?: string[]; [key: string]: unknown } | null;
   costs?: Record<string, string | null>;
   parameters?: Record<string, unknown>;
   risk_settings?: Record<string, unknown>;
-  config?: Record<string, unknown>;
+  config?: { contract?: ContractSpec | null; payout_ratio?: string | number | null; [key: string]: unknown } | null;
   error: string | null;
   created_at: string;
   finished_at: string | null;
@@ -549,6 +841,10 @@ export interface BacktestTrade {
   r_multiple: Decimal;
   session: string;
   reasons: string[];
+  contract_type?: string | null;
+  stake?: Decimal | null;
+  payout?: Decimal | null;
+  outcome?: "WON" | "LOST" | "SOLD" | null;
 }
 
 export interface RiskProfile {
@@ -576,6 +872,11 @@ export interface RiskProfile {
   cooldown_after_losses: number | null;
   cooldown_minutes: number | null;
   max_data_age_seconds: number;
+  stake_amount: Decimal;
+  max_stake_amount: Decimal | null;
+  max_daily_loss_amount: Decimal | null;
+  max_consecutive_losses: number | null;
+  daily_profit_target_amount: Decimal | null;
   accounts_count?: number;
 }
 

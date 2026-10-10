@@ -18,9 +18,10 @@ class Backtest(Base):
     """A reproducible simulation run: config, data identity, and results."""
 
     __tablename__ = "backtests"
-    __table_args__ = (Index("ix_backtests_created", "created_at"),)
+    __table_args__ = (Index("ix_backtests_user_created", "user_id", "created_at"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     parent_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("backtests.id", ondelete="CASCADE")
     )
@@ -57,9 +58,6 @@ class Backtest(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow, server_default=NOW_DEFAULT)
     started_at: Mapped[datetime | None]
     finished_at: Mapped[datetime | None]
-    created_by: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL")
-    )
 
 
 class BacktestTrade(Base):
@@ -77,9 +75,13 @@ class BacktestTrade(Base):
     exit_price: Mapped[Decimal] = mapped_column(Price())
     exit_reason: Mapped[ExitReason] = mapped_column(str_enum(ExitReason, "bt_exit_reason", 16))
     volume: Mapped[Decimal] = mapped_column(Volume())
-    stop_loss: Mapped[Decimal] = mapped_column(Price())
+    stop_loss: Mapped[Decimal | None] = mapped_column(Price())  # None for Rise/Fall
     take_profit: Mapped[Decimal | None] = mapped_column(Price())
     risk_amount: Mapped[Decimal] = mapped_column(Money())
+    contract_type: Mapped[str | None] = mapped_column(String(8))
+    stake: Mapped[Decimal | None] = mapped_column(Money())
+    payout: Mapped[Decimal | None] = mapped_column(Money())
+    outcome: Mapped[str | None] = mapped_column(String(10))
     gross_pnl: Mapped[Decimal] = mapped_column(Money())
     costs: Mapped[Decimal] = mapped_column(Money())
     net_pnl: Mapped[Decimal] = mapped_column(Money())

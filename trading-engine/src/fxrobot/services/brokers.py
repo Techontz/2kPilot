@@ -68,7 +68,7 @@ def verify_environment(expected: AccountEnvironment, actual: AccountEnvironment)
     if actual is AccountEnvironment.UNKNOWN:
         raise ConnectionTestError(
             "The broker did not confirm whether this is a demo or a live account. "
-            "For safety, 2kFX refuses accounts of unknown type.",
+            "For safety, 2kPilot refuses accounts of unknown type.",
             code="environment_unknown",
         )
     if expected is not actual:
@@ -114,10 +114,6 @@ def test_connection(
     verify_environment(data.expected_environment, account.environment)
     if not account.trade_allowed:
         warnings.append("The broker reports trading is not allowed on this account.")
-    if data.connector_type is ConnectorType.MT5_BRIDGE and settings["bridge_url"].startswith(
-        "http://"
-    ):
-        warnings.append("The bridge uses plain HTTP. Use HTTPS or a private tunnel (see docs).")
     categories: dict[str, int] = {}
     for symbol in symbols:
         categories[symbol.category] = categories.get(symbol.category, 0) + 1

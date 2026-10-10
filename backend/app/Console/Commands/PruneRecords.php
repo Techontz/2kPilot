@@ -13,7 +13,7 @@ use Illuminate\Console\Command;
  */
 class PruneRecords extends Command
 {
-    protected $signature = 'fx:prune {--days=90}';
+    protected $signature = 'tp:prune {--days=90}';
 
     protected $description = 'Prune old strategy evaluations and read notifications';
 

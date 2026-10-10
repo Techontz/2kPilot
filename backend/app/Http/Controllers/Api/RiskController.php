@@ -10,23 +10,24 @@ use App\Models\RiskProfile;
 use App\Models\Trade;
 use App\Models\TradingAccount;
 use App\Services\Audit\AuditLogger;
+use App\Services\Trading\TradingControl;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 class RiskController extends Controller
 {
-    public function __construct(private readonly AuditLogger $audit) {}
+    public function __construct(private readonly AuditLogger $audit, private readonly TradingControl $control) {}
 
-    public function index(): JsonResponse
+    public function index(Request $request): JsonResponse
     {
         $this->authorize('viewAny', RiskProfile::class);
 
-        return response()->json(RiskProfile::query()->withCount('accounts')->orderBy('name')->get());
+        return response()->json(RiskProfile::query()->ownedBy($request->user())->withCount('accounts')->orderBy('name')->get());
     }
 
     public function store(RiskProfileRequest $request): JsonResponse
     {
-        $profile = RiskProfile::query()->create($request->validated());
+        $profile = RiskProfile::query()->create($request->validated() + ['user_id' => $request->user()->id]);
         $this->audit->record('risk.profile_created', actor: $request->user(), targetType: 'risk_profile', targetId: $profile->id,
             details: ['name' => $profile->name]);
 
@@ -40,6 +41,10 @@ class RiskController extends Controller
         $changed = array_keys(array_diff_assoc(array_map('json_encode', $profile->only(array_keys($before))), array_map('json_encode', $before)));
         $this->audit->record('risk.profile_updated', actor: $request->user(), targetType: 'risk_profile', targetId: $profile->id,
             details: ['changed' => $changed]);
+        if ($changed) { // LIVE was authorised against the limits as they were
+            $this->control->revokeLiveIf($profile->user_id, $request->user(), "the risk profile \"{$profile->name}\" was edited",
+                fn ($state) => $state->live_authorized_profile_id === $profile->id);
+        }
 
         return response()->json($profile->refresh());
     }
@@ -48,7 +53,7 @@ class RiskController extends Controller
     {
         $this->authorize('delete', $profile);
         if ($profile->name === RiskProfile::DEFAULT_NAME) {
-            throw DomainException::conflict('The default profile cannot be deleted.');
+            throw DomainException::conflict('The Beginner profile cannot be deleted.');
         }
         if ($profile->accounts()->exists()) {
             throw DomainException::conflict('This profile is assigned to an account. Assign another profile first.');
@@ -85,6 +90,14 @@ class RiskController extends Controller
                 break;
             }
         }
+        // Losses in a row among today's (UTC) closed trades: the contract halt rule.
+        $streakToday = 0;
+        foreach ((clone $closed)->where('exit_time', '>=', $dayStart)->orderByDesc('exit_time')->pluck('net_pnl') as $pnl) {
+            if ((float) $pnl >= 0) {
+                break;
+            }
+            $streakToday++;
+        }
         $pct = fn (float $loss, float $base) => $base > 0 ? round(max(0, -$loss) / $base * 100, 2) : null;
         $lim = fn (?string $field) => $profile && $profile->{$field} !== null ? (float) $profile->{$field} : null;
 
@@ -100,6 +113,9 @@ class RiskController extends Controller
                 ['key' => 'exposure', 'label' => 'Total exposure', 'used' => round((float) $open->sum(fn ($t) => (float) $t->volume), 2), 'limit' => $lim('max_total_exposure_lots'), 'unit' => 'lots'],
                 ['key' => 'trades_today', 'label' => 'Trades today', 'used' => Trade::query()->where('account_id', $account->id)->where('entry_time', '>=', $dayStart)->count(), 'limit' => $lim('max_trades_per_day'), 'unit' => ''],
                 ['key' => 'losing_streak', 'label' => 'Losses in a row', 'used' => $consecutive, 'limit' => $lim('cooldown_after_losses'), 'unit' => ''],
+                ['key' => 'daily_loss_amount', 'label' => 'Money lost today', 'used' => round(max(0, -$realizedToday), 2), 'limit' => $lim('max_daily_loss_amount'), 'unit' => $account->currency],
+                ['key' => 'losses_in_a_row_today', 'label' => 'Losses in a row today', 'used' => $streakToday, 'limit' => $lim('max_consecutive_losses'), 'unit' => ''],
+                ['key' => 'profit_today', 'label' => 'Profit today', 'used' => round($realizedToday, 2), 'limit' => $lim('daily_profit_target_amount'), 'unit' => $account->currency],
             ],
         ]);
     }

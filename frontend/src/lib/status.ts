@@ -10,15 +10,24 @@ export interface RobotStatus {
 }
 
 /**
- * The single answer to "Is the robot running?". Order matters: the kill
- * switch is reported first because it is the control the user acts on.
+ * The single answer to "Is the robot running?". Order matters: a platform
+ * halt overrides everything; then the user's own kill switch, because it is
+ * the control the user acts on.
  */
 export function deriveRobotStatus(status: TradingStatus): RobotStatus {
+  if (status.platform_halted) {
+    return {
+      label: "Halted by admin",
+      tone: "negative",
+      detail: status.platform_halt_reason ?? "Trading is halted platform-wide by an administrator.",
+      running: false,
+    };
+  }
   if (status.kill_switch_engaged) {
     return {
       label: "Trading stopped",
       tone: "warning",
-      detail: status.kill_switch_reason ?? "The kill switch is engaged. No new orders can be placed.",
+      detail: status.kill_switch_reason ?? "Your trading is stopped. No new orders can be placed on your accounts.",
       running: false,
     };
   }
@@ -40,11 +49,6 @@ export function deriveRobotStatus(status: TradingStatus): RobotStatus {
 }
 
 export const MODE_INFO: Record<TradingMode, { label: string; tone: Tone; explanation: string }> = {
-  BACKTEST: {
-    label: "Backtest",
-    tone: "neutral",
-    explanation: "Simulation on historical data only. No orders are ever sent to a broker.",
-  },
   DEMO: {
     label: "Demo",
     tone: "info",

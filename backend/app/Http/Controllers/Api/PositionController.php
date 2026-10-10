@@ -19,7 +19,7 @@ class PositionController extends Controller
     {
         $this->authorize('viewAny', Trade::class);
         $request->validate(['account_id' => ['nullable', 'uuid']]);
-        $positions = Trade::query()->with('account:id,label,environment,currency', 'version.strategy:id,name')
+        $positions = Trade::query()->ownedBy($request->user())->with('account:id,label,environment,currency', 'version.strategy:id,name')
             ->where('status', 'OPEN')
             ->when($request->query('account_id'), fn ($q, $id) => $q->where('account_id', $id))
             ->orderByDesc('entry_time')->get();

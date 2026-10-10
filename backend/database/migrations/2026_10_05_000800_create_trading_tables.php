@@ -28,17 +28,22 @@ return new class extends Migration
             $table->foreignUuid('account_id')->constrained('trading_accounts')->cascadeOnDelete();
             $table->foreignUuid('created_by')->nullable()->constrained('users')->nullOnDelete();
             // Manual orders: one key per confirmed ticket, so a double-click
-            // or a retried request can never open a second position.
-            $table->string('idempotency_key', 64)->nullable()->unique();
+            // or a retried request can never open a second position. Unique
+            // per ACCOUNT (see uq_signals_account_idempotency): a key never
+            // reaches another tenant's signal.
+            $table->string('idempotency_key', 64)->nullable();
             $table->string('symbol', 40);
             $table->string('side', 8);
             $table->string('timeframe', 8);
             $table->dateTime('bar_time', 6);
             $table->string('entry_type', 16);
             $table->decimal('entry_price', 24, 10);
-            $table->decimal('stop_loss', 24, 10);
+            $table->decimal('stop_loss', 24, 10)->nullable();      // NULL only for contracts (the stake is the max loss)
             $table->decimal('take_profit', 24, 10)->nullable();
             $table->json('reasons');
+            $table->string('contract_family', 16)->default('SPOT'); // RISE_FALL | MULTIPLIER | SPOT
+            $table->string('contract_type', 8)->nullable();         // CALL | PUT | CALLE | PUTE | MULTUP | MULTDOWN
+            $table->decimal('stake', 20, 6)->nullable();
             $table->string('status', 16)->default('NEW');
             $table->json('risk_checks');
             $table->string('rejection_reason', 500)->nullable();
@@ -51,12 +56,14 @@ return new class extends Migration
 
             // Duplicate-signal protection: one signal per assignment, bar and direction.
             $table->unique(['assignment_id', 'bar_time', 'side'], 'uq_signals_dedupe');
+            $table->unique(['account_id', 'idempotency_key'], 'uq_signals_account_idempotency');
             $table->index(['account_id', 'created_at'], 'ix_signals_account_created');
         });
         DB::statement("ALTER TABLE signals ADD CONSTRAINT ck_signals_source CHECK (source IN ('STRATEGY','MANUAL'))");
         DB::statement("ALTER TABLE signals ADD CONSTRAINT ck_signals_side CHECK (side IN ('BUY','SELL'))");
         DB::statement("ALTER TABLE signals ADD CONSTRAINT ck_signals_status CHECK (status IN ('NEW','APPROVED','REJECTED','SKIPPED','EXECUTED','FAILED'))");
         DB::statement("ALTER TABLE signals ADD CONSTRAINT ck_signals_strategy CHECK (source = 'MANUAL' OR strategy_version_id IS NOT NULL)");
+        DB::statement("ALTER TABLE signals ADD CONSTRAINT ck_signals_stop CHECK (stop_loss IS NOT NULL OR contract_family <> 'SPOT' OR status IN ('REJECTED','FAILED','SKIPPED'))");
 
         Schema::create('trades', function (Blueprint $table) {
             $table->uuid('id')->primary();
@@ -88,6 +95,21 @@ return new class extends Migration
             $table->decimal('unrealized_pnl', 20, 6)->nullable();
             $table->decimal('r_multiple', 24, 10)->nullable();
             $table->boolean('is_simulated')->default(false);
+            // Contract details (Deriv Options / paper contracts); NULL for SPOT trades.
+            $table->string('contract_family', 16)->default('SPOT');  // RISE_FALL | MULTIPLIER | SPOT
+            $table->string('contract_type', 8)->nullable();          // CALL | PUT | CALLE | PUTE | MULTUP | MULTDOWN
+            $table->string('broker_contract_id', 64)->nullable();
+            $table->decimal('stake', 20, 6)->nullable();             // money paid for the contract
+            $table->decimal('payout', 20, 6)->nullable();            // Rise/Fall: paid if won
+            $table->unsignedInteger('multiplier')->nullable();
+            $table->unsignedInteger('duration')->nullable();
+            $table->string('duration_unit', 1)->nullable();          // t | s | m | h | d
+            $table->dateTime('expires_at', 6)->nullable();
+            $table->decimal('entry_spot', 24, 10)->nullable();
+            $table->decimal('exit_spot', 24, 10)->nullable();
+            $table->decimal('fees', 20, 6)->nullable();              // commission paid (positive amount)
+            $table->string('outcome', 10)->nullable();               // OPEN | WON | LOST | SOLD | CANCELLED
+            $table->string('longcode', 500)->nullable();             // the broker's plain-English contract description
             $table->utcTimestamps();
 
             $table->index(['account_id', 'status'], 'ix_trades_account_status');
@@ -122,12 +144,31 @@ return new class extends Migration
             $table->dateTime('submitted_at', 6)->nullable();
             $table->dateTime('filled_at', 6)->nullable();
             $table->dateTime('last_reconciled_at', 6)->nullable();
+            // Contract details (Deriv Options / paper contracts); NULL for SPOT trades.
+            $table->string('contract_family', 16)->default('SPOT');  // RISE_FALL | MULTIPLIER | SPOT
+            $table->string('contract_type', 8)->nullable();          // CALL | PUT | CALLE | PUTE | MULTUP | MULTDOWN
+            $table->string('broker_contract_id', 64)->nullable();
+            $table->decimal('stake', 20, 6)->nullable();             // money paid for the contract
+            $table->decimal('payout', 20, 6)->nullable();            // Rise/Fall: paid if won
+            $table->unsignedInteger('multiplier')->nullable();
+            $table->unsignedInteger('duration')->nullable();
+            $table->string('duration_unit', 1)->nullable();          // t | s | m | h | d
+            $table->dateTime('expires_at', 6)->nullable();
+            $table->decimal('entry_spot', 24, 10)->nullable();
+            $table->decimal('exit_spot', 24, 10)->nullable();
+            $table->decimal('fees', 20, 6)->nullable();              // commission paid (positive amount)
+            $table->string('outcome', 10)->nullable();               // OPEN | WON | LOST | SOLD | CANCELLED
             $table->utcTimestamps();
 
             $table->index(['account_id', 'created_at'], 'ix_orders_account_created');
             $table->index('status', 'ix_orders_status');
         });
         DB::statement("ALTER TABLE orders ADD CONSTRAINT ck_orders_status CHECK (status IN ('PENDING_SUBMIT','SUBMITTED','PENDING','FILLED','PARTIALLY_FILLED','CANCELLED','REJECTED','UNKNOWN','FAILED'))");
+        foreach (['trades', 'orders'] as $name) {
+            DB::statement("ALTER TABLE {$name} ADD CONSTRAINT ck_{$name}_contract CHECK (contract_family IN ('RISE_FALL','MULTIPLIER','SPOT'))");
+            DB::statement("ALTER TABLE {$name} ADD CONSTRAINT ck_{$name}_contract_type CHECK (contract_type IS NULL OR contract_type IN ('CALL','PUT','CALLE','PUTE','MULTUP','MULTDOWN'))");
+            DB::statement("ALTER TABLE {$name} ADD CONSTRAINT ck_{$name}_outcome CHECK (outcome IS NULL OR outcome IN ('OPEN','WON','LOST','SOLD','CANCELLED'))");
+        }
 
         Schema::create('trade_events', function (Blueprint $table) {
             $table->id();

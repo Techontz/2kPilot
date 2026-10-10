@@ -8,6 +8,8 @@ use Illuminate\Support\Facades\Schema;
 /**
  * Stored candle series used by backtests and paper "replay" accounts.
  * SYNTHETIC datasets are generated test data and are labelled everywhere.
+ * A dataset belongs to the user who created it; user_id NULL = shared with
+ * every user (read-only for non-admins).
  */
 return new class extends Migration
 {
@@ -15,6 +17,7 @@ return new class extends Migration
     {
         Schema::create('datasets', function (Blueprint $table) {
             $table->uuid('id')->primary();
+            $table->foreignUuid('user_id')->nullable()->constrained('users')->cascadeOnDelete();
             $table->string('symbol', 20);          // canonical, e.g. EURUSD
             $table->string('timeframe', 8);        // M1 … D1
             $table->string('source', 16);          // broker | csv | synthetic
@@ -27,7 +30,7 @@ return new class extends Migration
             $table->string('checksum', 64)->default('');
             $table->utcTimestamps();
 
-            $table->unique(['source', 'source_ref', 'symbol', 'timeframe'], 'uq_datasets_key');
+            $table->unique(['user_id', 'source', 'source_ref', 'symbol', 'timeframe'], 'uq_datasets_key');
         });
         DB::statement("ALTER TABLE datasets ADD CONSTRAINT ck_datasets_source CHECK (source IN ('broker','csv','synthetic'))");
         DB::statement("ALTER TABLE datasets ADD CONSTRAINT ck_datasets_timeframe CHECK (timeframe IN ('M1','M5','M15','M30','H1','H4','D1'))");

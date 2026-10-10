@@ -4,7 +4,7 @@ import uuid
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import JSON, Numeric, String
+from sqlalchemy import JSON, ForeignKey, Numeric, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from fxrobot.db.base import Base, TimestampMixin
@@ -18,9 +18,11 @@ class RiskProfile(TimestampMixin, Base):
     """
 
     __tablename__ = "risk_profiles"
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_risk_profiles_user_name"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    name: Mapped[str] = mapped_column(String(120), unique=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(String(120))
     risk_per_trade_pct: Mapped[Decimal] = mapped_column(Numeric(6, 3))
     max_position_lots: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
     max_open_positions: Mapped[int | None]
@@ -44,6 +46,12 @@ class RiskProfile(TimestampMixin, Base):
     cooldown_after_losses: Mapped[int | None]
     cooldown_minutes: Mapped[int | None]
     max_data_age_seconds: Mapped[int] = mapped_column(default=120)
+    # Stake-based limits for contracts (account currency).
+    stake_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("1.00"))
+    max_stake_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    max_daily_loss_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    max_consecutive_losses: Mapped[int | None]
+    daily_profit_target_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
 
     def as_dict(self) -> dict[str, Any]:
         return {c.name: getattr(self, c.name) for c in self.__table__.columns}

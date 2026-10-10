@@ -6,7 +6,9 @@ authenticates, authorises and audits them):
 * close every open position (the separate "Close positions" emergency action).
 
 A manual ticket goes through EXACTLY the same risk engine and execution engine
-as an automated signal. There is no shortcut: kill switch, live lock, account
+as an automated signal. A ticket may carry a contract spec (Rise/Fall,
+Multiplier): it is then sized by the stake, and a Rise/Fall needs no stop loss
+(its stake is its maximum loss). There is no shortcut: kill switch, live lock, account
 enabled, stop-loss requirement, loss limits, exposure… all apply.
 """
 
@@ -28,6 +30,7 @@ from fxrobot.broker_engine.manager import BrokerManager
 from fxrobot.core.context import new_correlation_id, set_correlation_id
 from fxrobot.core.errors import AppError, BrokerUnavailableError, ConflictError, NotFoundError
 from fxrobot.db.types import utcnow
+from fxrobot.domain.contracts import ContractFamily, ContractSpec
 from fxrobot.domain.market import Quote, Side, SymbolInfo, Timeframe
 from fxrobot.domain.trading import (
     ExitReason,
@@ -42,7 +45,7 @@ from fxrobot.execution_engine.engine import ExecutionEngine
 from fxrobot.execution_engine.journal import EventType
 from fxrobot.execution_engine.reconciliation import unresolved_orders
 from fxrobot.market_data.conversion import point_value
-from fxrobot.models import Order, RiskProfile, Signal, SystemState, Trade, TradingAccount
+from fxrobot.models import Order, RiskProfile, Signal, Trade, TradingAccount
 from fxrobot.notifications.service import notify
 from fxrobot.risk_engine.engine import (
     RiskDecision,
@@ -51,7 +54,7 @@ from fxrobot.risk_engine.engine import (
 )
 from fxrobot.services.risk_profiles import limits_of
 from fxrobot.strategy_engine.base import SignalIntent
-from fxrobot.trading_engine.context import build_risk_context
+from fxrobot.trading_engine.context import attach_contract, build_risk_context, load_controls
 
 
 class BrokerActionError(AppError):
@@ -63,13 +66,14 @@ class ManualTicket:
     account_id: uuid.UUID
     symbol: str
     side: Side
-    stop_loss: Decimal
+    stop_loss: Decimal | None  # required for SPOT; optional for contracts
     take_profit: Decimal | None
     volume: Decimal | None = None  # None (preview only) = suggest the maximum allowed
     order_type: OrderType = OrderType.MARKET
     idempotency_key: str | None = None
     actor_id: uuid.UUID | None = None
     actor_label: str = "dashboard"
+    contract: ContractSpec = field(default_factory=ContractSpec)
 
 
 @dataclass
@@ -87,6 +91,11 @@ class Preview:
     symbol: SymbolInfo | None
     rejection_reason: str | None
     notes: list[str] = field(default_factory=list)
+    # Contract tickets: what would be bought.
+    contract: dict[str, Any] | None = None
+    contract_type: str | None = None
+    stake: Decimal | None = None
+    payout: Decimal | None = None
 
 
 def _account(db: Session, account_id: uuid.UUID) -> TradingAccount:
@@ -127,15 +136,11 @@ def _decide(
 ) -> tuple[SignalIntent, RiskDecision, SymbolInfo, Quote, Decimal | None]:
     symbol = adapter.get_symbol(ticket.symbol)
     quote = adapter.get_quote(symbol.name)
-    state = db.get(SystemState, 1)
-    if state is None:
-        raise ConflictError("System state is missing; run the database migrations")
     ctx = build_risk_context(
         db,
         account=account,
         adapter=adapter,
-        state=state,
-        live_locked=live_locked,
+        controls=load_controls(db, account, live_locked=live_locked),
         symbol=symbol,
         account_info=None,
         broker_connected=adapter.is_connected,
@@ -149,6 +154,13 @@ def _decide(
         )
         return intent, decision, symbol, quote, None
     limits = limits_of(profile)
+    attach_contract(ctx, adapter, ticket.contract, ticket.side, limits)
+    if ticket.contract.contract_family.is_contract:
+        decision = evaluate(intent, ctx, limits)
+        if ticket.order_type is not OrderType.MARKET:
+            decision.approved = False
+            decision.checks.insert(0, _rule("Order type", False, "contracts are bought at market"))
+        return intent, decision, symbol, quote, decision.volume
     decision = evaluate(intent, ctx, limits, requested_volume=volume)
     # Sizing shown on the ticket even when another rule fails (display only).
     try:
@@ -183,9 +195,10 @@ def preview_ticket(
         raise BrokerUnavailableError(f"Broker did not answer: {exc}") from exc
     finally:
         db.rollback()  # preview never writes
+    is_contract = ticket.contract.contract_family.is_contract
     volume = decision.volume or ticket.volume or suggested
     risk_amount = decision.risk_amount
-    if risk_amount is None and volume is not None:
+    if risk_amount is None and volume is not None and not is_contract:
         risk_amount = _estimated_risk(db, manager, ticket, volume, live_locked)
     reward = None
     if risk_amount is not None and intent.reward_risk is not None:
@@ -209,7 +222,20 @@ def preview_ticket(
         symbol=symbol,
         rejection_reason=decision.rejection_reason,
         notes=notes,
+        contract=ticket.contract.as_json() if is_contract else None,
+        contract_type=(
+            ct.value if (ct := ticket.contract.contract_type(ticket.side)) is not None else None
+        ),
+        stake=decision.contract.stake if decision.contract else None,
+        payout=_stake_payout(decision),
     )
+
+
+def _stake_payout(decision: RiskDecision) -> Decimal | None:
+    """Payout a Rise/Fall would pay if it wins (from the broker's quote, in the checks)."""
+    if decision.contract is None or decision.contract.family is not ContractFamily.RISE_FALL:
+        return None
+    return decision.payout
 
 
 def _estimated_risk(
@@ -225,15 +251,11 @@ def _estimated_risk(
     try:
         symbol = adapter.get_symbol(ticket.symbol)
         quote = adapter.get_quote(symbol.name)
-        state = db.get(SystemState, 1)
-        if state is None:
-            return None
         ctx = build_risk_context(
             db,
             account=account,
             adapter=adapter,
-            state=state,
-            live_locked=live_locked,
+            controls=load_controls(db, account, live_locked=live_locked),
             symbol=symbol,
             account_info=None,
             broker_connected=adapter.is_connected,
@@ -249,6 +271,13 @@ def _estimated_risk(
         db.rollback()
 
 
+def _signal_by_key(db: Session, account_id: object, key: str) -> Signal | None:
+    """A ticket's earlier signal: keys are scoped to the account, never global."""
+    return db.scalar(
+        select(Signal).where(Signal.account_id == account_id, Signal.idempotency_key == key)
+    )
+
+
 def submit_ticket(
     db: Session,
     manager: BrokerManager,
@@ -258,9 +287,12 @@ def submit_ticket(
     execution: ExecutionEngine | None = None,
 ) -> Signal:
     """Risk-check and execute a confirmed manual ticket. Idempotent per key."""
-    if not ticket.idempotency_key or ticket.volume is None:
+    is_contract = ticket.contract.contract_family.is_contract
+    if not ticket.idempotency_key or (ticket.volume is None and not is_contract):
         raise ConflictError("A confirmed ticket needs a volume and an idempotency key")
-    existing = db.scalar(select(Signal).where(Signal.idempotency_key == ticket.idempotency_key))
+    if ticket.stop_loss is None and not is_contract:
+        raise ConflictError("A stop loss is required")
+    existing = _signal_by_key(db, ticket.account_id, ticket.idempotency_key)
     if existing is not None:
         return existing  # double-click / retried request: never a second order
     account = _account(db, ticket.account_id)
@@ -295,6 +327,8 @@ def submit_ticket(
         status=SignalStatus.NEW,
         risk_checks=decision.checks_json(),
         requested_volume=ticket.volume,
+        contract_family=ticket.contract.contract_family,
+        contract_type=ticket.contract.contract_type(intent.side),
         correlation_id=cid,
         created_at=utcnow(),
         decided_at=utcnow(),
@@ -304,7 +338,7 @@ def submit_ticket(
         db.flush()
     except IntegrityError:
         db.rollback()  # the same key arrived concurrently
-        again = db.scalar(select(Signal).where(Signal.idempotency_key == ticket.idempotency_key))
+        again = _signal_by_key(db, account.id, ticket.idempotency_key)
         if again is None:
             raise
         return again
@@ -312,8 +346,13 @@ def submit_ticket(
     journal.record(
         db,
         EventType.SIGNAL_GENERATED,
-        f"{prefix}Manual {intent.side.value} {ticket.volume.normalize()} {symbol.name} "
-        f"ticket by {ticket.actor_label}",
+        f"{prefix}Manual {intent.side.value} "
+        + (
+            f"{ticket.contract.label()}"
+            if is_contract
+            else f"{(ticket.volume or Decimal(0)).normalize()}"
+        )
+        + f" {symbol.name} ticket by {ticket.actor_label}",
         account_id=account.id,
         signal_id=signal.id,
         data={
@@ -322,6 +361,7 @@ def submit_ticket(
             "stop_loss": str(intent.stop_loss),
             "take_profit": str(intent.take_profit),
             "volume": str(ticket.volume),
+            "contract": ticket.contract.as_json() if is_contract else None,
         },
     )
     if not decision.approved:
@@ -347,11 +387,18 @@ def submit_ticket(
         return signal
     signal.status = SignalStatus.APPROVED
     signal.volume, signal.risk_amount = decision.volume, decision.risk_amount
+    if decision.contract is not None:
+        signal.stake = decision.contract.stake
     journal.record(
         db,
         EventType.RISK_APPROVED,
-        f"Risk approved {decision.volume} {adapter.capabilities.volume_unit}, "
-        f"risking {decision.risk_amount} {account.currency}",
+        (
+            f"Risk approved {decision.contract.contract_type.value}, stake "
+            f"{decision.contract.stake} {account.currency}"
+            if decision.contract is not None
+            else f"Risk approved {decision.volume} {adapter.capabilities.volume_unit}, "
+            f"risking {decision.risk_amount} {account.currency}"
+        ),
         account_id=account.id,
         signal_id=signal.id,
     )
@@ -379,6 +426,9 @@ def ticket_result(db: Session, signal: Signal) -> dict[str, Any]:
         "risk_checks": signal.risk_checks,
         "volume": str(signal.volume) if signal.volume is not None else None,
         "risk_amount": str(signal.risk_amount) if signal.risk_amount is not None else None,
+        "contract_family": signal.contract_family.value,
+        "contract_type": signal.contract_type.value if signal.contract_type else None,
+        "stake": str(signal.stake) if signal.stake is not None else None,
         "order": None
         if order is None
         else {
@@ -444,10 +494,25 @@ def modify_position(
     return trade
 
 
-def close_all_positions(db: Session, manager: BrokerManager, *, actor_label: str) -> dict[str, Any]:
-    """The deliberate "Close positions" action. The kill switch is handled by Laravel."""
+def close_all_positions(
+    db: Session,
+    manager: BrokerManager,
+    *,
+    account_ids: list[uuid.UUID],
+    actor_label: str,
+) -> dict[str, Any]:
+    """The deliberate "Close positions" action, for ONE user's accounts.
+
+    Laravel stops that user's trading first and passes exactly their account
+    ids; positions on any other account are never touched.
+    """
     closed, failed = 0, []
-    for trade in list(db.scalars(select(Trade).where(Trade.status == TradeStatus.OPEN))):
+    if not account_ids:
+        return {"closed": 0, "failed": []}
+    open_trades = select(Trade).where(
+        Trade.status == TradeStatus.OPEN, Trade.account_id.in_(account_ids)
+    )
+    for trade in list(db.scalars(open_trades)):
         try:
             close_position(
                 db, manager, trade.id, actor_label=actor_label, reason=ExitReason.EMERGENCY
@@ -455,6 +520,7 @@ def close_all_positions(db: Session, manager: BrokerManager, *, actor_label: str
             closed += 1
         except (AppError, BrokerError) as exc:
             failed.append({"symbol": trade.symbol, "trade_id": str(trade.id), "error": str(exc)})
+    owner = db.scalar(select(TradingAccount.user_id).where(TradingAccount.id == account_ids[0]))
     with contextlib.suppress(Exception):
         notify(
             db,
@@ -462,5 +528,6 @@ def close_all_positions(db: Session, manager: BrokerManager, *, actor_label: str
             f"Close positions by {actor_label}: closed {closed}"
             + (f", {len(failed)} could not be closed" if failed else "")
             + ".",
+            user_id=owner,
         )
     return {"closed": closed, "failed": failed}

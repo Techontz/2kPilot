@@ -73,6 +73,18 @@ return [
             'after_commit' => false,
         ],
 
+        // Backtests (queue "backtests") run for up to 30 minutes. retry_after
+        // must exceed that, or Redis would hand a running backtest to a second
+        // worker. Used by RunBacktest and the Horizon "backtests" supervisor.
+        'redis-long' => [
+            'driver' => 'redis',
+            'connection' => env('REDIS_QUEUE_CONNECTION', 'default'),
+            'queue' => 'backtests',
+            'retry_after' => 1900,
+            'block_for' => null,
+            'after_commit' => false,
+        ],
+
         'deferred' => [
             'driver' => 'deferred',
         ],

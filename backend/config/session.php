@@ -1,7 +1,5 @@
 <?php
 
-use Illuminate\Support\Str;
-
 return [
 
     /*
@@ -127,10 +125,8 @@ return [
     |
     */
 
-    'cookie' => env(
-        'SESSION_COOKIE',
-        Str::slug((string) env('APP_NAME', 'laravel')).'-session'
-    ),
+    // The Next.js proxy (frontend/src/proxy.ts) checks for this cookie name.
+    'cookie' => env('SESSION_COOKIE', 'tradepilot_session'),
 
     /*
     |--------------------------------------------------------------------------

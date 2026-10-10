@@ -1,8 +1,13 @@
 import type { Metadata } from "next";
-import { StrategiesScreen } from "@/features/strategies/StrategiesScreen";
+import { Suspense } from "react";
+import { StrategiesSection } from "@/features/strategies/StrategiesSection";
 
 export const metadata: Metadata = { title: "Strategies" };
 
 export default function Page() {
-  return <StrategiesScreen />;
+  return (
+    <Suspense>
+      <StrategiesSection />
+    </Suspense>
+  );
 }

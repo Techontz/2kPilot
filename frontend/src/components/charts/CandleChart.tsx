@@ -9,7 +9,7 @@ import {
 } from "lightweight-charts";
 import { useEffect, useRef, useState } from "react";
 import type { Candle as CandlePoint } from "@/lib/types";
-import { chartColors } from "./theme";
+import { useChartColors } from "./theme";
 
 interface OHLC {
   time: number;
@@ -22,11 +22,11 @@ interface OHLC {
 export function CandleChart({ candles, digits, height = 360, label }: { candles: CandlePoint[]; digits: number; height?: number; label: string }) {
   const container = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<OHLC | null>(null);
+  const c = useChartColors(); // re-creates the chart when the theme changes
 
   useEffect(() => {
     const el = container.current;
     if (!el) return;
-    const c = chartColors();
     const chart = createChart(el, {
       height,
       autoSize: true,
@@ -57,7 +57,7 @@ export function CandleChart({ candles, digits, height = 360, label }: { candles:
       setHover(param.time && bar ? { ...bar, time: param.time as number } : null);
     });
     return () => chart.remove();
-  }, [candles, digits, height]);
+  }, [candles, digits, height, c]);
 
   const last = candles[candles.length - 1];
   const shown = hover ?? (last ? { time: 0, open: +last.open, high: +last.high, low: +last.low, close: +last.close } : null);

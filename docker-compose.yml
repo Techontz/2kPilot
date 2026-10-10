@@ -1,43 +1,60 @@
-# Local full-stack environment: MySQL + Laravel (API, queue worker, scheduler)
-# + trading engine + Next.js. Secrets come from backend/.env and
-# trading-engine/.env (never committed; run `php artisan fx:keys` first).
+# Local full-stack environment: MySQL + Redis + Laravel (API, Horizon queue
+# workers, scheduler) + trading engine + Next.js. Secrets come from
+# backend/.env and trading-engine/.env (never committed; run
+# `php artisan tp:keys` first).
 # Usage: docker compose up --build   →   http://127.0.0.1:3000
 x-db: &db-env
   DB_CONNECTION: mysql
   DB_HOST: db
   DB_PORT: "3306"
-  DB_DATABASE: twokfx
-  DB_USERNAME: twokfx
-  DB_PASSWORD: ${MYSQL_PASSWORD:-twokfx-local-only}
+  DB_DATABASE: tradepilot
+  DB_USERNAME: tradepilot
+  DB_PASSWORD: ${MYSQL_PASSWORD:-tradepilot-local-only}
   ENGINE_URL: http://engine:8431
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  QUEUE_CONNECTION: redis
+  CACHE_STORE: redis
 
 services:
   db:
     image: mysql:8.0
     command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
     environment:
-      MYSQL_DATABASE: twokfx
-      MYSQL_USER: twokfx
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-twokfx-local-only}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-twokfx-root-local-only}
+      MYSQL_DATABASE: tradepilot
+      MYSQL_USER: tradepilot
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-tradepilot-local-only}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-tradepilot-root-local-only}
     volumes: [mysqldata:/var/lib/mysql]
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
       interval: 5s
       retries: 20
 
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 20
+
   backend:
     build: ./backend
     env_file: ./backend/.env
-    environment: *db-env
-    depends_on: { db: { condition: service_healthy } }
+    environment:
+      <<: *db-env
+      # The frontend container forwards the client IP over the compose network.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.16.0.0/12}
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
     ports: ["127.0.0.1:8421:8421"]
 
   worker:
     build: ./backend
     env_file: ./backend/.env
     environment: *db-env
-    command: ["php", "artisan", "queue:work", "--tries=1", "--timeout=1800"]
+    command: ["php", "artisan", "horizon"] # queues: default, notifications, backtests
     depends_on: [backend]
 
   scheduler:
@@ -51,7 +68,7 @@ services:
     build: ./trading-engine
     env_file: ./trading-engine/.env
     environment:
-      DATABASE_URL: mysql+pymysql://twokfx:${MYSQL_PASSWORD:-twokfx-local-only}@db:3306/twokfx?charset=utf8mb4
+      DATABASE_URL: mysql+pymysql://tradepilot:${MYSQL_PASSWORD:-tradepilot-local-only}@db:3306/tradepilot?charset=utf8mb4
       LOG_FORMAT: json
     depends_on: [backend] # backend runs the migrations
 

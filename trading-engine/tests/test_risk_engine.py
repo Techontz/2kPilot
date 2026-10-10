@@ -84,7 +84,9 @@ def make_context(now: datetime = NOW, **overrides: Any) -> RiskContext:
         "now": now,
         "mode": TradingMode.DEMO,
         "kill_switch_engaged": False,
+        "platform_halted": False,
         "live_trading_locked": True,
+        "live_authorized": False,
         "account_environment": AccountEnvironment.DEMO,
         "account_trading_enabled": True,
         "broker_connected": True,
@@ -188,14 +190,20 @@ def test_kill_switch_rejects() -> None:
     assert_rejected(run(ctx=make_context(kill_switch_engaged=True)), "Kill switch", "STOP ALL")
 
 
+def test_platform_halt_rejects_even_with_the_users_switch_released() -> None:
+    decision = run(ctx=make_context(platform_halted=True, kill_switch_engaged=False))
+    assert_rejected(decision, "Kill switch", "halted platform-wide")
+
+
 @pytest.mark.parametrize(
     ("mode", "env", "locked", "fragment"),
     [
         (TradingMode.DEMO, AccountEnvironment.LIVE, False, "LIVE account not allowed in DEMO"),
         (TradingMode.DEMO, AccountEnvironment.UNKNOWN, False, "UNKNOWN account not allowed"),
         (TradingMode.LIVE, AccountEnvironment.UNKNOWN, False, "UNKNOWN account not allowed"),
-        (TradingMode.BACKTEST, AccountEnvironment.PAPER, False, "not allowed in BACKTEST"),
+        (TradingMode.LIVE, AccountEnvironment.DEMO, False, "DEMO account not allowed in LIVE"),
         (TradingMode.LIVE, AccountEnvironment.LIVE, True, "LIVE hard lock is on"),
+        (TradingMode.LIVE, AccountEnvironment.LIVE, False, "not been authorised"),
     ],
 )
 def test_mode_environment_rejections(
@@ -210,12 +218,14 @@ def test_mode_environment_rejections(
     [
         (TradingMode.DEMO, AccountEnvironment.PAPER, True),
         (TradingMode.DEMO, AccountEnvironment.DEMO, True),
-        (TradingMode.LIVE, AccountEnvironment.DEMO, True),  # lock only guards LIVE accounts
+        (TradingMode.DEMO, AccountEnvironment.DEMO, False),  # lock only guards LIVE accounts
         (TradingMode.LIVE, AccountEnvironment.LIVE, False),
     ],
 )
 def test_mode_environment_allowed(mode: TradingMode, env: AccountEnvironment, locked: bool) -> None:
-    ctx = make_context(mode=mode, account_environment=env, live_trading_locked=locked)
+    ctx = make_context(
+        mode=mode, account_environment=env, live_trading_locked=locked, live_authorized=True
+    )
     decision = run(ctx=ctx)
     assert decision.approved is True, decision.rejection_reason
 
@@ -240,10 +250,9 @@ def test_zero_stop_loss_rejects() -> None:
 def test_missing_stop_loss_rejects_without_crashing() -> None:
     decision = run(make_signal(stop_loss=None))
     assert_rejected(decision, "Stop loss required", "no stop loss")
-    # Rules that cannot compute on the malformed signal fail too (never crash).
+    # Rules that depend on the stop fail too (never crash): no stop = zero distance.
     distance = check(decision, "Stop distance")
     assert distance.passed is False
-    assert "could not be evaluated" in distance.detail
 
 
 def test_buy_stop_above_entry_rejects() -> None:
@@ -462,11 +471,11 @@ def test_cooldown_disabled_passes() -> None:
 
 
 def test_trades_per_day_limit_rejects() -> None:
-    assert_rejected(run(ctx=make_context(trades_today=5)), "Trades per day", "5 of 5 used")
+    assert_rejected(run(ctx=make_context(trades_today=20)), "Trades per day", "20 of 20 used")
 
 
 def test_trades_per_day_below_limit_passes() -> None:
-    assert run(ctx=make_context(trades_today=4)).approved is True
+    assert run(ctx=make_context(trades_today=19)).approved is True
 
 
 def pos(symbol: str, volume: str = "0.10", risk: str | None = "10") -> OpenExposure:
@@ -688,7 +697,9 @@ def test_limits_json_round_trip() -> None:
     data = DEFAULT_LIMITS.as_json()
     assert data["risk_per_trade_pct"] == "0.5"
     assert data["allowed_sessions"] == ["LONDON", "OVERLAP", "NEW_YORK"]
-    assert data["max_trades_per_day"] == 5
+    assert data["max_trades_per_day"] == 20
+    assert data["stake_amount"] == "1"
+    assert data["max_consecutive_losses"] == 3
 
 
 @pytest.mark.parametrize(

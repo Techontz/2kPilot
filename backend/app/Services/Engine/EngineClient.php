@@ -42,7 +42,7 @@ class EngineClient
     public function send(string $method, string $path, array $query = [], ?array $body = null, ?int $timeout = null): array
     {
         if (strlen((string) $this->secret) < 32) {
-            throw new RuntimeException('ENGINE_API_SECRET is not configured (run php artisan fx:keys).');
+            throw new RuntimeException('ENGINE_API_SECRET is not configured (run php artisan tp:keys).');
         }
         $target = $path.($query ? '?'.http_build_query($query, '', '&', PHP_QUERY_RFC3986) : '');
         $payload = $body === null ? '' : json_encode((object) $body, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
@@ -83,6 +83,8 @@ class EngineClient
         if ($response->status() === 401) {
             $message = 'The backend and the trading engine do not share the same ENGINE_API_SECRET.';
         }
-        throw new EngineException($message, $response->status(), (string) ($error['code'] ?? 'engine_error'));
+        $details = is_array($error['details'] ?? null) ? $error['details'] : [];
+
+        throw new EngineException($message, $response->status(), (string) ($error['code'] ?? 'engine_error'), $details);
     }
 }

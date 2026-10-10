@@ -2,121 +2,151 @@
 
 import { MoreHorizontal, PlugZap, RefreshCw, Trash2, Unplug } from "lucide-react";
 import { useState } from "react";
-import { useSession } from "@/components/providers/SessionProvider";
-import { Badge } from "@/components/ui/Badge";
-import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { Select, Toggle } from "@/components/ui/Fields";
-import { ConnectionBadge, EnvBadge } from "@/components/ui/Misc";
-import { api } from "@/lib/api";
-import { cn } from "@/lib/cn";
-import { formatMoney, formatRelative } from "@/lib/format";
-import { useAction } from "@/lib/hooks";
-import type { Account, RiskProfile } from "@/lib/types";
+import { toast } from "sonner";
+import { ConnectionBadge, EnvBadge, Pill } from "@/components/app/badges";
+import { ConfirmDialog } from "@/components/app/confirm-dialog";
+import { Money } from "@/components/app/money";
+import { Term } from "@/components/app/term";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { api, ApiError } from "@/lib/api";
+import { formatRelative } from "@/lib/format";
+import type { Account } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
-const ACCENT = { PAPER: "border-t-fg-subtle", DEMO: "border-t-info", LIVE: "border-t-live", UNKNOWN: "border-t-warning" };
+const ACCENT: Record<Account["environment"], string> = {
+  PAPER: "border-t-fg-subtle",
+  DEMO: "border-t-demo",
+  LIVE: "border-t-live",
+  UNKNOWN: "border-t-warning",
+};
 
-/** The account card: everything you need to know about one broker account. */
-export function AccountCard({ account, profiles, onChange }: { account: Account; profiles: RiskProfile[]; onChange: () => void }) {
-  const { isOwner } = useSession();
-  const action = useAction();
-  const [menu, setMenu] = useState(false);
+type Busy = "sync" | "reconnect" | "disconnect" | "remove" | null;
+
+/** One broker account: what the broker reported, and the connection actions. */
+export function AccountCard({ account, onChange }: { account: Account; onChange: () => void }) {
+  const [busy, setBusy] = useState<Busy>(null);
   const [confirm, setConfirm] = useState<"disconnect" | "remove" | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const patch = (body: Record<string, unknown>) =>
-    action.run(() => api(`/accounts/${account.id}`, { method: "PATCH", body })).then((r) => r !== null && onChange());
-  const post = (path: string) => action.run(() => api(path, { method: "POST" })).then((r) => r !== null && onChange());
-  const remove = () =>
-    action.run(() => api(`/brokers/${account.connection_id}`, { method: "DELETE" })).then((r) => {
-      if (r !== null) { setConfirm(null); onChange(); }
-    });
+  const run = async (what: Exclude<Busy, null>, fn: () => Promise<unknown>, success: string): Promise<boolean> => {
+    setBusy(what);
+    setError(null);
+    try {
+      await fn();
+      toast.success(success);
+      onChange();
+      return true;
+    } catch (e) {
+      const message = e instanceof ApiError ? e.message : "Something went wrong. Try again.";
+      setError(message);
+      if (!confirm) toast.error("That did not work", { description: message });
+      return false;
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const sync = () => void run("sync", () => api(`/accounts/${account.id}/sync`, { method: "POST" }), "Account synced");
+  const reconnect = () => void run("reconnect", () => api(`/brokers/${account.connection_id}/reconnect`, { method: "POST" }), "Reconnecting…");
+  const disconnect = async () => {
+    if (await run("disconnect", () => api(`/brokers/${account.connection_id}/disconnect`, { method: "POST" }), "Disconnected")) setConfirm(null);
+  };
+  const remove = async () => {
+    let archived = false;
+    const ok = await run("remove", async () => {
+      const res = await api<{ result: string }>(`/brokers/${account.connection_id}`, { method: "DELETE" });
+      archived = res?.result === "broker.archived";
+    }, "Broker removed");
+    if (ok) {
+      setConfirm(null);
+      if (archived) toast.info("Archived instead of deleted", { description: "This account has trading history, so it was kept (credentials deleted, trading off)." });
+    }
+  };
+
   const connected = account.connection_status === "CONNECTED";
+  const archived = !account.connection_enabled;
 
   return (
-    <article className={cn("flex min-w-0 flex-col rounded-xl border border-t-2 border-line bg-surface", ACCENT[account.environment])} aria-label={`${account.label} account`}>
-      <header className="flex items-start justify-between gap-3 px-5 pt-4">
-        <div className="min-w-0">
-          <p className="text-xs font-medium text-fg-subtle">{account.broker}</p>
-          <h3 className="truncate text-base font-semibold text-fg">{account.label}</h3>
-          <p className="num truncate text-xs text-fg-subtle">{account.broker_account_id}{account.server ? ` · ${account.server}` : ""}</p>
+    <Card role="article" aria-label={`${account.label} account`} aria-busy={busy !== null}
+      className={cn("h-full gap-0 border-t-2 py-0", ACCENT[account.environment])}>
+      <div className="flex items-start justify-between gap-3 px-5 pt-5">
+        <div className="flex min-w-0 items-center gap-3.5">
+          <span aria-hidden className={cn("flex size-12 shrink-0 items-center justify-center rounded-md text-lg font-extrabold text-white shadow-raised",
+            account.environment === "LIVE" ? "bg-[linear-gradient(160deg,#d6392e,#8a1a14)]" : account.environment === "DEMO" ? "bg-brand" : "bg-[linear-gradient(160deg,#3c3c40,#141416)]")}>
+            {account.label.slice(0, 1).toUpperCase()}
+          </span>
+          <div className="min-w-0">
+            <p className="text-xs font-semibold text-fg-subtle">{account.broker}</p>
+            <h3 className="truncate text-lg font-extrabold tracking-tight text-fg">{account.label}</h3>
+            <p className="mono-id truncate text-[11px] text-fg-subtle">{account.broker_account_id}{account.server ? ` · ${account.server}` : ""}</p>
+          </div>
         </div>
-        <div className="flex shrink-0 items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-1">
           <EnvBadge env={account.environment} />
-          {isOwner && (
-            <div className="relative">
-              <button type="button" onClick={() => setMenu((v) => !v)} className="rounded-md p-1 text-fg-muted hover:bg-surface-raised" aria-label="Account actions" aria-expanded={menu}>
-                <MoreHorizontal className="size-4" />
-              </button>
-              {menu && (
-                <div className="absolute right-0 z-20 mt-1 w-48 rounded-lg border border-line-strong bg-surface-raised p-1 shadow-xl shadow-black/40" onMouseLeave={() => setMenu(false)}>
-                  <MenuItem icon={RefreshCw} onClick={() => { setMenu(false); void post(`/accounts/${account.id}/sync`); }}>Sync now</MenuItem>
-                  {account.connection_enabled
-                    ? <MenuItem icon={Unplug} onClick={() => { setMenu(false); setConfirm("disconnect"); }}>Disconnect</MenuItem>
-                    : <MenuItem icon={PlugZap} onClick={() => { setMenu(false); void post(`/brokers/${account.connection_id}/reconnect`); }}>Reconnect</MenuItem>}
-                  <MenuItem icon={Trash2} danger onClick={() => { setMenu(false); setConfirm("remove"); }}>Remove</MenuItem>
-                </div>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon-sm" aria-label={`Actions for ${account.label}`} disabled={busy !== null}>
+                <MoreHorizontal aria-hidden />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-48">
+              <DropdownMenuItem onSelect={sync}><RefreshCw aria-hidden /> Sync now</DropdownMenuItem>
+              <DropdownMenuItem onSelect={reconnect}><PlugZap aria-hidden /> Reconnect</DropdownMenuItem>
+              {account.connection_enabled && (
+                <DropdownMenuItem onSelect={() => { setError(null); setConfirm("disconnect"); }}><Unplug aria-hidden /> Disconnect…</DropdownMenuItem>
               )}
-            </div>
-          )}
+              <DropdownMenuSeparator />
+              <DropdownMenuItem variant="destructive" onSelect={() => { setError(null); setConfirm("remove"); }}><Trash2 aria-hidden /> Remove…</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
-      </header>
-      <div className="px-5 pt-3">
+      </div>
+
+      <div className="space-y-1 px-5 pt-4" aria-live="polite">
         <ConnectionBadge status={account.connection_status} />
-        {!connected && account.connection_detail && <p className="mt-1 text-xs text-fg-subtle">{account.connection_detail}</p>}
+        {account.connection_detail && !connected && <p className="text-xs text-fg-muted">{account.connection_detail}</p>}
       </div>
-      <dl className="grid grid-cols-2 gap-x-4 gap-y-3 px-5 py-4 text-sm">
-        <Item label="Balance" value={formatMoney(account.balance)} />
-        <Item label="Equity" value={formatMoney(account.equity)} />
-        <Item label="Currency" value={account.currency} />
-        <Item label="Last sync" value={formatRelative(account.synced_at)} />
-        <div className="col-span-2">
-          <dt className="text-xs text-fg-subtle">Active strategy</dt>
-          <dd className="mt-0.5 truncate text-fg">{account.active_strategies.length ? account.active_strategies.join(", ") : <span className="text-fg-muted">None</span>}</dd>
-        </div>
+
+      <dl className="mx-5 my-4 grid grid-cols-2 gap-x-4 gap-y-3 rounded-md bg-surface-raised p-4 text-sm">
+        <Item label={<Term id="balance" />} value={<Money value={account.balance} currency={account.currency} />} />
+        <Item label={<Term id="equity" />} value={<Money value={account.equity} currency={account.currency} />} />
+        <Item label="Last sync" value={<span className="num">{formatRelative(account.synced_at)}</span>} />
+        <Item label="Trading" value={account.trading_enabled ? <Pill tone="positive">Enabled</Pill> : <Pill>Off</Pill>} />
       </dl>
-      <div className="mt-auto space-y-3 border-t border-line px-5 py-4">
-        <label className="block text-xs text-fg-subtle">
-          Risk profile
-          <Select className="mt-1" value={account.risk_profile?.id ?? ""} disabled={!isOwner || action.busy}
-            onChange={(e) => void patch({ risk_profile_id: e.target.value || null })}>
-            <option value="">— none (cannot trade) —</option>
-            {profiles.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </Select>
-        </label>
-        <Toggle
-          checked={account.trading_enabled}
-          disabled={!isOwner || action.busy}
-          onChange={(next) => void patch({ trading_enabled: next })}
-          label="Trading enabled"
-          description={account.trading_enabled ? "Strategies and manual tickets may trade (risk engine still decides)." : "Off: nothing can trade on this account."}
-        />
-        {account.capabilities?.pending_orders === false && <Badge tone="neutral">Market orders only</Badge>}
-        {action.error && <p role="alert" className="text-xs text-negative">{action.error}</p>}
+
+      <div className="mt-auto flex flex-wrap items-center gap-2 border-t border-line px-5 py-3.5">
+        <Button size="sm" variant="outline" onClick={sync} disabled={busy !== null}>
+          <RefreshCw aria-hidden className={cn(busy === "sync" && "motion-safe:animate-spin")} /> {busy === "sync" ? "Syncing…" : "Sync now"}
+        </Button>
+        {(!connected || archived) && (
+          <Button size="sm" variant="outline" onClick={reconnect} disabled={busy !== null}>
+            <PlugZap aria-hidden /> {busy === "reconnect" ? "Reconnecting…" : "Reconnect"}
+          </Button>
+        )}
+        {account.capabilities?.pending_orders === false && <Pill>Market orders only</Pill>}
       </div>
-      <ConfirmDialog open={confirm === "disconnect"} title={`Disconnect ${account.label}?`} confirmLabel="Disconnect" confirmVariant="danger" busy={action.busy} error={action.error}
-        onCancel={() => setConfirm(null)} onConfirm={() => void post(`/brokers/${account.connection_id}/disconnect`).then(() => setConfirm(null))}>
-        <p>The engine stops monitoring this account and trading on it is switched off. Open positions stay open at the broker.</p>
+      {error && !confirm && <p role="alert" className="px-5 pb-3 text-xs text-negative">{error}</p>}
+
+      <ConfirmDialog open={confirm === "disconnect"} onOpenChange={(o) => !o && setConfirm(null)} title={`Disconnect ${account.label}?`}
+        confirmLabel="Disconnect" destructive busy={busy === "disconnect"} error={error} onConfirm={() => void disconnect()}>
+        <p>The engine stops watching this account and trading on it is switched off. Open positions stay open at the broker. You can reconnect later.</p>
       </ConfirmDialog>
-      <ConfirmDialog open={confirm === "remove"} title={`Remove ${account.label}?`} confirmLabel="Remove" confirmVariant="danger" busy={action.busy} error={action.error}
-        onCancel={() => setConfirm(null)} onConfirm={() => void remove()}>
-        <p>Its stored credentials are deleted. If the account has trading history it is archived instead, so your journal and analytics stay complete.</p>
+      <ConfirmDialog open={confirm === "remove"} onOpenChange={(o) => !o && setConfirm(null)} title={`Remove ${account.label}?`}
+        confirmLabel="Remove" destructive busy={busy === "remove"} error={error} onConfirm={() => void remove()}>
+        <p>Its stored credentials are deleted. If the account has trading history it is archived instead of deleted, so your history and results stay complete.</p>
+        <p>Close any open positions on it first.</p>
       </ConfirmDialog>
-    </article>
+    </Card>
   );
 }
 
-function Item({ label, value }: { label: string; value: string }) {
+function Item({ label, value }: { label: React.ReactNode; value: React.ReactNode }) {
   return (
     <div className="min-w-0">
-      <dt className="text-xs text-fg-subtle">{label}</dt>
-      <dd className="num mt-0.5 truncate text-fg">{value}</dd>
+      <dt className="text-xs font-semibold text-fg-subtle">{label}</dt>
+      <dd className="mt-0.5 truncate font-bold text-fg">{value}</dd>
     </div>
-  );
-}
-
-function MenuItem({ icon: Icon, onClick, children, danger }: { icon: typeof RefreshCw; onClick: () => void; children: React.ReactNode; danger?: boolean }) {
-  return (
-    <button type="button" onClick={onClick} className={cn("flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-surface-hover", danger ? "text-negative" : "text-fg-muted hover:text-fg")}>
-      <Icon className="size-4" aria-hidden /> {children}
-    </button>
   );
 }

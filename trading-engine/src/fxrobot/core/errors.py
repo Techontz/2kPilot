@@ -10,9 +10,12 @@ class AppError(Exception):
     status_code: int = status.BAD_REQUEST
     code: str = "bad_request"
 
-    def __init__(self, message: str, *, code: str | None = None) -> None:
+    def __init__(
+        self, message: str, *, code: str | None = None, details: object | None = None
+    ) -> None:
         super().__init__(message)
         self.message = message
+        self.details = details  # optional structured detail, e.g. a list of problems
         if code:
             self.code = code
 
@@ -45,3 +48,13 @@ class UnprocessableError(AppError):
 class BrokerUnavailableError(AppError):
     status_code = status.BAD_GATEWAY
     code = "broker_unavailable"
+
+
+class ServiceUnavailableError(AppError):
+    status_code = status.SERVICE_UNAVAILABLE
+    code = "service_unavailable"
+
+
+class UpstreamError(AppError):
+    status_code = status.BAD_GATEWAY
+    code = "upstream_error"

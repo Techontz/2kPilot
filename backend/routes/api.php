@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\AccountController;
+use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\AnalyticsController;
 use App\Http\Controllers\Api\AuditController;
 use App\Http\Controllers\Api\AuthController;
@@ -15,26 +16,42 @@ use App\Http\Controllers\Api\PositionController;
 use App\Http\Controllers\Api\RecordsController;
 use App\Http\Controllers\Api\RiskController;
 use App\Http\Controllers\Api\StrategyController;
+use App\Http\Controllers\Api\StreamController;
 use App\Http\Controllers\Api\SystemController;
 use App\Http\Controllers\Api\TradeController;
 use App\Http\Controllers\Api\TradingController;
 use Illuminate\Support\Facades\Route;
 
 /*
-| 2kFX REST API — consumed by the Next.js dashboard through same-origin
+| 2kPilot REST API — consumed by the Next.js dashboard through same-origin
 | cookie sessions (Sanctum SPA). Every route below "auth:sanctum" needs a
-| logged-in, active user; writes are further checked by policies (owner only).
+| logged-in, active user. Every user works on their OWN records only: indexes
+| are scoped to the user, and policies check ownership of every bound record.
+| Admin routes (platform halt) are gated by "operate-platform".
 */
 
 Route::prefix('auth')->group(function () {
+    Route::post('register', [AuthController::class, 'register'])->middleware('throttle:register');
     Route::post('login', [AuthController::class, 'login'])->middleware('throttle:login');
     Route::post('mfa', [AuthController::class, 'challenge'])->middleware('throttle:mfa');
     Route::post('logout', [AuthController::class, 'logout'])->middleware('auth:sanctum');
 });
 
-// Deriv sends the browser back here after "Sign in with Deriv".
-Route::get('brokers/deriv/oauth/callback', [BrokerController::class, 'derivOAuthCallback'])
-    ->middleware(['auth:sanctum', 'active']);
+// The "Sign in with Deriv" return URL (GET api/brokers/deriv/oauth/callback) lives in
+// routes/web.php: it is a full-page redirect from Deriv, not a dashboard API call.
+
+// Live updates (Server-Sent Events). Outside "throttle:api": each open tab
+// keeps one connection and reconnects about once a minute.
+Route::get('stream', [StreamController::class, 'show'])
+    ->middleware(['auth:sanctum', 'active', 'mfa.enrolled', 'throttle:stream']);
+
+// STOP TRADING and Close positions: outside "throttle:api" on their own
+// generous per-user budget, so heavy polling can never block them. Stop does
+// not wait for MFA enrolment either: stopping is always safe.
+Route::middleware(['auth:sanctum', 'active', 'throttle:trading-stop'])->group(function () {
+    Route::post('trading/stop', [TradingController::class, 'stop']);
+    Route::post('trading/close-positions', [TradingController::class, 'closePositions'])->middleware('mfa.enrolled');
+});
 
 Route::middleware(['auth:sanctum', 'active', 'throttle:api'])->group(function () {
     Route::get('auth/me', [AuthController::class, 'me']);
@@ -47,16 +64,16 @@ Route::middleware(['auth:sanctum', 'active', 'throttle:api'])->group(function ()
         Route::post('recovery-codes', [MfaController::class, 'recoveryCodes']);
     });
 
+    Route::put('auth/password', [AuthController::class, 'changePassword'])->middleware('throttle:password');
+
     Route::middleware('mfa.enrolled')->group(function () {
         Route::get('system/status', [SystemController::class, 'status']);
         Route::get('overview', [OverviewController::class, 'show']);
 
-        // Global controls: STOP TRADING is always one click away.
+        // The user's own controls (STOP TRADING and Close positions are above).
         Route::get('trading/status', [TradingController::class, 'status']);
-        Route::post('trading/stop', [TradingController::class, 'stop']);
         Route::post('trading/resume', [TradingController::class, 'resume']);
         Route::put('trading/mode', [TradingController::class, 'mode']);
-        Route::post('trading/close-positions', [TradingController::class, 'closePositions'])->middleware('throttle:trading');
 
         // Broker Center
         Route::get('brokers/connectors', [BrokerController::class, 'connectors']);
@@ -80,6 +97,7 @@ Route::middleware(['auth:sanctum', 'active', 'throttle:api'])->group(function ()
         Route::get('markets/instruments', [MarketController::class, 'instruments']);
         Route::get('markets/quotes', [MarketController::class, 'quotes']);
         Route::get('markets/session', [MarketController::class, 'session']);
+        Route::get('markets/contracts', [MarketController::class, 'contracts']);
         Route::get('markets/instruments/{symbol}', [MarketController::class, 'instrument']);
 
         // Trade (manual tickets always pass the risk engine)
@@ -91,6 +109,7 @@ Route::middleware(['auth:sanctum', 'active', 'throttle:api'])->group(function ()
         });
         Route::get('positions', [PositionController::class, 'index']);
         Route::get('orders', [RecordsController::class, 'orders']);
+        Route::get('history/export', [RecordsController::class, 'export']);
         Route::get('history', [RecordsController::class, 'history']);
         Route::get('trades/{trade}', [RecordsController::class, 'trade']);
         Route::get('journal', [RecordsController::class, 'journal']);
@@ -98,11 +117,22 @@ Route::middleware(['auth:sanctum', 'active', 'throttle:api'])->group(function ()
 
         // Strategies
         Route::get('strategies', [StrategyController::class, 'index']);
+        Route::get('strategies/catalog', [StrategyController::class, 'catalog']);
+        Route::post('strategies', [StrategyController::class, 'store']);
+        Route::post('strategies/import', [StrategyController::class, 'import']);
+        Route::post('strategies/draft', [StrategyController::class, 'draft'])->middleware('throttle:strategy-draft');
+        Route::patch('strategies/{strategy}', [StrategyController::class, 'update']);
+        Route::delete('strategies/{strategy}', [StrategyController::class, 'destroy']);
+        Route::get('strategies/{strategy}/export', [StrategyController::class, 'export']);
+        Route::post('strategies/{strategy}/copy', [StrategyController::class, 'copy']);
         Route::post('strategies/{strategy}/versions', [StrategyController::class, 'storeVersion']);
+        Route::post('strategies/{strategy}/activate', [StrategyController::class, 'activate'])->middleware('throttle:trading');
+        Route::post('strategies/{strategy}/deactivate', [StrategyController::class, 'deactivate']);
         Route::post('assignments', [StrategyController::class, 'assign']);
         Route::post('assignments/{assignment}/enable', [StrategyController::class, 'enable']);
         Route::post('assignments/{assignment}/pause', [StrategyController::class, 'pause']);
         Route::put('assignments/{assignment}/version', [StrategyController::class, 'switchVersion']);
+        Route::put('assignments/{assignment}/contract', [StrategyController::class, 'updateContract']);
         Route::delete('assignments/{assignment}', [StrategyController::class, 'unassign']);
         Route::get('assignments/{assignment}/evaluations', [StrategyController::class, 'evaluations']);
 
@@ -115,7 +145,7 @@ Route::middleware(['auth:sanctum', 'active', 'throttle:api'])->group(function ()
         Route::get('datasets', [DatasetController::class, 'index']);
         Route::post('datasets/synthetic', [DatasetController::class, 'synthetic']);
         Route::post('datasets/import', [DatasetController::class, 'import']);
-        Route::post('datasets/download', [DatasetController::class, 'download']);
+        Route::post('datasets/download', [DatasetController::class, 'download'])->middleware('throttle:broker');
         Route::delete('datasets/{dataset}', [DatasetController::class, 'destroy']);
 
         // Risk
@@ -131,5 +161,11 @@ Route::middleware(['auth:sanctum', 'active', 'throttle:api'])->group(function ()
         Route::get('notifications/unread-count', [NotificationController::class, 'unreadCount']);
         Route::post('notifications/read', [NotificationController::class, 'markRead']);
         Route::get('audit', [AuditController::class, 'index']);
+
+        // Platform operations (admins only)
+        Route::prefix('admin')->middleware('throttle:trading')->group(function () {
+            Route::post('halt', [AdminController::class, 'halt']);
+            Route::post('resume', [AdminController::class, 'resume']);
+        });
     });
 });

@@ -10,7 +10,7 @@ class MfaTest extends TestCase
 {
     public function test_enrolment_needs_the_password_and_a_valid_code(): void
     {
-        $user = $this->owner();
+        $user = $this->me();
         $this->actingAs($user)->postJson('/api/auth/mfa/setup', ['password' => 'wrong'])->assertStatus(422);
 
         $setup = $this->actingAs($user)->postJson('/api/auth/mfa/setup', ['password' => UserFactory::PASSWORD])
@@ -33,7 +33,7 @@ class MfaTest extends TestCase
 
     public function test_turning_mfa_off_needs_password_and_code(): void
     {
-        $user = $this->owner();
+        $user = $this->me();
         $secret = $this->actingAs($user)->postJson('/api/auth/mfa/setup', ['password' => UserFactory::PASSWORD])->json('secret');
         $this->postJson('/api/auth/mfa/confirm', ['code' => (new Google2FA)->getCurrentOtp($secret)]);
         cache()->flush();
@@ -46,8 +46,8 @@ class MfaTest extends TestCase
 
     public function test_required_mfa_blocks_the_dashboard_until_enrolled(): void
     {
-        config(['fx.mfa.required' => true]);
-        $user = $this->owner();
+        config(['tradepilot.mfa.required' => true]);
+        $user = $this->me();
         $this->actingAs($user)->getJson('/api/overview')->assertForbidden()->assertJsonPath('code', 'mfa_enrollment_required');
         $this->getJson('/api/auth/me')->assertOk()->assertJsonPath('user.mfa_required', true);
         $this->postJson('/api/auth/mfa/setup', ['password' => UserFactory::PASSWORD])->assertOk();

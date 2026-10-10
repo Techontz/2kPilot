@@ -42,6 +42,7 @@ from fxrobot.strategy_engine.base import (
     Strategy,
 )
 from fxrobot.strategy_engine.trend_pullback import TrendPullbackV1
+from tests import factories
 from tests.conftest import SignedClient
 
 SPEC = DEFAULT_SPECS["EURUSD"]
@@ -853,8 +854,14 @@ def trades_of(db: Session, backtest_id: str) -> list[dict[str, Any]]:
     ]
 
 
+def _owner(api: SignedClient) -> str:
+    with api.app.state.session_factory() as db:  # type: ignore[attr-defined]
+        return str(factories.ensure_user(db))
+
+
 def submit(api: SignedClient, ds: dict[str, Any], **body: Any) -> dict[str, Any]:
     payload = {
+        "actor_id": _owner(api),
         "strategy_key": "trend_pullback",
         "initial_capital": "10000",
         "dataset_id": ds["id"],
@@ -1006,6 +1013,7 @@ def _error(api: SignedClient, ds_id: str, **body: Any) -> tuple[int, str]:
         **body,
     }
     payload.setdefault("strategy_key", "trend_pullback")
+    payload.setdefault("actor_id", _owner(api))
     payload.setdefault("initial_capital", "10000")
     response = api.post("/internal/backtests", json=payload)
     return response.status_code, response.text
@@ -1088,3 +1096,37 @@ def test_walk_forward_range_too_short_fails(api: SignedClient, dataset: dict[str
     )
     assert result["status"] == "FAILED"
     assert "too short" in result["error"]
+
+
+def test_practice_data_for_one_and_five_minute_candles(api: SignedClient, db: Session) -> None:
+    """M1/M5 practice datasets come from the Paper feed (same seed → same prices),
+    with a capped period so they stay a sensible size."""
+    from fxrobot.market_data.synthetic_feed import SyntheticFeed
+
+    made = api.post(
+        "/internal/datasets/synthetic",
+        json={"symbol": "EURUSD", "timeframe": "M5", "days": 30, "seed": 42},
+    )
+    assert made.status_code == 200, made.text
+    row = db.get(Dataset, uuid.UUID(made.json()["id"]))
+    assert row is not None and row.timeframe is Timeframe.M5 and row.source is DataSource.SYNTHETIC
+    assert row.first_bar is not None and row.last_bar is not None
+    bars = store.load_candles(db, row.id)
+    assert 30 * 288 * 5 / 7 * 0.9 < len(bars) <= 30 * 288
+    assert all(b.time.minute % 5 == 0 for b in bars)
+    start, end = bars[0].time, bars[-1].time + Timeframe.M5.delta
+    assert bars == SyntheticFeed(DEFAULT_SPECS["EURUSD"], 42).bars(Timeframe.M5, start, end)
+
+    one_minute = api.post(
+        "/internal/datasets/synthetic",
+        json={"symbol": "R_75", "timeframe": "M1", "days": 30, "seed": 1},
+    )
+    assert one_minute.status_code == 200, one_minute.text
+    assert one_minute.json()["bars"] == 30 * 1440  # a 24/7 index: every minute
+
+    too_long = api.post(
+        "/internal/datasets/synthetic",
+        json={"symbol": "EURUSD", "timeframe": "M1", "days": 90, "seed": 1},
+    )
+    assert too_long.status_code == 422
+    assert "between 30 and 60 for M1" in too_long.text

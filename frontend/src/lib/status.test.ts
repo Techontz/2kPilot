@@ -8,6 +8,11 @@ describe("deriveRobotStatus", () => {
     expect(robot).toMatchObject({ label: "Trading stopped", tone: "warning", detail: "news", running: false });
   });
 
+  it("reports a platform halt above everything else", () => {
+    const robot = deriveRobotStatus(tradingStatus({ kill_switch_engaged: false, engine_state: "running", platform_halted: true, platform_halt_reason: "maintenance" }));
+    expect(robot).toMatchObject({ label: "Halted by admin", tone: "negative", detail: "maintenance", running: false });
+  });
+
   it("reports LIVE + hard lock as blocked even when the kill switch is released", () => {
     const robot = deriveRobotStatus(tradingStatus({ kill_switch_engaged: false, trading_mode: "LIVE" }));
     expect(robot.label).toBe("Blocked");

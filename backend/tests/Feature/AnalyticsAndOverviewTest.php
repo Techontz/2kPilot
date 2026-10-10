@@ -17,7 +17,7 @@ class AnalyticsAndOverviewTest extends TestCase
         $demo = $this->account(['label' => 'Deriv demo'], ConnectorType::Deriv);
         $this->closedTrade($paper, 100);
         $this->closedTrade($demo, -40);
-        $viewer = $this->viewer();
+        $viewer = $this->me();
 
         $paperReport = $this->actingAs($viewer)->getJson('/api/analytics/performance?environment=PAPER')->assertOk();
         $paperReport->assertJsonPath('net_pnl', 100)->assertJsonPath('trades', 1)->assertJsonPath('simulated', true)
@@ -29,7 +29,7 @@ class AnalyticsAndOverviewTest extends TestCase
 
     public function test_analytics_without_data_is_an_empty_state(): void
     {
-        $this->actingAs($this->owner())->getJson('/api/analytics/performance?environment=LIVE')
+        $this->actingAs($this->me())->getJson('/api/analytics/performance?environment=LIVE')
             ->assertOk()->assertJsonPath('has_data', false);
     }
 
@@ -41,7 +41,7 @@ class AnalyticsAndOverviewTest extends TestCase
         $this->closedTrade($account, 50, '-1 hour');
         $this->closedTrade($account, -10, '-3 days');
         $this->openTrade($account);
-        $body = $this->actingAs($this->owner())->getJson("/api/overview?account_id={$account->id}")->assertOk()->json();
+        $body = $this->actingAs($this->me())->getJson("/api/overview?account_id={$account->id}")->assertOk()->json();
         $this->assertSame('PAPER', $body['account']['environment']);
         $this->assertSame('Paper Trading', $body['account']['broker']);
         $this->assertEquals(50, $body['figures']['today_pnl']);
@@ -57,7 +57,7 @@ class AnalyticsAndOverviewTest extends TestCase
 
     public function test_overview_without_accounts_and_missing_profile_alert(): void
     {
-        $owner = $this->owner();
+        $owner = $this->me();
         $this->actingAs($owner)->getJson('/api/overview')->assertOk()->assertJsonPath('account', null);
         $account = $this->account(['environment' => AccountEnvironment::Paper]);
         $alerts = $this->getJson('/api/overview')->json('alerts');

@@ -14,7 +14,7 @@ use Illuminate\Support\Str;
  */
 class GenerateKeys extends Command
 {
-    protected $signature = 'fx:keys {--engine-env= : Path to trading-engine/.env} {--force : Replace existing values}';
+    protected $signature = 'tp:keys {--engine-env= : Path to trading-engine/.env} {--force : Replace existing values}';
 
     protected $description = 'Generate BROKER_CREDENTIALS_KEY and ENGINE_API_SECRET for backend and trading engine';
 

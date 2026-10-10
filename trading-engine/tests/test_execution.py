@@ -334,7 +334,7 @@ def test_insufficient_margin_rejection_keeps_specific_code(env: Env) -> None:
 
 def test_market_closed_rejection(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
     signal = make_signal(env)
-    monkeypatch.setattr(env.broker.market, "is_open", lambda: False)
+    monkeypatch.setattr(env.broker.market, "is_open", lambda *_: False)
     order = submit(env, signal)
     assert order.status is OrderStatus.REJECTED
     assert order.broker_code == "market_closed"

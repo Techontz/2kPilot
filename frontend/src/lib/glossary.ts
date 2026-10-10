@@ -55,7 +55,7 @@ export const GLOSSARY = {
   stopLoss: {
     term: "Stop Loss",
     definition: "A price at which a losing trade is closed automatically to cap the loss.",
-    why: "2kFX refuses any trade without a stop loss.",
+    why: "2kPilot refuses any trade without a stop loss.",
   },
   takeProfit: {
     term: "Take Profit",
@@ -72,7 +72,7 @@ export const GLOSSARY = {
   },
   killSwitch: {
     term: "Kill Switch",
-    definition: "The STOP ALL TRADING control. It immediately blocks every new order and pauses automated strategies.",
+    definition: "Your STOP TRADING control. It immediately blocks every new order on your accounts and pauses your automated strategies. Other users are not affected.",
     why: "It does not close trades that are already open — that is a separate, deliberate action.",
   },
   demoAccount: {
@@ -95,6 +95,48 @@ export const GLOSSARY = {
   pnl: {
     term: "P/L",
     definition: "Profit and loss. Positive means profit, negative means loss.",
+  },
+  realizedPnl: {
+    term: "Realized P/L",
+    definition: "Profit or loss from trades that have finished. Open trades are not counted until they close.",
+  },
+  stake: {
+    term: "Stake",
+    definition: "The amount you pay for one contract. For Rise/Fall and Multipliers it is the most a single trade can lose.",
+  },
+  payout: {
+    term: "Payout",
+    definition: "What a winning Rise/Fall contract pays back, including your stake. The broker quotes it before each trade, so it changes.",
+  },
+  riseFall: {
+    term: "Rise/Fall",
+    definition: "A contract on direction: Rise wins if the price is higher when it expires, Fall wins if it is lower. Equal prices lose.",
+    why: "It always runs until it expires — it cannot be closed early.",
+  },
+  multiplier: {
+    term: "Multiplier",
+    definition: "A contract whose profit or loss is the price move multiplied by a number (e.g. ×100). It stays open until it is closed, and can never lose more than the stake.",
+  },
+  expiry: {
+    term: "Expiry",
+    definition: "When a Rise/Fall contract ends and is settled automatically.",
+  },
+  winRate: {
+    term: "Win rate",
+    definition: "The share of finished trades that made money.",
+    why: "A high win rate alone does not mean a strategy makes money — the size of wins and losses matters too.",
+  },
+  losingStreak: {
+    term: "Longest losing streak",
+    definition: "The most losing trades in a row. Expect at least this many in a row in the future too.",
+  },
+  demoMode: {
+    term: "Demo mode",
+    definition: "The bot may only trade Paper and demo accounts — virtual money. Real-money (LIVE) accounts are never touched.",
+  },
+  backtestPayoutEstimate: {
+    term: "Payout estimate",
+    definition: "Profit per 1 of stake on a winning Rise/Fall in the test. Real payouts change with every price quote, so the test can only estimate them.",
   },
 } satisfies Record<string, GlossaryEntry>;
 

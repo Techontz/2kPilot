@@ -15,7 +15,7 @@ use Illuminate\Support\Facades\Cache;
  */
 class EngineWatchdog extends Command
 {
-    protected $signature = 'fx:engine-watchdog';
+    protected $signature = 'tp:engine-watchdog';
 
     protected $description = 'Notify when the trading engine goes offline or comes back';
 
@@ -23,14 +23,14 @@ class EngineWatchdog extends Command
     {
         $state = SystemState::current();
         [$engine, $detail] = $control->engineState($state);
-        $wasOffline = Cache::get('fx.engine_offline', false);
+        $wasOffline = Cache::get('tp.engine_offline', false);
         if ($engine === EngineState::Offline && ! $wasOffline && $state->engine_heartbeat_at !== null) {
-            $notifier->notify('system.engine_offline', "The trading engine stopped responding. {$detail} No automated trading happens until it is back.");
-            Cache::forever('fx.engine_offline', true);
+            $notifier->notify('system.engine_offline', "The trading engine stopped responding. {$detail} No automated trading happens until it is back.", null);
+            Cache::forever('tp.engine_offline', true);
             $this->warn('engine offline — notified');
         } elseif ($engine !== EngineState::Offline && $wasOffline) {
-            $notifier->notify('system.engine_online', 'The trading engine is running again.');
-            Cache::forget('fx.engine_offline');
+            $notifier->notify('system.engine_online', 'The trading engine is running again.', null);
+            Cache::forget('tp.engine_offline');
             $this->info('engine back online — notified');
         }
 

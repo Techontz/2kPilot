@@ -15,6 +15,7 @@ return new class extends Migration
     {
         Schema::create('backtests', function (Blueprint $table) {
             $table->uuid('id')->primary();
+            $table->foreignUuid('user_id')->constrained('users')->cascadeOnDelete();
             $table->foreignUuid('parent_id')->nullable()->constrained('backtests')->cascadeOnDelete();
             $table->string('kind', 24);
             $table->string('name', 200)->default('');
@@ -34,7 +35,7 @@ return new class extends Migration
             $table->string('account_currency', 8);
             $table->json('risk_settings');
             $table->json('costs');                 // spread, commission, slippage, swap
-            $table->json('config');                // split / walk-forward / grid settings
+            $table->json('config');                // split / walk-forward / grid settings, contract, payout_ratio, commission_pct
             $table->unsignedInteger('progress')->default(0);
             $table->text('error')->nullable();
             $table->json('metrics')->nullable();
@@ -42,9 +43,8 @@ return new class extends Migration
             $table->dateTime('created_at', 6)->useCurrent();
             $table->dateTime('started_at', 6)->nullable();
             $table->dateTime('finished_at', 6)->nullable();
-            $table->foreignUuid('created_by')->nullable()->constrained('users')->nullOnDelete();
 
-            $table->index('created_at', 'ix_backtests_created');
+            $table->index(['user_id', 'created_at'], 'ix_backtests_user_created');
         });
         DB::statement("ALTER TABLE backtests ADD CONSTRAINT ck_backtests_status CHECK (status IN ('QUEUED','RUNNING','COMPLETED','FAILED'))");
 
@@ -60,9 +60,13 @@ return new class extends Migration
             $table->decimal('exit_price', 24, 10);
             $table->string('exit_reason', 16);
             $table->decimal('volume', 16, 4);
-            $table->decimal('stop_loss', 24, 10);
+            $table->decimal('stop_loss', 24, 10)->nullable();     // NULL for Rise/Fall contracts
             $table->decimal('take_profit', 24, 10)->nullable();
             $table->decimal('risk_amount', 20, 6);
+            $table->string('contract_type', 8)->nullable();        // NULL = SPOT
+            $table->decimal('stake', 20, 6)->nullable();
+            $table->decimal('payout', 20, 6)->nullable();          // Rise/Fall: stake × (1 + payout ratio), an ESTIMATE
+            $table->string('outcome', 10)->nullable();             // WON | LOST | SOLD
             $table->decimal('gross_pnl', 20, 6);
             $table->decimal('costs', 20, 6);
             $table->decimal('net_pnl', 20, 6);

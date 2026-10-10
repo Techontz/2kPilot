@@ -8,7 +8,7 @@ use Illuminate\Support\Facades\Schedule;
 | the supervision and housekeeping around it.
 */
 
-Schedule::command('fx:engine-watchdog')->everyMinute()->withoutOverlapping();
-Schedule::command('fx:daily-summary')->dailyAt('21:05')->timezone('UTC');
-Schedule::command('fx:prune')->dailyAt('03:30')->timezone('UTC');
+Schedule::command('tp:engine-watchdog')->everyMinute()->withoutOverlapping();
+Schedule::command('tp:daily-summary')->dailyAt('21:05')->timezone('UTC');
+Schedule::command('tp:prune')->dailyAt('03:30')->timezone('UTC');
 Schedule::command('queue:prune-failed --hours=720')->weekly();

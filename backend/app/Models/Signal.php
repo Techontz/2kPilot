@@ -2,13 +2,17 @@
 
 namespace App\Models;
 
+use App\Models\Concerns\BelongsToAccount;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-/** A trade intention (strategy or manual) and the risk engine's decision. */
+/**
+ * A trade intention (strategy or manual) and the risk engine's decision.
+ * stop_loss is NULL for Rise/Fall contracts (the stake is the most they lose).
+ */
 class Signal extends BaseModel
 {
-    use HasUuids;
+    use BelongsToAccount, HasUuids;
 
     const UPDATED_AT = null;
 

@@ -20,7 +20,7 @@ from fxrobot.models.strategy import (
 )
 from fxrobot.models.system import SystemSetting, SystemState
 from fxrobot.models.trading import Order, Signal, Trade, TradeEvent
-from fxrobot.models.user import User
+from fxrobot.models.user import User, UserTradingState
 
 __all__ = [
     "AccountSnapshot",
@@ -47,4 +47,5 @@ __all__ = [
     "TradeEvent",
     "TradingAccount",
     "User",
+    "UserTradingState",
 ]

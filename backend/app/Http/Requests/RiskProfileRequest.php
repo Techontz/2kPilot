@@ -11,7 +11,9 @@ use Illuminate\Validation\Validator;
  * Risk limits — the same rules the trading engine enforces in
  * trading-engine/src/fxrobot/risk_engine/limits.py (RiskLimits.validate).
  * An empty optional field means "this limit is off"; risk per trade, the
- * allowed sessions and the data-age limit are mandatory.
+ * allowed sessions, the data-age limit and the contract stake are mandatory.
+ * Pip/lot limits apply to SPOT trades; the stake limits (account currency)
+ * to Deriv contracts (Rise/Fall, Multipliers).
  */
 class RiskProfileRequest extends FormRequest
 {
@@ -30,7 +32,9 @@ class RiskProfileRequest extends FormRequest
         $count = ['nullable', 'integer', 'min:1', 'max:100000'];
 
         return [
-            'name' => ['required', 'string', 'max:120', Rule::unique('risk_profiles', 'name')->ignore($this->route('profile'))],
+            // Names are unique per user.
+            'name' => ['required', 'string', 'max:120', Rule::unique('risk_profiles', 'name')
+                ->where('user_id', $this->route('profile')?->user_id ?? $this->user()->id)->ignore($this->route('profile'))],
             'risk_per_trade_pct' => ['required', 'numeric', 'min:0.01', 'max:5'],
             'max_position_lots' => $lots,
             'max_open_positions' => $count,
@@ -54,6 +58,11 @@ class RiskProfileRequest extends FormRequest
             'cooldown_after_losses' => $count,
             'cooldown_minutes' => $count,
             'max_data_age_seconds' => ['required', 'integer', 'min:1', 'max:86400'],
+            'stake_amount' => ['required', 'numeric', 'gt:0', 'max:100000'],
+            'max_stake_amount' => ['nullable', 'numeric', 'gt:0', 'max:100000'],
+            'max_daily_loss_amount' => ['nullable', 'numeric', 'gt:0', 'max:100000000'],
+            'max_consecutive_losses' => $count,
+            'daily_profit_target_amount' => ['nullable', 'numeric', 'gt:0', 'max:100000000'],
         ];
     }
 
@@ -67,6 +76,11 @@ class RiskProfileRequest extends FormRequest
             }
             if (($this->input('cooldown_after_losses') === null) !== ($this->input('cooldown_minutes') === null)) {
                 $validator->errors()->add('cooldown_minutes', 'Set both the losses and the minutes for a cooldown, or neither.');
+            }
+            $stake = $this->input('stake_amount');
+            $maxStake = $this->input('max_stake_amount');
+            if (is_numeric($stake) && is_numeric($maxStake) && (float) $stake > (float) $maxStake) {
+                $validator->errors()->add('stake_amount', 'The stake per trade cannot be larger than the maximum stake.');
             }
         }];
     }

@@ -3,13 +3,16 @@
 namespace App\Models;
 
 use App\Enums\AccountEnvironment;
+use App\Enums\ConnectorType;
+use App\Models\Concerns\BelongsToUser;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
+/** A broker account. `user_id` is the connection owner (denormalised: queried constantly). */
 class TradingAccount extends BaseModel
 {
-    use HasUuids;
+    use BelongsToUser, HasUuids;
 
     protected function casts(): array
     {
@@ -44,6 +47,13 @@ class TradingAccount extends BaseModel
     public function snapshots(): HasMany
     {
         return $this->hasMany(AccountSnapshot::class, 'account_id');
+    }
+
+    /** Deriv accounts trade Options contracts (Rise/Fall, Multipliers), never spot lots. */
+    public function isDeriv(): bool
+    {
+        // getRelationValue: $this->connection is Eloquent's DB connection name.
+        return $this->getRelationValue('connection')?->connector_type === ConnectorType::Deriv;
     }
 
     public function isPaper(): bool
