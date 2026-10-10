@@ -32,7 +32,7 @@ export async function exportStrategy(strategy: { id: string; name: string }): Pr
       headers: { Accept: "application/json", "X-Requested-With": "XMLHttpRequest" },
     });
   } catch {
-    throw new ApiError(0, "network_error", "Cannot reach the 2kPilot server. Check that it is running (make dev).");
+    throw new ApiError(0, "network_error", "Cannot reach the 2kPilot server. Check your connection and try again.");
   }
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as { message?: string; code?: string } | null;

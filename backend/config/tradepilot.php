@@ -33,6 +33,10 @@ return [
         'timeout' => (int) env('ENGINE_TIMEOUT_SECONDS', 30),
         // The engine is "offline" if it has not written a heartbeat for this long.
         'heartbeat_freshness_seconds' => 30,
+        // The signed /internal/health check behind the dashboard's "engine online?"
+        // display: cached this long (shared by all users), with a short timeout.
+        'health_cache_seconds' => (int) env('ENGINE_HEALTH_CACHE_SECONDS', 10),
+        'health_timeout_seconds' => (int) env('ENGINE_HEALTH_TIMEOUT_SECONDS', 3),
         // Plain-English drafting waits for the AI (the engine allows 60 s per call, one repair round).
         'draft_timeout' => (int) env('ENGINE_DRAFT_TIMEOUT_SECONDS', 300),
     ],

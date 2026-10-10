@@ -6,6 +6,7 @@ use App\Enums\EngineState;
 use App\Enums\TradingMode;
 use App\Models\SystemState;
 use App\Models\UserTradingState;
+use App\Services\Engine\EngineHealth;
 
 /**
  * A snapshot of one user's controls plus the platform's, answering "may
@@ -19,6 +20,9 @@ final class TradingStatus
         public readonly bool $liveLocked,
         public readonly EngineState $engine,
         public readonly string $engineDetail,
+        /** The engine's HTTP service health (EngineHealth::service()); null = not checked yet. */
+        public readonly ?array $engineService = null,
+        public readonly int $heartbeatFreshSeconds = 30,
     ) {}
 
     public function newOrdersPermitted(): bool
@@ -55,6 +59,10 @@ final class TradingStatus
             'engine_detail' => $this->engineDetail,
             'engine_heartbeat_at' => $p->engine_heartbeat_at?->toIso8601String(),
             'new_orders_permitted' => $this->newOrdersPermitted(),
+            // Display-only health, separate from the permission above (additive fields).
+            'engine_service' => $this->engineService,
+            'engine_supervisor' => $supervisor = EngineHealth::supervisor($this->engineService, $p, $this->heartbeatFreshSeconds),
+            'engine_summary' => EngineHealth::summary($this->engineService, $supervisor),
         ];
     }
 }

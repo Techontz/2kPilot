@@ -15,7 +15,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ApiError } from "@/lib/api";
-import { deriveRobotStatus, MODE_INFO } from "@/lib/status";
+import { deriveRobotStatus, MODE_INFO, engineHealthView } from "@/lib/status";
 import { resumeTrading, stopTrading } from "@/lib/tradingActions";
 import type { TradingStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -125,7 +125,7 @@ export function TradingControlProvider({ children }: { children: ReactNode }) {
                     Every trade still passes your risk limits. It keeps running on the server after you close this page, until you press Stop.
                   </p>
                 )}
-                {shown?.engine_state === "offline" && <p className="text-warning">The trading engine is offline, so nothing will trade until it is running again.</p>}
+                {shown && !engineHealthView(shown).active && <p className="text-warning">{engineHealthView(shown).label}: {engineHealthView(shown).message}</p>}
                 {shown?.platform_halted && <p className="text-warning">An administrator has paused trading for everyone. Nothing will trade until it is resumed.</p>}
                 {startError && <p role="alert" className="text-negative">{startError}</p>}
               </div>

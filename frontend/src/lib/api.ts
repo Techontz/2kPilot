@@ -90,7 +90,7 @@ export async function api<T>(path: string, options: Options = {}): Promise<T> {
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") throw error;
-    throw new ApiError(0, "network_error", "Cannot reach the 2kPilot server. Check that it is running (make dev).");
+    throw new ApiError(0, "network_error", "Cannot reach the 2kPilot server. Check your connection and try again.");
   }
   if (response.status === 204) return undefined as T;
   const payload = (await response.json().catch(() => null)) as

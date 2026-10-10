@@ -27,13 +27,19 @@ class SystemController extends Controller
         } catch (EngineException|\RuntimeException $e) {
             $engine = ['status' => 'unreachable', 'detail' => $e->getMessage()];
         }
+        $trading = $this->control->status($request->user(), probeEngine: true)->toArray();
 
         return response()->json([
             'app' => config('app.name'),
             'environment' => app()->environment(),
             'database' => DB::connection()->getDatabaseName() ? 'ok' : 'error',
-            'trading' => $this->control->status($request->user())->toArray(),
+            'trading' => $trading,
             'engine' => $engine,
+            // Additive: the engine's API health kept apart from its trading supervisor
+            // and from trading permission (`trading.new_orders_permitted`).
+            'engine_service' => $trading['engine_service'],
+            'engine_supervisor' => $trading['engine_supervisor'],
+            'engine_summary' => $trading['engine_summary'],
             'live_trading_enabled' => (bool) config('tradepilot.live_trading_enabled'),
             'broker_vault_configured' => $this->vault->configured(),
             'deriv_app_id_configured' => (bool) config('tradepilot.deriv.app_id'),

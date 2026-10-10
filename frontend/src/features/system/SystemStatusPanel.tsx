@@ -25,12 +25,22 @@ import { Textarea } from "@/components/ui/textarea";
 import { api, ApiError } from "@/lib/api";
 import { describeAuditAction, formatDateTime, formatRelative } from "@/lib/format";
 import { useApi } from "@/lib/hooks";
-import type { AuditEntry, EngineState, Paginated, SystemStatus } from "@/lib/types";
+import { engineHealthView } from "@/lib/status";
+import type { AuditEntry, EngineState, EngineSupervisor, Paginated, SystemStatus } from "@/lib/types";
 
 const ENGINE: Record<EngineState, { tone: Tone; label: string }> = {
   running: { tone: "positive", label: "Running" },
   degraded: { tone: "warning", label: "Degraded" },
-  offline: { tone: "negative", label: "Offline" },
+  offline: { tone: "warning", label: "No heartbeat" },
+};
+
+const SUPERVISOR: Record<EngineSupervisor["state"], { tone: Tone; label: string }> = {
+  running: { tone: "positive", label: "Running" },
+  degraded: { tone: "warning", label: "Running · attention" },
+  stale: { tone: "warning", label: "Not responding" },
+  not_started: { tone: "warning", label: "Not started" },
+  disabled: { tone: "neutral", label: "Disabled on this server" },
+  unknown: { tone: "neutral", label: "Unknown" },
 };
 
 /** Settings → System status: backend, engine and broker health, platform controls, the audit log. */
@@ -82,16 +92,32 @@ function HealthCard({ system, error, onRetry }: { system: SystemStatus | null; e
         ) : (
           <div className="grid gap-x-10 md:grid-cols-2" aria-live="polite">
             <dl className="divide-y divide-border">
-              <Row label="Trading engine" detail={trading.engine_detail}>
-                <Pill tone={ENGINE[trading.engine_state].tone} dot>{ENGINE[trading.engine_state].label}</Pill>
-              </Row>
-              <Row label="Engine heartbeat" detail={trading.engine_heartbeat_at ? formatDateTime(trading.engine_heartbeat_at) : undefined}>
-                <span className="num">{trading.engine_heartbeat_at ? formatRelative(trading.engine_heartbeat_at) : "Never"}</span>
-              </Row>
-              <Row label="Engine service">
-                {system.engine.status === "ok"
+              {(() => {
+                const view = engineHealthView({ ...trading, engine_summary: system.engine_summary ?? trading.engine_summary });
+                return (
+                  <Row label="Trading engine" detail={view.message}>
+                    <Pill tone={view.tone} dot>{view.label}</Pill>
+                  </Row>
+                );
+              })()}
+              <Row label="Engine API service" detail={system.engine_service?.detail ?? undefined}>
+                {system.engine_service ? (
+                  system.engine_service.status === "online"
+                    ? <Pill tone="positive">Online{system.engine_service.version ? ` · v${system.engine_service.version}` : ""}</Pill>
+                    : system.engine_service.status === "error"
+                      ? <Pill tone="negative">Answering with an error</Pill>
+                      : <Pill tone="negative">Unreachable</Pill>
+                ) : system.engine.status === "ok"
                   ? <Pill tone="positive">Reachable{system.engine.version ? ` · v${system.engine.version}` : ""}</Pill>
                   : <Pill tone="negative">Unreachable</Pill>}
+              </Row>
+              <Row label="Trading supervisor" detail={system.engine_supervisor?.detail ?? trading.engine_detail}>
+                {system.engine_supervisor
+                  ? <Pill tone={SUPERVISOR[system.engine_supervisor.state].tone} dot>{SUPERVISOR[system.engine_supervisor.state].label}</Pill>
+                  : <Pill tone={ENGINE[trading.engine_state].tone} dot>{ENGINE[trading.engine_state].label}</Pill>}
+              </Row>
+              <Row label="Supervisor heartbeat" detail={trading.engine_heartbeat_at ? formatDateTime(trading.engine_heartbeat_at) : undefined}>
+                <span className="num">{trading.engine_heartbeat_at ? formatRelative(trading.engine_heartbeat_at) : "Never"}</span>
               </Row>
               <Row label="Database">{system.database === "ok" ? <Pill tone="positive">OK</Pill> : <Pill tone="negative">Error</Pill>}</Row>
               <Row label="Background jobs queue"><span className="num">{system.queue_connection}</span></Row>

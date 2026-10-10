@@ -43,6 +43,43 @@ export interface TradingStatus {
   /** Why real-money authorisation was last taken away (profile edited, MFA off, …); cleared by a new authorisation. */
   live_revoked_reason?: string | null;
   live_revoked_at?: string | null;
+  /**
+   * Display-only engine health (additive; older servers omit them). Kept apart
+   * from `new_orders_permitted`, which stays heartbeat-based on the server.
+   */
+  engine_service?: EngineService | null;
+  engine_supervisor?: EngineSupervisor;
+  engine_summary?: EngineSummary;
+}
+
+/** Does the Python engine's HTTP API answer its signed health check? */
+export interface EngineService {
+  status: "online" | "error" | "unreachable";
+  reachable: boolean;
+  /** The engine's ENGINE_ENABLED (automated-trading supervisor switched on), when known. */
+  supervisor_enabled: boolean | null;
+  version: string | null;
+  checked_at: string;
+  detail: string | null;
+}
+
+/** The automated-trading supervisor: switched on, and is its heartbeat fresh? */
+export interface EngineSupervisor {
+  state: "running" | "degraded" | "stale" | "not_started" | "disabled" | "unknown";
+  heartbeat_at: string | null;
+  detail: string;
+}
+
+export type EngineSummaryCode =
+  | "running" | "running_degraded" | "trading_disabled" | "supervisor_not_started" | "supervisor_stale" | "engine_error" | "engine_offline";
+
+/** One dashboard line combining service + supervisor. */
+export interface EngineSummary {
+  code: EngineSummaryCode;
+  tone: "ok" | "info" | "warning" | "error";
+  label: string;
+  message: string;
+  trading_active: boolean;
 }
 
 /** Body of PUT /api/trading/mode. LIVE also needs the user's LIVE account (with a risk profile) to authorise. */
@@ -921,4 +958,8 @@ export interface SystemStatus {
   deriv_app_id_configured: boolean;
   mfa_required: boolean;
   queue_connection: string;
+  /** Additive: the same engine health as in `trading`, at the top level. */
+  engine_service?: EngineService | null;
+  engine_supervisor?: EngineSupervisor;
+  engine_summary?: EngineSummary;
 }

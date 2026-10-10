@@ -38,7 +38,7 @@ class EngineException extends RuntimeException
     public static function unreachable(): self
     {
         return new self(
-            'The trading engine is not reachable. Start it (make dev) and try again.',
+            'The trading engine is not reachable right now. Please try again in a moment.',
             503,
             'engine_unreachable',
         );

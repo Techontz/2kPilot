@@ -13,6 +13,7 @@ use App\Models\User;
 use App\Models\UserTradingState;
 use App\Services\Audit\AuditLogger;
 use App\Services\Engine\EngineClient;
+use App\Services\Engine\EngineHealth;
 use App\Services\Mfa\TwoFactorService;
 use App\Services\Notifier;
 use App\Services\Users\UserProvisioner;
@@ -61,6 +62,7 @@ class TradingControl
         private readonly EngineClient $engine,
         private readonly UserProvisioner $provisioner,
         private readonly TwoFactorService $mfa,
+        private readonly EngineHealth $health,
     ) {}
 
     public function liveLocked(): bool
@@ -79,12 +81,20 @@ class TradingControl
         return $state;
     }
 
-    public function status(User $user): TradingStatus
+    /**
+     * `$probeEngine`: refresh the engine's service health (cached for a few seconds).
+     * Without it only the last cached health is used, so Stop/Start/mode changes
+     * never wait on a network call. Either way the health is display information;
+     * permission to trade stays heartbeat-based (engineState / newOrdersPermitted).
+     */
+    public function status(User $user, bool $probeEngine = false): TradingStatus
     {
         $platform = SystemState::current();
         [$engine, $detail] = $this->engineState($platform);
+        $service = $probeEngine ? $this->health->service() : $this->health->cachedService();
 
-        return new TradingStatus($this->stateOf($user), $platform, $this->liveLocked(), $engine, $detail);
+        return new TradingStatus($this->stateOf($user), $platform, $this->liveLocked(), $engine, $detail, $service,
+            (int) config('tradepilot.engine.heartbeat_freshness_seconds', 30));
     }
 
     /** @return array{0: EngineState, 1: string} */
@@ -93,7 +103,7 @@ class TradingControl
         $beat = $state->engine_heartbeat_at;
         $fresh = (int) config('tradepilot.engine.heartbeat_freshness_seconds', 30);
         if ($beat === null) {
-            return [EngineState::Offline, 'The trading engine has not started yet. Start it with "make dev".'];
+            return [EngineState::Offline, 'The trading supervisor has not reported a heartbeat yet.'];
         }
         if ($beat->lt(now()->subSeconds($fresh))) {
             return [EngineState::Offline, 'No engine heartbeat since '.$beat->format('Y-m-d H:i:s').' UTC.'];

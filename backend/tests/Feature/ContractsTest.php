@@ -106,7 +106,7 @@ class ContractsTest extends TestCase
         $this->assign($this->deriv())->assertCreated()->assertJsonPath('status', 'PAUSED')
             ->assertJsonPath('contract.contract_family', 'RISE_FALL')
             ->assertJsonPath('contract_check.verified', false)
-            ->assertJsonPath('contract_check.detail', 'The trading engine is not reachable. Start it (make dev) and try again.');
+            ->assertJsonPath('contract_check.detail', 'The trading engine is not reachable right now. Please try again in a moment.');
     }
 
     public function test_changing_the_contract_pauses_the_assignment(): void

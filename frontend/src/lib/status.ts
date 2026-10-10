@@ -1,4 +1,4 @@
-import type { TradingMode, TradingStatus } from "./types";
+import type { EngineSummary, EngineSummaryCode, TradingMode, TradingStatus } from "./types";
 
 export type Tone = "positive" | "negative" | "warning" | "neutral" | "live" | "info";
 
@@ -7,6 +7,40 @@ export interface RobotStatus {
   tone: Tone;
   detail: string;
   running: boolean;
+}
+
+export interface EngineHealthView {
+  code: EngineSummaryCode | "unknown";
+  label: string;
+  message: string;
+  tone: Tone;
+  /** Automated trading can actually run (supervisor active). */
+  active: boolean;
+  /** Worth a banner under the top bar (anything but a healthy, running engine). */
+  banner: boolean;
+}
+
+const SUMMARY_TONE: Record<EngineSummary["tone"], Tone> = { ok: "positive", info: "info", warning: "warning", error: "negative" };
+
+/**
+ * What to say about the trading engine. The server keeps three things apart
+ * (API service health, the trading supervisor, and permission to trade); this
+ * only describes them. "Engine offline" is said only when the engine's API
+ * cannot be reached. Older servers without `engine_summary` fall back to the
+ * heartbeat state, which proves the supervisor is beating, not that the API is down.
+ */
+export function engineHealthView(status: TradingStatus): EngineHealthView {
+  const s = status.engine_summary;
+  if (s) {
+    return { code: s.code, label: s.label, message: s.message, tone: SUMMARY_TONE[s.tone], active: s.trading_active, banner: !s.trading_active || s.code !== "running" };
+  }
+  if (status.engine_state === "offline") {
+    return { code: "unknown", label: "Supervisor not running", message: status.engine_detail || "The trading supervisor is not reporting, so nothing will trade.", tone: "warning", active: false, banner: true };
+  }
+  if (status.engine_state === "degraded") {
+    return { code: "running_degraded", label: "Running · attention", message: status.engine_detail, tone: "warning", active: true, banner: true };
+  }
+  return { code: "running", label: "Engine running", message: status.engine_detail, tone: "positive", active: true, banner: false };
 }
 
 /**
@@ -39,11 +73,12 @@ export function deriveRobotStatus(status: TradingStatus): RobotStatus {
       running: false,
     };
   }
-  if (status.engine_state === "offline") {
-    return { label: "Engine offline", tone: "negative", detail: status.engine_detail, running: false };
+  const engine = engineHealthView(status);
+  if (!engine.active) {
+    return { label: engine.label, tone: engine.tone, detail: engine.message, running: false };
   }
-  if (status.engine_state === "degraded") {
-    return { label: "Running · attention", tone: "warning", detail: status.engine_detail, running: true };
+  if (engine.tone === "warning") {
+    return { label: engine.label, tone: "warning", detail: engine.message, running: true };
   }
   return { label: "Running", tone: "positive", detail: "Strategies may open trades. Every order passes the risk engine.", running: true };
 }

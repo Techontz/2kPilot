@@ -19,6 +19,13 @@ class TradingController extends Controller
 
     public function status(Request $request): JsonResponse
     {
+        // The polled endpoint refreshes the engine's service health (cached briefly).
+        return response()->json($this->control->status($request->user(), probeEngine: true)->toArray());
+    }
+
+    /** After an action: the user's status without waiting on an engine health check. */
+    private function current(Request $request): JsonResponse
+    {
         return response()->json($this->control->status($request->user())->toArray());
     }
 
@@ -27,7 +34,7 @@ class TradingController extends Controller
         $data = $request->validate(['reason' => ['nullable', 'string', 'max:300']]);
         $this->control->stop($request->user(), $data['reason'] ?? 'Stopped from the dashboard');
 
-        return $this->status($request);
+        return $this->current($request);
     }
 
     public function resume(Request $request): JsonResponse
@@ -36,7 +43,7 @@ class TradingController extends Controller
         $data = $request->validate(['confirm' => ['accepted'], 'live' => ['sometimes', 'boolean']]);
         $this->control->resume($request->user(), (bool) ($data['live'] ?? false));
 
-        return $this->status($request);
+        return $this->current($request);
     }
 
     public function mode(Request $request): JsonResponse
@@ -51,7 +58,7 @@ class TradingController extends Controller
         $this->control->setMode($request->user(), TradingMode::from($data['mode']),
             $data['password'] ?? null, $data['confirmation_phrase'] ?? null, $data['account_id'] ?? null, $data['mfa_code'] ?? null);
 
-        return $this->status($request);
+        return $this->current($request);
     }
 
     public function closePositions(Request $request): JsonResponse
