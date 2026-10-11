@@ -1,0 +1,909 @@
+{
+  "format": "tradepilot.strategy_templates",
+  "schema_version": 1,
+  "code_version": "1.0.0",
+  "templates": [
+    {
+      "slug": "ema-crossover",
+      "name": "EMA crossover",
+      "summary": "Buy when a fast EMA crosses above a slow EMA; sell on the opposite cross.",
+      "details": {
+        "how_it_works": "Two exponential moving averages follow the price at different speeds. When the fast EMA (9) crosses above the slow EMA (21), recent prices are rising faster than the longer average, which is read as upward momentum; the opposite cross is read as downward momentum. Each cross proposes one trade.",
+        "struggles": "Sideways, choppy markets: the averages cross back and forth and produce many small losing trades. Crosses also come late, after part of the move has already happened.",
+        "suggested_timeframe": "M5",
+        "suggested_symbols": [
+          "R_75",
+          "R_100",
+          "1HZ100V",
+          "EURUSD",
+          "GBPUSD",
+          "USDJPY"
+        ],
+        "suggested_contract": {
+          "contract_family": "RISE_FALL",
+          "duration": 25,
+          "duration_unit": "m"
+        },
+        "suggested_contract_note": "Rise/Fall lasting 5 M5 candles. On Paper accounts with forex symbols use Spot.",
+        "difficulty": "beginner",
+        "disclaimer": "Educational template: a starting point for learning and testing, not a recommendation and not claimed to be profitable. Backtest it and run it on a demo account first; past results do not predict future results."
+      },
+      "rules": {
+        "schema_version": 1,
+        "timeframe": "M5",
+        "entry": {
+          "buy": {
+            "all": [
+              {
+                "left": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "ema",
+                  "params": {
+                    "period": 9,
+                    "source": "close"
+                  },
+                  "output": "value"
+                },
+                "op": "crosses_above",
+                "right": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "ema",
+                  "params": {
+                    "period": 21,
+                    "source": "close"
+                  },
+                  "output": "value"
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              }
+            ],
+            "any": null
+          },
+          "sell": {
+            "all": [
+              {
+                "left": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "ema",
+                  "params": {
+                    "period": 9,
+                    "source": "close"
+                  },
+                  "output": "value"
+                },
+                "op": "crosses_below",
+                "right": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "ema",
+                  "params": {
+                    "period": 21,
+                    "source": "close"
+                  },
+                  "output": "value"
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              }
+            ],
+            "any": null
+          }
+        },
+        "filters": [],
+        "exit": {
+          "stop": {
+            "type": "atr",
+            "atr_period": 14,
+            "multiple": 2.0,
+            "pips": null
+          },
+          "target": {
+            "type": "rr",
+            "ratio": 1.5,
+            "atr_period": 14,
+            "multiple": 3.0,
+            "pips": null
+          },
+          "close_buy_when": null,
+          "close_sell_when": null
+        }
+      },
+      "rules_text": "Buy when EMA 9 crosses above EMA 21. Sell when EMA 9 crosses below EMA 21. Stop: 2 × ATR 14 from the entry; target: 1.5 × the stop distance (Spot and Multiplier trades). Checked on every closed M5 bar."
+    },
+    {
+      "slug": "rsi-mean-reversion",
+      "name": "RSI mean reversion",
+      "summary": "Buy when RSI climbs back above 30 (oversold); sell when it drops back below 70 (overbought).",
+      "details": {
+        "how_it_works": "RSI measures recent momentum on a 0–100 scale. Readings under 30 are often called oversold and over 70 overbought. This template waits for RSI to LEAVE those zones — a sign the stretch may be ending — and bets on a move back towards the middle. Spot and Multiplier trades close early once RSI passes 55 (buys) or 45 (sells).",
+        "struggles": "Strong trends: RSI can stay oversold or overbought for a long time while the price keeps going, so 'cheap' gets cheaper. It works best in calm, range-bound markets, which can change without warning.",
+        "suggested_timeframe": "M5",
+        "suggested_symbols": [
+          "R_75",
+          "R_100",
+          "1HZ100V",
+          "EURUSD",
+          "GBPUSD",
+          "USDJPY"
+        ],
+        "suggested_contract": {
+          "contract_family": "RISE_FALL",
+          "duration": 25,
+          "duration_unit": "m"
+        },
+        "suggested_contract_note": "Rise/Fall lasting 5 M5 candles. On Paper accounts with forex symbols use Spot.",
+        "difficulty": "beginner",
+        "disclaimer": "Educational template: a starting point for learning and testing, not a recommendation and not claimed to be profitable. Backtest it and run it on a demo account first; past results do not predict future results."
+      },
+      "rules": {
+        "schema_version": 1,
+        "timeframe": "M5",
+        "entry": {
+          "buy": {
+            "all": [
+              {
+                "left": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "rsi",
+                  "params": {
+                    "period": 14
+                  },
+                  "output": "value"
+                },
+                "op": "crosses_above",
+                "right": {
+                  "price": null,
+                  "value": 30.0,
+                  "indicator": null,
+                  "params": {},
+                  "output": null
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              }
+            ],
+            "any": null
+          },
+          "sell": {
+            "all": [
+              {
+                "left": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "rsi",
+                  "params": {
+                    "period": 14
+                  },
+                  "output": "value"
+                },
+                "op": "crosses_below",
+                "right": {
+                  "price": null,
+                  "value": 70.0,
+                  "indicator": null,
+                  "params": {},
+                  "output": null
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              }
+            ],
+            "any": null
+          }
+        },
+        "filters": [],
+        "exit": {
+          "stop": {
+            "type": "atr",
+            "atr_period": 14,
+            "multiple": 2.0,
+            "pips": null
+          },
+          "target": {
+            "type": "rr",
+            "ratio": 1.5,
+            "atr_period": 14,
+            "multiple": 3.0,
+            "pips": null
+          },
+          "close_buy_when": {
+            "all": null,
+            "any": [
+              {
+                "left": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "rsi",
+                  "params": {
+                    "period": 14
+                  },
+                  "output": "value"
+                },
+                "op": "gt",
+                "right": {
+                  "price": null,
+                  "value": 55.0,
+                  "indicator": null,
+                  "params": {},
+                  "output": null
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              }
+            ]
+          },
+          "close_sell_when": {
+            "all": null,
+            "any": [
+              {
+                "left": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "rsi",
+                  "params": {
+                    "period": 14
+                  },
+                  "output": "value"
+                },
+                "op": "lt",
+                "right": {
+                  "price": null,
+                  "value": 45.0,
+                  "indicator": null,
+                  "params": {},
+                  "output": null
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              }
+            ]
+          }
+        }
+      },
+      "rules_text": "Buy when RSI 14 crosses above 30. Sell when RSI 14 crosses below 70. Close a buy early when RSI 14 is above 55. Close a sell early when RSI 14 is below 45. Stop: 2 × ATR 14 from the entry; target: 1.5 × the stop distance (Spot and Multiplier trades). Checked on every closed M5 bar."
+    },
+    {
+      "slug": "ma-trend-filter",
+      "name": "Moving-average trend filter",
+      "summary": "Only trade in the direction of the SMA 200 trend, entering when price crosses back over EMA 20.",
+      "details": {
+        "how_it_works": "The 200-bar simple moving average defines the trend: above it, only buys are allowed; below it, only sells. Inside that trend the template waits for a pullback — price dipping under the 20-bar EMA — and enters when the close crosses back over the EMA, suggesting the trend is resuming.",
+        "struggles": "Trend reversals and flat markets: the SMA 200 is slow, so after a turn the filter keeps pointing the old way for a while. When price hugs the averages, crosses happen often and go nowhere.",
+        "suggested_timeframe": "M5",
+        "suggested_symbols": [
+          "R_75",
+          "R_100",
+          "1HZ100V",
+          "EURUSD",
+          "GBPUSD",
+          "USDJPY"
+        ],
+        "suggested_contract": {
+          "contract_family": "RISE_FALL",
+          "duration": 25,
+          "duration_unit": "m"
+        },
+        "suggested_contract_note": "Rise/Fall lasting 5 M5 candles. On Paper accounts with forex symbols use Spot.",
+        "difficulty": "intermediate",
+        "disclaimer": "Educational template: a starting point for learning and testing, not a recommendation and not claimed to be profitable. Backtest it and run it on a demo account first; past results do not predict future results."
+      },
+      "rules": {
+        "schema_version": 1,
+        "timeframe": "M5",
+        "entry": {
+          "buy": {
+            "all": [
+              {
+                "left": {
+                  "price": "close",
+                  "value": null,
+                  "indicator": null,
+                  "params": {},
+                  "output": null
+                },
+                "op": "gt",
+                "right": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "sma",
+                  "params": {
+                    "period": 200,
+                    "source": "close"
+                  },
+                  "output": "value"
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              },
+              {
+                "left": {
+                  "price": "close",
+                  "value": null,
+                  "indicator": null,
+                  "params": {},
+                  "output": null
+                },
+                "op": "crosses_above",
+                "right": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "ema",
+                  "params": {
+                    "period": 20,
+                    "source": "close"
+                  },
+                  "output": "value"
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              }
+            ],
+            "any": null
+          },
+          "sell": {
+            "all": [
+              {
+                "left": {
+                  "price": "close",
+                  "value": null,
+                  "indicator": null,
+                  "params": {},
+                  "output": null
+                },
+                "op": "lt",
+                "right": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "sma",
+                  "params": {
+                    "period": 200,
+                    "source": "close"
+                  },
+                  "output": "value"
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              },
+              {
+                "left": {
+                  "price": "close",
+                  "value": null,
+                  "indicator": null,
+                  "params": {},
+                  "output": null
+                },
+                "op": "crosses_below",
+                "right": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "ema",
+                  "params": {
+                    "period": 20,
+                    "source": "close"
+                  },
+                  "output": "value"
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              }
+            ],
+            "any": null
+          }
+        },
+        "filters": [],
+        "exit": {
+          "stop": {
+            "type": "atr",
+            "atr_period": 14,
+            "multiple": 2.0,
+            "pips": null
+          },
+          "target": {
+            "type": "rr",
+            "ratio": 2.0,
+            "atr_period": 14,
+            "multiple": 3.0,
+            "pips": null
+          },
+          "close_buy_when": null,
+          "close_sell_when": null
+        }
+      },
+      "rules_text": "Buy when the close is above SMA 200 and the close crosses above EMA 20. Sell when the close is below SMA 200 and the close crosses below EMA 20. Stop: 2 × ATR 14 from the entry; target: 2 × the stop distance (Spot and Multiplier trades). Checked on every closed M5 bar."
+    },
+    {
+      "slug": "bollinger-reversion",
+      "name": "Bollinger Bands reversion",
+      "summary": "Buy when the close comes back inside the lower Bollinger band; sell when it falls back inside the upper band.",
+      "details": {
+        "how_it_works": "Bollinger Bands sit two standard deviations around a 20-bar average, so closes outside them are unusual. When price closes back inside a band after being outside, the template bets on a return towards the middle band. Spot and Multiplier trades close early when the close reaches the middle band.",
+        "struggles": "Breakouts and trending markets: price can 'walk the band' for many bars, and a move back inside can be a pause before the trend continues. Sudden volatility changes widen the bands and change how often it trades.",
+        "suggested_timeframe": "M5",
+        "suggested_symbols": [
+          "R_75",
+          "R_100",
+          "1HZ100V",
+          "EURUSD",
+          "GBPUSD",
+          "USDJPY"
+        ],
+        "suggested_contract": {
+          "contract_family": "RISE_FALL",
+          "duration": 25,
+          "duration_unit": "m"
+        },
+        "suggested_contract_note": "Rise/Fall lasting 5 M5 candles. On Paper accounts with forex symbols use Spot.",
+        "difficulty": "intermediate",
+        "disclaimer": "Educational template: a starting point for learning and testing, not a recommendation and not claimed to be profitable. Backtest it and run it on a demo account first; past results do not predict future results."
+      },
+      "rules": {
+        "schema_version": 1,
+        "timeframe": "M5",
+        "entry": {
+          "buy": {
+            "all": [
+              {
+                "left": {
+                  "price": "close",
+                  "value": null,
+                  "indicator": null,
+                  "params": {},
+                  "output": null
+                },
+                "op": "crosses_above",
+                "right": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "bollinger",
+                  "params": {
+                    "period": 20,
+                    "stddev": 2.0
+                  },
+                  "output": "lower"
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              }
+            ],
+            "any": null
+          },
+          "sell": {
+            "all": [
+              {
+                "left": {
+                  "price": "close",
+                  "value": null,
+                  "indicator": null,
+                  "params": {},
+                  "output": null
+                },
+                "op": "crosses_below",
+                "right": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "bollinger",
+                  "params": {
+                    "period": 20,
+                    "stddev": 2.0
+                  },
+                  "output": "upper"
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              }
+            ],
+            "any": null
+          }
+        },
+        "filters": [],
+        "exit": {
+          "stop": {
+            "type": "atr",
+            "atr_period": 14,
+            "multiple": 2.0,
+            "pips": null
+          },
+          "target": {
+            "type": "rr",
+            "ratio": 1.5,
+            "atr_period": 14,
+            "multiple": 3.0,
+            "pips": null
+          },
+          "close_buy_when": {
+            "all": null,
+            "any": [
+              {
+                "left": {
+                  "price": "close",
+                  "value": null,
+                  "indicator": null,
+                  "params": {},
+                  "output": null
+                },
+                "op": "gte",
+                "right": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "bollinger",
+                  "params": {
+                    "period": 20,
+                    "stddev": 2.0
+                  },
+                  "output": "middle"
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              }
+            ]
+          },
+          "close_sell_when": {
+            "all": null,
+            "any": [
+              {
+                "left": {
+                  "price": "close",
+                  "value": null,
+                  "indicator": null,
+                  "params": {},
+                  "output": null
+                },
+                "op": "lte",
+                "right": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "bollinger",
+                  "params": {
+                    "period": 20,
+                    "stddev": 2.0
+                  },
+                  "output": "middle"
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              }
+            ]
+          }
+        }
+      },
+      "rules_text": "Buy when the close crosses above the lower Bollinger band (20, 2). Sell when the close crosses below the upper Bollinger band (20, 2). Close a buy early when the close is at or above the middle Bollinger band (20, 2). Close a sell early when the close is at or below the middle Bollinger band (20, 2). Stop: 2 × ATR 14 from the entry; target: 1.5 × the stop distance (Spot and Multiplier trades). Checked on every closed M5 bar."
+    },
+    {
+      "slug": "macd-momentum",
+      "name": "MACD momentum confirmation",
+      "summary": "Buy when the MACD line crosses above its signal line with a positive histogram and price above EMA 50; the mirror image for sells.",
+      "details": {
+        "how_it_works": "MACD compares a fast and a slow EMA; its signal line smooths that difference. A cross of the MACD line above the signal line (histogram turning positive) suggests momentum is picking up. Requiring the close to be above EMA 50 (or below it, for sells) keeps trades on the side of the broader move.",
+        "struggles": "Choppy markets give frequent, small crosses that reverse quickly. Like every moving-average tool it reacts after the move has started, so entries can be late and exits give back profit.",
+        "suggested_timeframe": "M5",
+        "suggested_symbols": [
+          "R_75",
+          "R_100",
+          "1HZ100V",
+          "EURUSD",
+          "GBPUSD",
+          "USDJPY"
+        ],
+        "suggested_contract": {
+          "contract_family": "RISE_FALL",
+          "duration": 25,
+          "duration_unit": "m"
+        },
+        "suggested_contract_note": "Rise/Fall lasting 5 M5 candles. On Paper accounts with forex symbols use Spot.",
+        "difficulty": "intermediate",
+        "disclaimer": "Educational template: a starting point for learning and testing, not a recommendation and not claimed to be profitable. Backtest it and run it on a demo account first; past results do not predict future results."
+      },
+      "rules": {
+        "schema_version": 1,
+        "timeframe": "M5",
+        "entry": {
+          "buy": {
+            "all": [
+              {
+                "left": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "macd",
+                  "params": {
+                    "fast": 12,
+                    "slow": 26,
+                    "signal": 9
+                  },
+                  "output": "line"
+                },
+                "op": "crosses_above",
+                "right": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "macd",
+                  "params": {
+                    "fast": 12,
+                    "slow": 26,
+                    "signal": 9
+                  },
+                  "output": "signal"
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              },
+              {
+                "left": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "macd",
+                  "params": {
+                    "fast": 12,
+                    "slow": 26,
+                    "signal": 9
+                  },
+                  "output": "histogram"
+                },
+                "op": "gt",
+                "right": {
+                  "price": null,
+                  "value": 0.0,
+                  "indicator": null,
+                  "params": {},
+                  "output": null
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              },
+              {
+                "left": {
+                  "price": "close",
+                  "value": null,
+                  "indicator": null,
+                  "params": {},
+                  "output": null
+                },
+                "op": "gt",
+                "right": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "ema",
+                  "params": {
+                    "period": 50,
+                    "source": "close"
+                  },
+                  "output": "value"
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              }
+            ],
+            "any": null
+          },
+          "sell": {
+            "all": [
+              {
+                "left": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "macd",
+                  "params": {
+                    "fast": 12,
+                    "slow": 26,
+                    "signal": 9
+                  },
+                  "output": "line"
+                },
+                "op": "crosses_below",
+                "right": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "macd",
+                  "params": {
+                    "fast": 12,
+                    "slow": 26,
+                    "signal": 9
+                  },
+                  "output": "signal"
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              },
+              {
+                "left": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "macd",
+                  "params": {
+                    "fast": 12,
+                    "slow": 26,
+                    "signal": 9
+                  },
+                  "output": "histogram"
+                },
+                "op": "lt",
+                "right": {
+                  "price": null,
+                  "value": 0.0,
+                  "indicator": null,
+                  "params": {},
+                  "output": null
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              },
+              {
+                "left": {
+                  "price": "close",
+                  "value": null,
+                  "indicator": null,
+                  "params": {},
+                  "output": null
+                },
+                "op": "lt",
+                "right": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "ema",
+                  "params": {
+                    "period": 50,
+                    "source": "close"
+                  },
+                  "output": "value"
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              }
+            ],
+            "any": null
+          }
+        },
+        "filters": [],
+        "exit": {
+          "stop": {
+            "type": "atr",
+            "atr_period": 14,
+            "multiple": 2.0,
+            "pips": null
+          },
+          "target": {
+            "type": "rr",
+            "ratio": 2.0,
+            "atr_period": 14,
+            "multiple": 3.0,
+            "pips": null
+          },
+          "close_buy_when": null,
+          "close_sell_when": null
+        }
+      },
+      "rules_text": "Buy when MACD line (12, 26, 9) crosses above MACD signal line (12, 26, 9), MACD histogram (12, 26, 9) is above 0, and the close is above EMA 50. Sell when MACD line (12, 26, 9) crosses below MACD signal line (12, 26, 9), MACD histogram (12, 26, 9) is below 0, and the close is below EMA 50. Stop: 2 × ATR 14 from the entry; target: 2 × the stop distance (Spot and Multiplier trades). Checked on every closed M5 bar."
+    },
+    {
+      "slug": "breakout",
+      "name": "Breakout",
+      "summary": "Buy when the close breaks above the highest high of the previous 20 bars; sell when it breaks below the lowest low.",
+      "details": {
+        "how_it_works": "The highest high and lowest low of the previous 20 bars (a Donchian channel) mark a recent range. A close beyond it means price has left that range, and the template bets the move continues in the breakout direction.",
+        "struggles": "False breakouts: price often pokes out of a range and falls straight back in, especially in quiet markets. Breakouts after big moves can also be late, entering just as the move runs out.",
+        "suggested_timeframe": "M15",
+        "suggested_symbols": [
+          "R_75",
+          "R_100",
+          "1HZ100V",
+          "EURUSD",
+          "GBPUSD",
+          "USDJPY"
+        ],
+        "suggested_contract": {
+          "contract_family": "RISE_FALL",
+          "duration": 1,
+          "duration_unit": "h"
+        },
+        "suggested_contract_note": "Rise/Fall lasting 4 M15 candles. On Paper accounts with forex symbols use Spot.",
+        "difficulty": "intermediate",
+        "disclaimer": "Educational template: a starting point for learning and testing, not a recommendation and not claimed to be profitable. Backtest it and run it on a demo account first; past results do not predict future results."
+      },
+      "rules": {
+        "schema_version": 1,
+        "timeframe": "M15",
+        "entry": {
+          "buy": {
+            "all": [
+              {
+                "left": {
+                  "price": "close",
+                  "value": null,
+                  "indicator": null,
+                  "params": {},
+                  "output": null
+                },
+                "op": "crosses_above",
+                "right": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "highest",
+                  "params": {
+                    "period": 20,
+                    "source": "high"
+                  },
+                  "output": "value"
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              }
+            ],
+            "any": null
+          },
+          "sell": {
+            "all": [
+              {
+                "left": {
+                  "price": "close",
+                  "value": null,
+                  "indicator": null,
+                  "params": {},
+                  "output": null
+                },
+                "op": "crosses_below",
+                "right": {
+                  "price": null,
+                  "value": null,
+                  "indicator": "lowest",
+                  "params": {
+                    "period": 20,
+                    "source": "low"
+                  },
+                  "output": "value"
+                },
+                "low": null,
+                "high": null,
+                "within_bars": null
+              }
+            ],
+            "any": null
+          }
+        },
+        "filters": [],
+        "exit": {
+          "stop": {
+            "type": "atr",
+            "atr_period": 14,
+            "multiple": 2.0,
+            "pips": null
+          },
+          "target": {
+            "type": "rr",
+            "ratio": 2.0,
+            "atr_period": 14,
+            "multiple": 3.0,
+            "pips": null
+          },
+          "close_buy_when": null,
+          "close_sell_when": null
+        }
+      },
+      "rules_text": "Buy when the close crosses above the highest high of the previous 20 bars. Sell when the close crosses below the lowest low of the previous 20 bars. Stop: 2 × ATR 14 from the entry; target: 2 × the stop distance (Spot and Multiplier trades). Checked on every closed M15 bar."
+    }
+  ]
+}

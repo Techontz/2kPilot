@@ -45,6 +45,8 @@ playwright-report/
 logs/
 *.log
 data/
+# …but the built-in strategy templates are source code (loaded by a migration).
+!backend/database/data/
 
 # ── Local dev MySQL (make mysql) ──────────────────────
 .devdata/
