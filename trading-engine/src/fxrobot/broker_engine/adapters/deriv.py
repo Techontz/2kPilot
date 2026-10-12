@@ -50,6 +50,7 @@ the `status` values of multipliers closed by take profit / stop loss.
 from __future__ import annotations
 
 import contextlib
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -201,6 +202,9 @@ def _map_api_error(exc: DerivApiError) -> OrderRejectedError:
     if code in ("InsufficientBalance", "InsufficientFunds"):
         return InsufficientMarginError(str(exc), broker_code=code)
     return OrderRejectedError(str(exc), broker_code=code)
+
+
+logger = logging.getLogger(__name__)
 
 
 class DerivAdapter(BrokerAdapter):
@@ -520,7 +524,7 @@ class DerivAdapter(BrokerAdapter):
         """Ask Deriv to price the contract (nothing is bought): stake limits and payout."""
         name = self.resolve(symbol)
         try:
-            proposal = self._proposal(name, contract, None)
+            proposal = self._proposal_reconnecting(name, contract, None)
         except (DerivApiError, BrokerRateLimitError, InvalidBrokerResponseError) as exc:
             return StakeQuote(None, None, detail=f"Deriv did not price it: {exc}")
         params = proposal.get("validation_params") or {}
@@ -924,6 +928,23 @@ class DerivAdapter(BrokerAdapter):
         self._client_by_contract[contract_id] = client_order_id
 
     # ── trading ──────────────────────────────────────────────────────────
+    def _reopen(self) -> None:
+        """Replace a dropped Deriv link (a fresh one-time password, a new socket)."""
+        self.disconnect()
+        self.connect()
+
+    def _proposal_reconnecting(
+        self, name: str, contract: ContractOrder, limit_order: dict[str, float] | None
+    ) -> dict[str, Any]:
+        """Price the contract; if the link dropped, reconnect once and price again.
+        Pricing buys nothing, so repeating it is always safe."""
+        try:
+            return self._proposal(name, contract, limit_order)
+        except BrokerConnectionError:
+            logger.info("Deriv link dropped while pricing %s; reconnecting", name)
+            self._reopen()
+            return self._proposal(name, contract, limit_order)
+
     def _proposal(
         self, name: str, contract: ContractOrder, limit_order: dict[str, float] | None
     ) -> dict[str, Any]:
@@ -994,9 +1015,28 @@ class DerivAdapter(BrokerAdapter):
             raise BrokerConnectionError(f"Deriv did not answer before the order: {exc}") from exc
         if problem:
             raise OrderRejectedError(problem, broker_code="ContractNotOffered")
+        # Deriv answers InvalidContractProposal when the quote it priced is no longer
+        # valid (seen live 2026-10-12 on frxUSDJPY): nothing was bought, so price
+        # once more and buy that.
+        for attempt in (1, 2):
+            try:
+                return self._price_and_buy(request, name, contract, limit_order)
+            except OrderRejectedError as exc:
+                if attempt == 2 or exc.broker_code != "InvalidContractProposal":
+                    raise
+                logger.info("Deriv no longer knew the proposal for %s; pricing again", name)
+        raise AssertionError("unreachable")
+
+    def _price_and_buy(
+        self,
+        request: OrderRequest,
+        name: str,
+        contract: ContractOrder,
+        limit_order: dict[str, float],
+    ) -> OrderResult:
         # 1. Price the contract. A refusal here means nothing was bought.
         try:
-            proposal = self._proposal(name, contract, limit_order)
+            proposal = self._proposal_reconnecting(name, contract, limit_order)
         except DerivApiError as exc:
             raise _map_api_error(exc) from exc
         except BrokerRateLimitError as exc:

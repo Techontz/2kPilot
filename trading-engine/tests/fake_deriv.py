@@ -112,6 +112,8 @@ class FakeDeriv:
     payout_ratio: Decimal = Decimal("0.95")  # Rise/Fall: profit per 1 of stake when won
     ask_markup: Decimal = Decimal(0)  # added to the ask price (to test "ask above stake")
     stake_limits: bool = True  # include validation_params.stake in proposals
+    forget_proposals: int = 0  # the next N buys answer InvalidContractProposal
+    drop_on_proposal: int = 0  # the next N proposals close the link without a reply
     suspended: set[str] = field(default_factory=set)
     history_from: int = 1_760_000_000  # oldest candle the server serves (history limit)
 
@@ -421,6 +423,10 @@ class FakeDeriv:
             ]
             return reply("candles", candles)
         if "proposal" in msg and "proposal_open_contract" not in msg:
+            if self.drop_on_proposal > 0:
+                self.drop_on_proposal -= 1
+                socket.drop()  # the link dies before Deriv answers
+                return None
             symbol = msg["underlying_symbol"]
             spec = SYMBOLS[symbol]
             if symbol in self.market_closed:
@@ -467,6 +473,9 @@ class FakeDeriv:
             )
         if "buy" in msg:
             proposal = socket.proposals.pop(str(msg["buy"]), None)
+            if proposal is not None and self.forget_proposals > 0:
+                self.forget_proposals -= 1
+                proposal = None
             if proposal is None:
                 return error("buy", "InvalidContractProposal", "Proposal expired or already used.")
             stake = Decimal(str(proposal["amount"]))

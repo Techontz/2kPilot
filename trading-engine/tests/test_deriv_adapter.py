@@ -908,3 +908,30 @@ def test_a_closed_market_is_rechecked_within_a_minute(
     clock[0] += 120
     deriv.get_symbol("EURUSD")
     assert len(fake.requests) == asked
+
+
+def test_a_forgotten_proposal_is_priced_again_and_bought_once(
+    deriv: DerivAdapter, fake: FakeDeriv
+) -> None:
+    """Seen live (2026-10-12, frxUSDJPY): the buy answered InvalidContractProposal
+    and the approved trade was lost. Nothing is bought on that answer: re-price."""
+    fake.forget_proposals = 1
+    result = buy_rf(deriv)
+    assert result.contract is not None
+    assert len(fake.contracts) == 1
+    assert sum(1 for m in fake.requests if "buy" in m) == 2
+
+
+def test_a_proposal_forgotten_twice_is_refused(deriv: DerivAdapter, fake: FakeDeriv) -> None:
+    fake.forget_proposals = 2
+    with pytest.raises(OrderRejectedError, match="InvalidContractProposal"):
+        buy_rf(deriv)
+    assert not fake.contracts
+
+
+def test_pricing_reconnects_once_after_a_dropped_link(deriv: DerivAdapter, fake: FakeDeriv) -> None:
+    """Seen live (2026-10-12): "Deriv connection lost before the reply" while pricing
+    refused the trade. Pricing buys nothing, so reconnect and price again."""
+    fake.drop_on_proposal = 1
+    quote = deriv.quote_contract("R_100", rise_fall(Side.BUY))
+    assert quote.stake_min is not None and deriv.is_connected
