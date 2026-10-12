@@ -373,7 +373,17 @@ class DerivSocket:
                 raw = self._ws.recv(timeout=1.0)
             except TimeoutError:
                 continue
-            except Exception:
+            except Exception as exc:
+                # Who closed it and why (websockets: close code + reason), to tell
+                # Deriv closing the link from a network drop.
+                rcvd = getattr(exc, "rcvd", None)
+                logger.warning(
+                    "Deriv link closed: %s%s",
+                    type(exc).__name__,
+                    f" (code {rcvd.code}, reason {rcvd.reason!r})"
+                    if rcvd is not None
+                    else f": {exc}",
+                )
                 break
             self.last_message_at = time.monotonic()
             try:
