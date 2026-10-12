@@ -1,6 +1,8 @@
 "use client";
 
 import { SectionTabs } from "@/components/layout/SectionTabs";
+import { useSession } from "@/components/providers/SessionProvider";
+import { UsersPanel } from "@/features/admin/UsersPanel";
 import { BrokersScreen } from "@/features/brokers/BrokersScreen";
 import { RiskScreen } from "@/features/risk/RiskScreen";
 import { NotificationsScreen } from "@/features/system/NotificationsScreen";
@@ -8,9 +10,10 @@ import { SecurityPanel } from "@/features/system/SecurityPanel";
 import { SystemStatusPanel } from "@/features/system/SystemStatusPanel";
 import { AccountsPanel } from "./AccountsPanel";
 
-export const SETTINGS_TABS = ["brokers", "accounts", "risk", "notifications", "security", "system"] as const;
+export const SETTINGS_TABS = ["brokers", "accounts", "risk", "notifications", "security", "system", "users"] as const;
 
 export function SettingsSection() {
+  const { isAdmin } = useSession();
   return (
     <SectionTabs
       title="Settings"
@@ -22,6 +25,7 @@ export function SettingsSection() {
         { value: "notifications", label: "Notifications", content: <NotificationsScreen /> },
         { value: "security", label: "Security", content: <SecurityPanel /> },
         { value: "system", label: "System status", content: <SystemStatusPanel /> },
+        ...(isAdmin ? [{ value: "users", label: "Users", content: <UsersPanel /> }] : []),
       ]}
     />
   );

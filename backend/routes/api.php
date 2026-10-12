@@ -53,17 +53,18 @@ Route::prefix('mobile/auth')->group(function () {
 // Live updates (Server-Sent Events). Outside "throttle:api": each open tab
 // keeps one connection and reconnects about once a minute.
 Route::get('stream', [StreamController::class, 'show'])
-    ->middleware(['auth:sanctum', 'active', 'mfa.enrolled', 'throttle:stream']);
+    ->middleware(['auth:sanctum', 'active', 'approved', 'mfa.enrolled', 'throttle:stream']);
 
 // STOP TRADING and Close positions: outside "throttle:api" on their own
 // generous per-user budget, so heavy polling can never block them. Stop does
 // not wait for MFA enrolment either: stopping is always safe.
-Route::middleware(['auth:sanctum', 'active', 'throttle:trading-stop'])->group(function () {
+Route::middleware(['auth:sanctum', 'active', 'approved', 'throttle:trading-stop'])->group(function () {
     Route::post('trading/stop', [TradingController::class, 'stop']);
     Route::post('trading/close-positions', [TradingController::class, 'closePositions'])->middleware('mfa.enrolled');
 });
 
-Route::middleware(['auth:sanctum', 'active', 'throttle:api'])->group(function () {
+// 'approved': a new sign-up only gets auth/me (the waiting page) until an admin approves.
+Route::middleware(['auth:sanctum', 'active', 'approved', 'throttle:api'])->group(function () {
     Route::get('auth/me', [AuthController::class, 'me']);
 
     // Signed-in mobile devices (from the app or the website).
@@ -190,6 +191,11 @@ Route::middleware(['auth:sanctum', 'active', 'throttle:api'])->group(function ()
             // Strategy emergency stop: blocks NEW entries from one strategy for everyone.
             Route::post('strategies/{strategy}/disable', [AdminController::class, 'disableStrategy']);
             Route::post('strategies/{strategy}/enable', [AdminController::class, 'enableStrategy']);
+            // Users: approve new sign-ups, disable or re-enable accounts.
+            Route::get('users', [AdminController::class, 'users']);
+            Route::post('users/{user}/approve', [AdminController::class, 'approveUser']);
+            Route::post('users/{user}/disable', [AdminController::class, 'disableUser']);
+            Route::post('users/{user}/enable', [AdminController::class, 'enableUser']);
         });
     });
 });

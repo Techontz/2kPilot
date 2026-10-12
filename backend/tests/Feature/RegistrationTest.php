@@ -30,6 +30,15 @@ class RegistrationTest extends TestCase
         $this->assertDatabaseHas('risk_profiles', ['user_id' => $user->id, 'name' => 'Beginner']);
         $this->assertDatabaseHas('user_trading_states', ['user_id' => $user->id, 'trading_mode' => 'DEMO', 'kill_switch_engaged' => true]);
         $this->assertDatabaseHas('audit_logs', ['action' => 'auth.registered', 'actor_user_id' => $user->id]);
+        // A new sign-up waits for an admin: only auth/me answers.
+        $this->getJson('/api/auth/me')->assertOk()->assertJsonPath('user.approved', false);
+        $this->getJson('/api/trading/status')->assertForbidden()->assertJsonPath('code', 'approval_pending');
+    }
+
+    public function test_sign_up_without_approval_when_switched_off(): void
+    {
+        config(['tradepilot.registration_requires_approval' => false]);
+        $this->postJson('/api/auth/register', $this->body())->assertCreated()->assertJsonPath('user.approved', true);
         $this->getJson('/api/trading/status')->assertOk()->assertJsonPath('kill_switch_engaged', true);
     }
 

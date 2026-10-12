@@ -4,6 +4,7 @@ use App\Exceptions\DomainException;
 use App\Http\Middleware\EnsureMfaEnrolled;
 use App\Http\Middleware\EnsureMobileToken;
 use App\Http\Middleware\EnsureUserIsActive;
+use App\Http\Middleware\EnsureUserIsApproved;
 use App\Http\Middleware\EnsureWebSession;
 use App\Http\Middleware\SecurityHeaders;
 use App\Services\Engine\EngineException;
@@ -32,6 +33,7 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->redirectGuestsTo(fn () => null);
         $middleware->alias([
             'active' => EnsureUserIsActive::class,
+            'approved' => EnsureUserIsApproved::class,  // new sign-ups wait for an admin
             'mfa.enrolled' => EnsureMfaEnrolled::class,
             'web.only' => EnsureWebSession::class,       // refused with a mobile token
             'mobile.token' => EnsureMobileToken::class,  // needs a mobile token

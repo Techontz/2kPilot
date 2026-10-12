@@ -8,7 +8,7 @@ vi.mock("next/navigation", () => ({ useRouter: () => ({ replace }) }));
 const api = vi.fn();
 vi.mock("@/lib/api", async (orig) => ({ ...(await orig<typeof import("@/lib/api")>()), api: (...args: unknown[]) => api(...args) }));
 
-const USER = { id: "u1", name: "Ada", email: "ada@example.com", role: "user", mfa_enabled: false, mfa_required: false, last_login_at: null };
+const USER = { id: "u1", name: "Ada", email: "ada@example.com", role: "user", approved: true, mfa_enabled: false, mfa_required: false, last_login_at: null };
 
 beforeEach(() => {
   replace.mockClear();
@@ -45,5 +45,20 @@ describe("SessionProvider", () => {
     await act(async () => vi.advanceTimersByTimeAsync(10));
     expect(replace).toHaveBeenCalledWith("/login?next=%2Fsettings%3Ftab%3Drisk");
     window.history.replaceState(null, "", "/");
+  });
+
+  it("shows only the waiting page to a new sign-up, and opens the dashboard once approved", async () => {
+    vi.stubGlobal("matchMedia", (query: string) => ({ matches: false, media: query, addEventListener() {}, removeEventListener() {} }));
+    api.mockResolvedValueOnce({ user: { ...USER, approved: false } }).mockResolvedValue({ user: USER });
+    render(<SessionProvider><p>dashboard</p></SessionProvider>);
+    await act(async () => vi.advanceTimersByTimeAsync(10));
+    expect(screen.getByRole("heading", { name: "Waiting for approval" })).toBeInTheDocument();
+    expect(screen.queryByText("dashboard")).not.toBeInTheDocument();
+    const whatsapp = screen.getByRole("link", { name: /WhatsApp/ });
+    expect(whatsapp.getAttribute("href")).toMatch(/^https:\/\/wa\.me\/255769190100\?text=.*ada%40example\.com/);
+    expect(screen.getByRole("button", { name: /Log out/ })).toBeInTheDocument();
+    await act(async () => vi.advanceTimersByTimeAsync(30_000)); // checks again by itself
+    expect(screen.getByText("dashboard")).toBeInTheDocument();
+    vi.unstubAllGlobals();
   });
 });

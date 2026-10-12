@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useState } from "react";
+import { PendingApproval } from "@/components/auth/PendingApproval";
 import { api, ApiError, onUnauthorized } from "@/lib/api";
 import type { User } from "@/lib/types";
 
@@ -76,6 +77,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         {unreachable ? <p className="text-sm text-fg-muted">Can&apos;t reach the 2kPilot server. Retrying…</p> : <span className="sr-only">Loading</span>}
       </div>
     );
+  }
+  // A new sign-up sees nothing of the dashboard until an admin approves it.
+  if (user.approved === false && user.role !== "admin") {
+    return <PendingApproval user={user} onCheck={refresh} onLogout={logout} />;
   }
   return (
     <SessionContext.Provider value={{ user, isAdmin: user.role === "admin", refresh, logout }}>

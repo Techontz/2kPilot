@@ -9,7 +9,7 @@ import { account, tradingStatus } from "@/test/fixtures";
 const state: { status: TradingStatus; accounts: Account[]; user: User } = {
   status: tradingStatus(),
   accounts: [],
-  user: { id: "u1", name: "Ada", email: "ada@example.com", role: "user", mfa_enabled: true, mfa_required: false, last_login_at: null },
+  user: { id: "u1", name: "Ada", email: "ada@example.com", role: "user", approved: true, mfa_enabled: true, mfa_required: false, last_login_at: null },
 };
 const reloadStatus = vi.fn(async () => state.status);
 const setStatus = vi.fn();

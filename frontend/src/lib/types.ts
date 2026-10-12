@@ -18,8 +18,23 @@ export interface User {
   name: string;
   email: string;
   role: "user" | "admin";
+  /** false until an admin approves a new sign-up (admins are always approved). */
+  approved: boolean;
   mfa_enabled: boolean;
   mfa_required: boolean;
+  last_login_at: string | null;
+}
+
+/** Settings → Users (admins only). */
+export interface AdminUser {
+  id: string;
+  name: string;
+  email: string;
+  role: "user" | "admin";
+  is_active: boolean;
+  approved: boolean;
+  approved_at: string | null;
+  created_at: string | null;
   last_login_at: string | null;
 }
 

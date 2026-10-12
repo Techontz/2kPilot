@@ -50,12 +50,19 @@ class User extends Authenticatable
             'two_factor_recovery_codes' => 'encrypted:array',
             'two_factor_confirmed_at' => 'datetime',
             'last_login_at' => 'datetime',
+            'approved_at' => 'datetime',
         ];
     }
 
     public function isAdmin(): bool
     {
         return $this->role === UserRole::Admin;
+    }
+
+    /** New sign-ups wait for an admin (approved_at NULL); admins never wait. */
+    public function isApproved(): bool
+    {
+        return $this->approved_at !== null || $this->isAdmin();
     }
 
     public function tradingState(): HasOne

@@ -74,12 +74,20 @@ class AuthController extends Controller
                 'role' => UserRole::User,
                 'is_active' => true,
             ]);
+            if (! config('tradepilot.registration_requires_approval')) {
+                $user->forceFill(['approved_at' => now()])->save();
+            }
             $this->provisioner->provision($user);
 
             return $user;
         });
         $this->audit->record('auth.registered', actor: $user, targetType: 'user', targetId: $user->id,
             details: ['email' => $user->email, 'accepted_risk_disclosure' => true]);
+        if (! $user->isApproved()) {
+            User::query()->where('role', UserRole::Admin)->where('is_active', true)->pluck('id')
+                ->each(fn (string $adminId) => $this->notifier->notify('user.pending_approval',
+                    "{$user->name} ({$user->email}) signed up and is waiting for approval.", $adminId));
+        }
 
         return $this->completeLogin($request, $user, false)->setStatusCode(201);
     }
@@ -211,6 +219,7 @@ class AuthController extends Controller
             'name' => $user->name,
             'email' => $user->email,
             'role' => $user->role->value,
+            'approved' => $user->isApproved(),
             'mfa_enabled' => $user->hasMfa(),
             'mfa_required' => (bool) config('tradepilot.mfa.required'),
             'last_login_at' => $user->last_login_at?->toIso8601String(),

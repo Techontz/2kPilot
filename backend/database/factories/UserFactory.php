@@ -23,6 +23,7 @@ class UserFactory extends Factory
             'password' => static::$password ??= Hash::make(self::PASSWORD),
             'role' => UserRole::User,
             'is_active' => true,
+            'approved_at' => now(),
         ];
     }
 
@@ -35,6 +36,12 @@ class UserFactory extends Factory
     public function provisioned(): static
     {
         return $this->afterCreating(fn (User $user) => app(UserProvisioner::class)->provision($user));
+    }
+
+    /** A new sign-up still waiting for an admin. */
+    public function pending(): static
+    {
+        return $this->state(fn () => ['approved_at' => null]);
     }
 
     public function inactive(): static

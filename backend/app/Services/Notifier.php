@@ -35,6 +35,8 @@ class Notifier
         'system.engine_online' => ['success', 'Trading engine running'],
         'security.mfa' => ['info', 'Two-factor authentication'],
         'security.password' => ['info', 'Password changed'],
+        'user.pending_approval' => ['info', 'New sign-up waiting for approval'],
+        'user.approved' => ['success', 'Account approved'],
         'trading.live_revoked' => ['warning', 'Real-money trading turned off'],
         'report.daily' => ['info', 'Daily summary'],
         'backtest.failed' => ['warning', 'Backtest failed'],

@@ -57,6 +57,7 @@ class CreateUser extends Command
             return self::FAILURE;
         }
         $user = User::query()->create(['email' => $email, 'name' => $name, 'role' => UserRole::from($role), 'password' => $password, 'is_active' => true]);
+        $user->forceFill(['approved_at' => now()])->save(); // created by an operator: no waiting
         $provisioner->provision($user);
         $audit->record('user.created', actor: null, targetType: 'user', targetId: $user->id, details: ['email' => $email, 'role' => $role], actorLabel: 'cli');
         $this->info("Created {$role} user {$email}. Turn on two-factor authentication in Settings → Security after your first login.");

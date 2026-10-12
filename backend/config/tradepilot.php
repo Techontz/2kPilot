@@ -21,6 +21,8 @@ return [
     // Public sign-up (POST /api/auth/register). Users can also be created with
     // `php artisan tp:user`.
     'registration_enabled' => (bool) env('TP_REGISTRATION_ENABLED', true),
+    // New sign-ups wait for an admin's approval before they see the dashboard.
+    'registration_requires_approval' => (bool) env('TP_REGISTRATION_REQUIRES_APPROVAL', true),
 
     'frontend_url' => env('FRONTEND_URL', 'http://localhost:3421'),
 

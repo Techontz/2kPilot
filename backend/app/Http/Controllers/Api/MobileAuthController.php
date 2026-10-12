@@ -55,6 +55,12 @@ class MobileAuthController extends Controller
 
             return response()->json(['message' => 'Email or password is incorrect.', 'code' => 'invalid_credentials'], 422);
         }
+        if (! $user->isApproved()) {
+            return response()->json([
+                'message' => 'Your account is waiting for an administrator to approve it.',
+                'code' => 'approval_pending',
+            ], 403);
+        }
         $deviceName = trim($data['device_name']) ?: 'Mobile';
         if ($user->hasMfa()) {
             return response()->json([
