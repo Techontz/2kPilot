@@ -32,6 +32,40 @@ class MarketsAndRecordsTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_an_unsynced_list_says_why_it_is_empty(): void
+    {
+        $this->engineDown();
+        $account = $this->account();
+        $this->actingAs($this->me())->getJson("/api/markets/instruments?account_id={$account->id}")->assertOk()
+            ->assertJsonCount(0, 'instruments')->assertJsonPath('synced_at', null)
+            ->assertJson(fn ($json) => $json->whereType('sync_error', 'string')->etc());
+    }
+
+    public function test_a_stale_or_refreshed_list_is_fetched_again_and_kept_when_the_broker_fails(): void
+    {
+        $account = $this->account();
+        $this->symbol($account->connection_id, 'R_10', 'synthetic');
+        Http::fake(['engine.test/internal/accounts/*/symbols*' => Http::response([])]);
+        $this->actingAs($this->me())->getJson("/api/markets/instruments?account_id={$account->id}")->assertOk()->assertJsonPath('sync_error', null);
+        Http::assertNothingSent(); // fresh: served from the stored list
+
+        $this->getJson("/api/markets/instruments?account_id={$account->id}&refresh=1")->assertOk();
+        Http::assertSentCount(1);
+
+        BrokerSymbol::query()->update(['updated_at' => now()->subDay()]);
+        $this->engineDown();
+        $this->getJson("/api/markets/instruments?account_id={$account->id}")->assertOk()
+            ->assertJsonPath('instruments.0.name', 'R_10')
+            ->assertJson(fn ($json) => $json->whereType('sync_error', 'string')->etc());
+    }
+
+    private function symbol(string $connectionId, string $name, string $category): void
+    {
+        BrokerSymbol::query()->create(['connection_id' => $connectionId, 'name' => $name, 'canonical' => $name, 'category' => $category,
+            'description' => $name, 'base_currency' => $name, 'quote_currency' => 'USD', 'digits' => 3, 'point' => '0.001', 'contract_size' => '1',
+            'volume_min' => '1', 'volume_max' => '1', 'volume_step' => '1', 'trade_allowed' => true, 'market_open' => true]);
+    }
+
     public function test_quotes_are_proxied_from_the_engine(): void
     {
         $this->fakeEngine(['/internal/accounts/' => ['quotes' => ['EURUSD' => ['bid' => '1.1', 'ask' => '1.10012', 'spread' => '0.00012']], 'errors' => [], 'simulated' => true]]);

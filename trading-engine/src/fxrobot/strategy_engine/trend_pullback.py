@@ -134,8 +134,8 @@ class TrendPullbackV1(Strategy):
 
     def evaluate(self, view: MarketView, params: Any) -> Evaluation:
         p: TrendPullbackParams = params
-        ltf = list(view.candles(p.entry_timeframe))[-p.ltf_window() :]
-        htf = list(view.candles(p.higher_timeframe))[-p.htf_window() :]
+        ltf = list(view.candles(p.entry_timeframe)[-p.ltf_window() :])
+        htf = list(view.candles(p.higher_timeframe)[-p.htf_window() :])
         bar_time = ltf[-1].time if ltf else None
         if len(ltf) < p.ltf_window() or len(htf) < p.htf_window():
             return Evaluation(

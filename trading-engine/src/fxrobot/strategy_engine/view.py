@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import bisect
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime
+from typing import Any, overload
 
 from fxrobot.domain.market import Candle, SymbolInfo, Timeframe
 from fxrobot.market_data.resample import resample
@@ -19,6 +20,48 @@ class StaticView:
 
     def candles(self, timeframe: Timeframe) -> Sequence[Candle]:
         return self._candles.get(timeframe, [])
+
+
+class _Prefix(Sequence[Candle]):
+    """The first `limit` candles of a series, WITHOUT copying them.
+
+    A backtest asks for candles on every bar; copying the visible history each
+    time made long runs quadratic. Slicing (e.g. the last N bars) copies only the
+    slice. Nothing beyond `limit` is ever reachable.
+    """
+
+    __slots__ = ("_items", "_limit")
+
+    def __init__(self, items: list[Candle], limit: int) -> None:
+        self._items, self._limit = items, max(0, min(limit, len(items)))
+
+    def __len__(self) -> int:
+        return self._limit
+
+    @overload
+    def __getitem__(self, index: int) -> Candle: ...
+    @overload
+    def __getitem__(self, index: slice) -> list[Candle]: ...
+    def __getitem__(self, index: int | slice) -> Candle | list[Candle]:
+        if isinstance(index, slice):
+            start, stop, step = index.indices(self._limit)
+            return self._items[start:stop:step]
+        if index < 0:
+            index += self._limit
+        if not 0 <= index < self._limit:
+            raise IndexError("candle index out of range")
+        return self._items[index]
+
+    def __iter__(self) -> Iterator[Candle]:
+        for i in range(self._limit):
+            yield self._items[i]
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, Sequence):
+            return list(self) == list(other)
+        return NotImplemented
+
+    __hash__ = None  # type: ignore[assignment]
 
 
 class CursorView:
@@ -56,4 +99,4 @@ class CursorView:
     def candles(self, timeframe: Timeframe) -> Sequence[Candle]:
         if self.now is None:
             return []
-        return self._series.get(timeframe, [])[: self._limits.get(timeframe, 0)]
+        return _Prefix(self._series.get(timeframe, []), self._limits.get(timeframe, 0))

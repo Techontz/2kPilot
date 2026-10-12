@@ -15,6 +15,10 @@ use Illuminate\Database\Eloquent\Relations\HasOne;
  * key "rules" = a rule set built without code (template, builder, AI draft,
  * import); its versions' parameters ARE the rule set. Archived strategies
  * (archived_at set) are hidden from lists but keep their history.
+ *
+ * entries_disabled_* = an administrator's emergency stop for this strategy: the
+ * engine refuses NEW entries from it (and from users' copies of it) for
+ * everyone, with the reason. It never closes positions.
  */
 class Strategy extends BaseModel
 {
@@ -26,7 +30,7 @@ class Strategy extends BaseModel
 
     protected function casts(): array
     {
-        return ['details' => 'array', 'archived_at' => 'datetime'];
+        return ['details' => 'array', 'archived_at' => 'datetime', 'entries_disabled_at' => 'datetime'];
     }
 
     public function versions(): HasMany
@@ -52,6 +56,12 @@ class Strategy extends BaseModel
     public function scopeActive(Builder $query): void
     {
         $query->whereNull($this->qualifyColumn('archived_at'));
+    }
+
+    /** An administrator's emergency stop: no new entries from this strategy (or its copies). */
+    public function entriesDisabled(): bool
+    {
+        return $this->entries_disabled_at !== null;
     }
 
     public function isRules(): bool

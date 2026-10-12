@@ -724,6 +724,11 @@ def test_group_stats_by_side_and_session() -> None:
         "win_rate": 50.0,
         "net_pnl": 20.0,
         "profit_factor": 3.0,
+        "expectancy": 10.0,
+        "expectancy_r": None,
+        "avg_rr": 3.0,
+        "max_drawdown": 10.0,  # +30, then −10
+        "longest_losing_streak": 1,
     }
     assert by_side["SELL"]["profit_factor"] == 0.0  # no profit over a 20 loss
     assert [g["key"] for g in m["by_session"]] == ["ASIA", "LONDON"]

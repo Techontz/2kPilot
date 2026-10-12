@@ -89,6 +89,19 @@ Deriv Options are **contracts bought for a stake**, not lots. Strategies still s
 * **Rate limits** (per connection, client-side): proposal + proposal_open_contract + buy + sell 360/min and 14,400/h; balance + statement 100/min, 2,000/h; portfolio + profit_table 30/min, 1,500/h; everything else 220/min, 14,400/h; ping is free. A request that would break a budget waits up to 2 s and is otherwise refused **before it is sent** — a refused buy never executed.
 * Account type comes from Deriv (`account_type`: demo → DEMO, real → LIVE).
 
+**Checked against Deriv's public API (unauthenticated `…/ws/public`, 2026-10-11; read-only: `contracts_for`, a price quote, `ticks_history` — nothing bought):**
+
+| | R_10 (Volatility 10 Index) | R_25 (Volatility 25 Index) |
+|---|---|---|
+| Multipliers (`multiplier_range`) | 400, 1000, 2000, 3000, 4000 | 160, 400, 800, 1200, 1600 |
+| Stake (`validation_params.stake`, USD) | 1.00 – 500.00 | 1.00 – 500.00 |
+| Stop loss / take profit amounts (1.00 stake) | 0.10 – 1.00 / 0.10 – 50.00 | 0.10 – 1.00 / 0.10 – 50.00 |
+| Commission (proposal, 1.00 stake, lowest multiplier) | 0.02 (≈ 0.005 % of stake × 400) | 0.02 (≈ 0.0125 % of stake × 160) |
+| Rise/Fall | CALL/PUT, 15 s – 1 d intraday | same |
+| Pip size, hours | 0.001, open 24/7 | 0.001, open 24/7 |
+
+The stop loss and stop out apply to the profit **net of commission** (the quoted barriers for a 0.30 stop and the 1.00 stop out match stake × multiplier × move − 0.02). The adapter now reads `validation_params.stop_loss` / `take_profit` into the stake quote, and the risk engine refuses amounts outside that range before buying. Candle history: see [BACKTESTING.md](BACKTESTING.md#data) (end-only paging, about one year).
+
 `GET /api/markets/contracts?account_id=&symbol=` shows what a symbol offers (families, duration ranges, multipliers, default contract), from the engine's cached `contracts_for`.
 
 ### The Paper price feed

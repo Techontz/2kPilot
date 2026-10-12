@@ -9,7 +9,9 @@ use App\Http\Controllers\Controller;
 use App\Models\User;
 use App\Providers\AppServiceProvider;
 use App\Services\Audit\AuditLogger;
+use App\Services\Mfa\MfaLockout;
 use App\Services\Mfa\TwoFactorService;
+use App\Services\Mobile\MobileTokens;
 use App\Services\Notifier;
 use App\Services\Trading\TradingControl;
 use App\Services\Users\UserProvisioner;
@@ -36,11 +38,7 @@ use Illuminate\Validation\Rules\Password;
  */
 class AuthController extends Controller
 {
-    private const MFA_WINDOW_SECONDS = 300;
-
-    private const MFA_MAX_MISSES = 5;
-
-    private const MFA_LOCK_SECONDS = 900;
+    public const MFA_WINDOW_SECONDS = 300;
 
     public function __construct(
         private readonly AuditLogger $audit,
@@ -48,6 +46,8 @@ class AuthController extends Controller
         private readonly UserProvisioner $provisioner,
         private readonly Notifier $notifier,
         private readonly TradingControl $control,
+        private readonly MfaLockout $lockout,
+        private readonly MobileTokens $tokens,
     ) {}
 
     /**
@@ -118,44 +118,31 @@ class AuthController extends Controller
             return response()->json(['message' => 'Your sign-in expired. Enter your password again.', 'code' => 'mfa_expired'], 422);
         }
         $userId = (string) $pending['user_id'];
-        if (Cache::has("mfa:locked:{$userId}")) {
+        if ($this->lockout->locked($userId)) {
             $request->session()->forget('mfa.pending');
 
-            return $this->mfaLocked();
+            return MfaLockout::lockedResponse();
         }
         $user = User::query()->find($userId);
         if ($user === null || ! $user->is_active || ! $this->mfa->verify($user, $data['code'])) {
-            $this->audit->record('auth.mfa', AuditOutcome::Failure, $user, details: ['reason' => 'bad_code']);
-            if (RateLimiter::hit("mfa-misses:{$userId}", self::MFA_LOCK_SECONDS) >= self::MFA_MAX_MISSES) {
-                RateLimiter::clear("mfa-misses:{$userId}");
-                Cache::put("mfa:locked:{$userId}", true, self::MFA_LOCK_SECONDS);
+            if ($this->lockout->miss($userId, $user)) {
                 $request->session()->forget('mfa.pending');
-                $this->audit->record('auth.mfa.locked', AuditOutcome::Denied, $user, 'user', $userId,
-                    details: ['misses' => self::MFA_MAX_MISSES, 'locked_minutes' => self::MFA_LOCK_SECONDS / 60]);
 
-                return $this->mfaLocked();
+                return MfaLockout::lockedResponse();
             }
 
             return response()->json(['message' => 'That code is not valid.', 'code' => 'invalid_code'], 422);
         }
         $request->session()->forget('mfa.pending');
-        RateLimiter::clear("mfa-misses:{$userId}");
+        $this->lockout->passed($userId);
         // Both factors passed: the password step of this sign-in no longer counts against the email.
         RateLimiter::clear(md5('login'.AppServiceProvider::loginKey($user->email)));
 
         return $this->completeLogin($request, $user, true);
     }
 
-    private function mfaLocked(): JsonResponse
-    {
-        return response()->json([
-            'message' => 'Too many wrong codes. Wait 15 minutes, then sign in again.',
-            'code' => 'mfa_locked',
-        ], 429);
-    }
-
     /** A real hash of a random secret, checked when the email is unknown. */
-    private static function timingHash(): string
+    public static function timingHash(): string
     {
         return Cache::rememberForever('auth:timing-hash', fn () => Hash::make(Str::random(40)));
     }
@@ -164,8 +151,10 @@ class AuthController extends Controller
     {
         $user = $request->user();
         Auth::guard('web')->logout();
-        $request->session()->invalidate();
-        $request->session()->regenerateToken();
+        if ($request->hasSession()) { // bearer-token requests have none (the app uses /api/mobile/auth/logout)
+            $request->session()->invalidate();
+            $request->session()->regenerateToken();
+        }
         if ($user) {
             $this->audit->record('auth.logout', actor: $user);
         }
@@ -177,7 +166,7 @@ class AuthController extends Controller
      * Settings → Security: change the password. The current one is required;
      * the session id is renewed and this browser stays signed in (other
      * browsers are signed out on their next request: Sanctum compares the
-     * password hash kept in each session).
+     * password hash kept in each session). Every mobile app token is revoked.
      */
     public function changePassword(Request $request): JsonResponse
     {
@@ -195,6 +184,7 @@ class AuthController extends Controller
         $this->audit->record('auth.password_changed', actor: $user, targetType: 'user', targetId: $user->id);
         $this->notifier->notify('security.password', "The password for {$user->email} was changed. If this was not you, contact your administrator.", $user->id);
         $this->control->revokeLiveIf($user->id, $user, 'your password was changed', fn () => true);
+        $this->tokens->revokeAll($user, 'password_changed'); // the mobile app signs in again
 
         return response()->json(['ok' => true]);
     }

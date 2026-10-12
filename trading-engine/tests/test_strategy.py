@@ -228,7 +228,11 @@ def test_timeframes_and_required_bars() -> None:
 
 def test_registry() -> None:
     assert get_strategy("trend_pullback").key == "trend_pullback"
-    assert [s.key for s in list_strategies()] == ["trend_pullback", "rules"]
+    assert [s.key for s in list_strategies()] == [
+        "trend_pullback",
+        "adaptive_trend_momentum",
+        "rules",
+    ]
     with pytest.raises(KeyError, match="Unknown strategy"):
         get_strategy("martingale")
 

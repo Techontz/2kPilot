@@ -46,6 +46,7 @@ class UserProvisioner
         'max_daily_loss_amount' => null,
         'max_consecutive_losses' => 3,
         'daily_profit_target_amount' => null,
+        'min_account_balance' => null, // optional: no new trades below this balance
     ];
 
     public function provision(User $user): void

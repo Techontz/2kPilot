@@ -19,7 +19,7 @@ import { BacktestStatus } from "@/features/strategies/BacktestsList";
 import { contractSummary } from "@/lib/contracts";
 import { formatCurrency, formatDate, formatDuration, formatNumber, formatPct, formatPrice, formatSignedCurrency, formatTime, humanize } from "@/lib/format";
 import { useApi } from "@/lib/hooks";
-import type { Backtest, BacktestTrade, Metrics } from "@/lib/types";
+import type { Backtest, BacktestTrade, GroupStat, Metrics, ValidationGate } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const PAGE = 50;
@@ -41,18 +41,21 @@ export function BacktestReport({ id }: { id: string }) {
   return (
     <div className="space-y-6">
       <Button variant="ghost" size="sm" asChild className="-ml-2"><Link href="/strategies?tab=backtests"><ArrowLeft aria-hidden /> All tests</Link></Button>
-      <header className="flex flex-col gap-5 sm:flex-row sm:items-end sm:gap-7">
-        <Artwork seed={b.name} className="size-32 shrink-0 shadow-[0_8px_40px_rgb(0_0_0/0.35)] sm:size-44" />
+      <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:gap-7">
+        <div className="flex items-center gap-3.5 sm:contents">
+          <Artwork seed={b.name} className="size-16 shrink-0 shadow-[0_8px_40px_rgb(0_0_0/0.35)] sm:size-44" />
+          <p className="flex flex-wrap items-center gap-2 text-sm font-semibold text-fg sm:hidden"><FlaskConical className="size-4 text-brand-ink" aria-hidden /> Test on history <BacktestStatus b={b} /></p>
+        </div>
         <div className="min-w-0 space-y-3">
-        <p className="flex items-center gap-2 text-sm font-semibold text-fg"><FlaskConical className="size-4 text-brand-ink" aria-hidden /> Test on history <BacktestStatus b={b} /></p>
-        <h1 className="title-xl text-4xl text-fg sm:text-5xl">{b.name}</h1>
+        <p className="hidden items-center gap-2 text-sm font-semibold text-fg sm:flex"><FlaskConical className="size-4 text-brand-ink" aria-hidden /> Test on history <BacktestStatus b={b} /></p>
+        <h1 className="title-xl text-[2rem] break-words text-fg sm:text-5xl">{b.name}</h1>
         {m && <p className="text-sm text-fg-muted">Net result <PnlText value={m.net_pnl} currency={currency} className="ml-1 text-2xl font-extrabold tracking-tight" /></p>}
-        <p className="flex flex-wrap items-center gap-2 text-sm text-fg-muted">
+        <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-fg-muted max-sm:flex-col max-sm:items-start">
           {b.data_source === "synthetic" && <Pill tone="warning">Practice (synthetic) data</Pill>}
           <span>{b.symbol} · {b.timeframe} candles · {formatDate(b.start)} – {formatDate(b.end)}</span>
-          <span>· starting balance <Money value={b.initial_capital} currency={currency} /></span>
-          {contract && <span>· {contractSummary(contract, { currency })}</span>}
-          {m?.payout_ratio !== undefined && <span>· payout estimate {m.payout_ratio}</span>}
+          <span><span aria-hidden className="max-sm:hidden">· </span>starting balance <Money value={b.initial_capital} currency={currency} /></span>
+          {contract && <span><span aria-hidden className="max-sm:hidden">· </span>{contractSummary(contract, { currency })}</span>}
+          {m?.payout_ratio !== undefined && <span><span aria-hidden className="max-sm:hidden">· </span>payout estimate {m.payout_ratio}</span>}
         </p>
         </div>
       </header>
@@ -72,6 +75,7 @@ export function BacktestReport({ id }: { id: string }) {
           <ul className="list-disc space-y-0.5 pl-5">{warnings.map((w) => <li key={w}>{w}</li>)}</ul>
         </Notice>
       )}
+      {b.report?.validation ? <ValidationCard v={b.report.validation as ValidationGate} /> : null}
       {m && <MetricsView m={m} currency={currency} />}
       {trades.data && <TradesTable trades={trades.data} symbol={b.symbol} currency={currency} />}
     </div>
@@ -80,10 +84,10 @@ export function BacktestReport({ id }: { id: string }) {
 
 function Kpi({ label, children, hint }: { label: ReactNode; children: ReactNode; hint?: ReactNode }) {
   return (
-    <Card size="sm">
+    <Card size="sm" className="min-w-0">
       <CardContent>
         <div className="text-xs font-semibold text-fg-muted">{label}</div>
-        <div className="num mt-1.5 text-2xl font-extrabold tracking-tight text-fg">{children}</div>
+        <div className="num mt-1.5 truncate text-xl font-extrabold tracking-tight text-fg sm:text-2xl">{children}</div>
         {hint && <div className="mt-0.5 text-xs text-fg-subtle">{hint}</div>}
       </CardContent>
     </Card>
@@ -96,7 +100,7 @@ export function MetricsView({ m, currency }: { m: Metrics; currency?: string }) 
   const streak = m.longest_losing_streak ?? m.max_consecutive_losses;
   return (
     <>
-      <section aria-label="Key results" className="grid grid-cols-2 gap-3 md:grid-cols-4">
+      <section aria-label="Key results" className="grid grid-cols-2 gap-2.5 sm:gap-3 md:grid-cols-4">
         <Kpi label="Net profit / loss" hint={m.return_pct !== null ? `${formatPct(m.return_pct, 2, true)} of the starting balance` : undefined}>
           <PnlText value={m.net_pnl} currency={currency} />
         </Kpi>
@@ -118,6 +122,18 @@ export function MetricsView({ m, currency }: { m: Metrics; currency?: string }) 
           <CardContent>{drawdown.length > 1 ? <EquityCurve data={drawdown} label="Drawdown" variant="drawdown" format={(v) => `${v.toFixed(2)}%`} /> : <p className="text-sm text-fg-muted">No drawdown to show.</p>}</CardContent>
         </Card>
       </div>
+      {(m.by_regime?.length ?? 0) > 0 && (
+        <Card>
+          <CardHeader><CardTitle>By market regime at entry</CardTitle><CardDescription>Trend, sideways or high-volatility conditions when each trade was taken (closed candles only).</CardDescription></CardHeader>
+          <CardContent><GroupTable groups={m.by_regime ?? []} currency={currency} label="Regime" /></CardContent>
+        </Card>
+      )}
+      {m.by_symbol.length > 1 && (
+        <Card>
+          <CardHeader><CardTitle>By market</CardTitle></CardHeader>
+          <CardContent><GroupTable groups={m.by_symbol} currency={currency} label="Market" /></CardContent>
+        </Card>
+      )}
       {m.monthly.length > 1 && (
         <Card>
           <CardHeader><CardTitle>Month by month</CardTitle></CardHeader>
@@ -125,6 +141,99 @@ export function MetricsView({ m, currency }: { m: Metrics; currency?: string }) 
         </Card>
       )}
     </>
+  );
+}
+
+/** Results per group (regime, market…): the same metrics for each slice. */
+export function GroupTable({ groups, currency, label }: { groups: GroupStat[]; currency?: string; label: string }) {
+  return (
+    <>
+    {/* Phones: one card per group with a compact stat grid. */}
+    <ul className="space-y-2 sm:hidden" aria-label={`Results by ${label.toLowerCase()}`}>
+      {groups.map((g) => (
+        <li key={g.key} className="rounded-md bg-surface-raised p-3">
+          <div className="flex items-start justify-between gap-3">
+            <span className="min-w-0 font-bold break-words text-fg">{humanize(g.key)}</span>
+            <span className="shrink-0 text-right">
+              <PnlText value={g.net_pnl} currency={currency} className="block font-extrabold" />
+              <span className="block text-[11px] text-fg-subtle">net after costs</span>
+            </span>
+          </div>
+          <dl className="mt-2 grid grid-cols-3 gap-x-3 gap-y-2 text-xs">
+            {([
+              ["Trades", g.trades],
+              ["Win rate", formatPct(g.win_rate, 0)],
+              ["Profit factor", g.profit_factor == null ? "—" : formatNumber(g.profit_factor)],
+              ["Per trade", g.expectancy == null ? "—" : formatSignedCurrency(g.expectancy, currency)],
+              ["Avg R:R", g.avg_rr == null ? "—" : formatNumber(g.avg_rr)],
+              ["Max drawdown", g.max_drawdown == null ? "—" : formatCurrency(g.max_drawdown, currency)],
+              ["Losing streak", g.longest_losing_streak ?? "—"],
+            ] as [string, ReactNode][]).map(([k, v]) => (
+              <div key={k} className="min-w-0">
+                <dt className="truncate text-fg-subtle">{k}</dt>
+                <dd className="num mt-0.5 truncate text-[13px] font-bold text-fg">{v}</dd>
+              </div>
+            ))}
+          </dl>
+        </li>
+      ))}
+    </ul>
+    <div className="hidden overflow-x-auto sm:block">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>{label}</TableHead><TableHead className="text-right">Trades</TableHead><TableHead className="text-right">Win rate</TableHead>
+            <TableHead className="text-right">Profit factor</TableHead><TableHead className="text-right">Per trade</TableHead><TableHead className="text-right">Avg R:R</TableHead>
+            <TableHead className="text-right">Max drawdown</TableHead><TableHead className="text-right">Losing streak</TableHead><TableHead className="text-right">Net (after costs)</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {groups.map((g) => (
+            <TableRow key={g.key}>
+              <TableCell className="font-semibold">{humanize(g.key)}</TableCell>
+              <TableCell className="num text-right">{g.trades}</TableCell>
+              <TableCell className="num text-right">{formatPct(g.win_rate, 0)}</TableCell>
+              <TableCell className="num text-right">{g.profit_factor == null ? "—" : formatNumber(g.profit_factor)}</TableCell>
+              <TableCell className="num text-right">{g.expectancy == null ? "—" : formatSignedCurrency(g.expectancy, currency)}</TableCell>
+              <TableCell className="num text-right">{g.avg_rr == null ? "—" : formatNumber(g.avg_rr)}</TableCell>
+              <TableCell className="num text-right">{g.max_drawdown == null ? "—" : formatCurrency(g.max_drawdown, currency)}</TableCell>
+              <TableCell className="num text-right">{g.longest_losing_streak ?? "—"}</TableCell>
+              <TableCell className="text-right"><PnlText value={g.net_pnl} currency={currency} /></TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+    </>
+  );
+}
+
+/** The demo-forward-testing gate: every check with its reason. Never enables anything. */
+export function ValidationCard({ v, compact }: { v: ValidationGate; compact?: boolean }) {
+  const list = (
+    <ul className="space-y-1.5 text-xs sm:space-y-0.5">
+      {v.checks.map((c) => (
+        <li key={c.name} className={cn("flex gap-1.5 break-words", c.passed ? "text-fg-muted" : "text-fg")}>
+          <span aria-hidden className={cn("shrink-0 font-bold", c.passed ? "text-positive" : "text-negative")}>{c.passed ? "✓" : "✗"}</span>
+          <span className="min-w-0"><span className="font-semibold">{c.name}</span>: {c.detail}</span>
+        </li>
+      ))}
+    </ul>
+  );
+  if (compact) {
+    return (
+      <div className="space-y-1">
+        <Pill tone={v.qualifies_for_demo_forward_testing ? "positive" : "warning"}>{v.qualifies_for_demo_forward_testing ? "Qualifies for demo forward testing" : "Not validated for demo forward testing"}</Pill>
+        {list}
+      </div>
+    );
+  }
+  return (
+    <Notice tone={v.qualifies_for_demo_forward_testing ? "success" : "warning"}
+      title={v.qualifies_for_demo_forward_testing ? "Qualifies for demo forward testing" : "Does not qualify for demo forward testing"}>
+      {list}
+      <p className="mt-1 text-xs text-fg-subtle">{v.note}</p>
+    </Notice>
   );
 }
 
@@ -172,14 +281,18 @@ function TradesTable({ trades, symbol, currency }: { trades: BacktestTrade[]; sy
                 </TableBody>
               </Table>
             </div>
-            <ul className="divide-y divide-line md:hidden">
+            <ul className="space-y-2 md:hidden">
               {rows.map((t) => (
-                <li key={t.id} className="flex items-center justify-between gap-3 py-2.5">
-                  <span className="min-w-0 text-sm">
-                    <span className="flex items-center gap-2">{dir(t)} {result(t)}</span>
-                    <span className="block text-xs text-fg-subtle">{formatTime(t.entry_time)}</span>
-                  </span>
-                  <PnlText value={t.net_pnl} currency={currency} className="font-semibold" />
+                <li key={t.id} className="rounded-md bg-surface-raised px-3.5 py-3">
+                  <p className="flex items-center justify-between gap-3">
+                    <span className="flex min-w-0 flex-wrap items-center gap-2">{dir(t)} {result(t)}</span>
+                    <PnlText value={t.net_pnl} currency={currency} className="shrink-0 text-base font-extrabold" />
+                  </p>
+                  <p className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-fg-muted">
+                    <span>{formatTime(t.entry_time)}</span>
+                    <span>{contract ? "Stake" : "Size"} <span className="num text-fg">{t.stake ? formatCurrency(t.stake, currency) : `${Number(t.volume)} lots`}</span></span>
+                    <span className="num">{formatPrice(t.entry_price, symbol)} → {formatPrice(t.exit_price, symbol)}</span>
+                  </p>
                 </li>
               ))}
             </ul>

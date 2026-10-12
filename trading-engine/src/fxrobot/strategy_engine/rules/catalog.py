@@ -205,6 +205,20 @@ INDICATORS: dict[str, IndicatorSpec] = {
             (OutputSpec("value", "Value", "price_distance"),),
         ),
         IndicatorSpec(
+            "adx",
+            "Average Directional Index (ADX)",
+            "ADX",
+            "Trend STRENGTH from 0 to 100 (Wilder), not direction: readings above ~25 are "
+            "usually called a trend, below ~20 a range. +DI above −DI means upward pressure "
+            "dominates.",
+            (_period(14, "bars measured"),),
+            (
+                OutputSpec("adx", "ADX", "oscillator"),
+                OutputSpec("plus_di", "+DI", "oscillator"),
+                OutputSpec("minus_di", "−DI", "oscillator"),
+            ),
+        ),
+        IndicatorSpec(
             "highest",
             "Highest of previous bars (Donchian high)",
             "Highest",
@@ -273,6 +287,8 @@ def lookback(indicator: str, params: dict[str, Any]) -> int:
         return 3 * p
     if indicator in ("rsi", "atr"):
         return 3 * p + 1
+    if indicator == "adx":
+        return 6 * p  # double Wilder smoothing (DI, then ADX)
     if indicator == "macd":
         return 3 * int(params["slow"]) + int(params["signal"])
     return p + 1  # highest, lowest, roc

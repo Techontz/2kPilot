@@ -43,7 +43,9 @@ from fxrobot.strategy_engine.rules.catalog import (
 )
 
 PriceField = Literal["open", "high", "low", "close"]
-IndicatorKey = Literal["sma", "ema", "rsi", "macd", "bollinger", "atr", "highest", "lowest", "roc"]
+IndicatorKey = Literal[
+    "sma", "ema", "rsi", "macd", "bollinger", "atr", "highest", "lowest", "roc", "adx"
+]
 Operator = Literal["crosses_above", "crosses_below", "gt", "gte", "lt", "lte", "between"]
 CROSSES = ("crosses_above", "crosses_below")
 
@@ -163,6 +165,9 @@ class Operand(BaseModel):
             return f"{self.indicator.upper()} {p['period']}{src}"
         if self.indicator in ("rsi", "atr", "roc"):
             return f"{self.indicator.upper()} {p['period']}"
+        if self.indicator == "adx":
+            di = {"adx": "ADX", "plus_di": "+DI", "minus_di": "−DI"}[self.output or "adx"]
+            return f"{di} {p['period']}"
         if self.indicator == "macd":
             name = {
                 "line": "MACD line",

@@ -567,6 +567,19 @@ export interface StrategyDetails {
   suggested_timeframe?: Timeframe;
   suggested_contract?: Partial<ContractSpec> & { contract_family: ContractFamily };
   suggested_contract_note?: string;
+  /** Paper accounts: the contract to start from when it differs (e.g. Spot). */
+  suggested_contract_paper?: Partial<ContractSpec> & { contract_family: ContractFamily };
+  /** Set by the engine for code strategies with limits; missing = any. */
+  supported_contract_families?: ContractFamily[];
+  supported_symbols?: string[];
+}
+
+/** The "qualifies for demo forward testing" gate of a split / walk-forward test. */
+export interface ValidationGate {
+  qualifies_for_demo_forward_testing: boolean;
+  checks: { name: string; passed: boolean; detail: string }[];
+  reasons: string[];
+  note: string;
 }
 
 export interface PerformanceStats {
@@ -591,6 +604,14 @@ export interface BacktestHeadline {
   max_drawdown_pct: number | null;
   contract_family: ContractFamily | null;
   run_at: string | null;
+  kind?: string;
+  data_source?: string;
+  profit_factor?: number | null;
+  expectancy?: number | null;
+  avg_rr?: number | null;
+  longest_losing_streak?: number | null;
+  by_regime?: GroupStat[];
+  validation?: ValidationGate | null;
 }
 
 export interface Strategy {
@@ -614,6 +635,13 @@ export interface Strategy {
   assignments: Assignment[];
   performance?: { demo: PerformanceStats; live: PerformanceStats | null };
   backtest?: BacktestHeadline | null;
+  /** The latest completed backtest per market (results by instrument). */
+  backtests_by_symbol?: BacktestHeadline[];
+  /** Markets / contract families the strategy supports; null = any. */
+  contract_families?: ContractFamily[] | null;
+  symbols?: string[] | null;
+  /** An administrator's emergency stop on new entries (inherited from the built-in for copies). */
+  entries_disabled?: { at: string | null; reason: string | null; inherited: boolean } | null;
   live_trades: number;
   live_net_pnl: number;
   last_backtest: { id: string; status: string; metrics: Metrics | null } | null;
@@ -777,6 +805,8 @@ export interface Metrics {
   by_session: GroupStat[];
   by_side: GroupStat[];
   by_strategy: GroupStat[];
+  /** Results by the market regime at entry (backtests). */
+  by_regime?: GroupStat[];
   longest_losing_streak?: number;
   largest_win?: number | null;
   largest_loss?: number | null;
@@ -800,6 +830,11 @@ export interface GroupStat {
   win_rate: number | null;
   net_pnl: number | null;
   profit_factor: number | null;
+  expectancy?: number | null;
+  expectancy_r?: number | null;
+  avg_rr?: number | null;
+  max_drawdown?: number | null;
+  longest_losing_streak?: number;
 }
 
 export interface Performance extends Partial<Metrics> {
@@ -882,6 +917,7 @@ export interface BacktestTrade {
   stake?: Decimal | null;
   payout?: Decimal | null;
   outcome?: "WON" | "LOST" | "SOLD" | null;
+  regime?: string | null;
 }
 
 export interface RiskProfile {
@@ -914,6 +950,7 @@ export interface RiskProfile {
   max_daily_loss_amount: Decimal | null;
   max_consecutive_losses: number | null;
   daily_profit_target_amount: Decimal | null;
+  min_account_balance?: Decimal | null;
   accounts_count?: number;
 }
 

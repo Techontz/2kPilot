@@ -10,6 +10,8 @@ use App\Http\Controllers\Api\BrokerController;
 use App\Http\Controllers\Api\DatasetController;
 use App\Http\Controllers\Api\MarketController;
 use App\Http\Controllers\Api\MfaController;
+use App\Http\Controllers\Api\MobileAuthController;
+use App\Http\Controllers\Api\MobileDeviceController;
 use App\Http\Controllers\Api\NotificationController;
 use App\Http\Controllers\Api\OverviewController;
 use App\Http\Controllers\Api\PositionController;
@@ -37,6 +39,14 @@ Route::prefix('auth')->group(function () {
     Route::post('logout', [AuthController::class, 'logout'])->middleware('auth:sanctum');
 });
 
+// Mobile app sign-in: bearer tokens instead of the cookie session (same "login"
+// throttle and MFA lockout as the website).
+Route::prefix('mobile/auth')->group(function () {
+    Route::post('login', [MobileAuthController::class, 'login'])->middleware('throttle:login');
+    Route::post('mfa', [MobileAuthController::class, 'challenge'])->middleware('throttle:mfa');
+    Route::post('logout', [MobileAuthController::class, 'logout'])->middleware(['auth:sanctum', 'mobile.token']);
+});
+
 // The "Sign in with Deriv" return URL (GET api/brokers/deriv/oauth/callback) lives in
 // routes/web.php: it is a full-page redirect from Deriv, not a dashboard API call.
 
@@ -56,15 +66,26 @@ Route::middleware(['auth:sanctum', 'active', 'throttle:trading-stop'])->group(fu
 Route::middleware(['auth:sanctum', 'active', 'throttle:api'])->group(function () {
     Route::get('auth/me', [AuthController::class, 'me']);
 
-    // Settings → Security (always reachable, even when MFA enrolment is required)
-    Route::prefix('auth/mfa')->middleware('throttle:mfa')->group(function () {
+    // Signed-in mobile devices (from the app or the website).
+    Route::get('auth/tokens', [MobileAuthController::class, 'tokens']);
+    Route::delete('auth/tokens/{id}', [MobileAuthController::class, 'revokeToken']);
+
+    // Push notification registration (mobile app only).
+    Route::middleware('mobile.token')->group(function () {
+        Route::post('mobile/devices', [MobileDeviceController::class, 'store']);
+        Route::delete('mobile/devices', [MobileDeviceController::class, 'destroy']);
+    });
+
+    // Settings → Security (always reachable, even when MFA enrolment is required;
+    // website only: the mobile app cannot change the password or MFA).
+    Route::prefix('auth/mfa')->middleware(['web.only', 'throttle:mfa'])->group(function () {
         Route::post('setup', [MfaController::class, 'setup']);
         Route::post('confirm', [MfaController::class, 'confirm']);
         Route::post('disable', [MfaController::class, 'disable']);
         Route::post('recovery-codes', [MfaController::class, 'recoveryCodes']);
     });
 
-    Route::put('auth/password', [AuthController::class, 'changePassword'])->middleware('throttle:password');
+    Route::put('auth/password', [AuthController::class, 'changePassword'])->middleware(['web.only', 'throttle:password']);
 
     Route::middleware('mfa.enrolled')->group(function () {
         Route::get('system/status', [SystemController::class, 'status']);
@@ -162,10 +183,13 @@ Route::middleware(['auth:sanctum', 'active', 'throttle:api'])->group(function ()
         Route::post('notifications/read', [NotificationController::class, 'markRead']);
         Route::get('audit', [AuditController::class, 'index']);
 
-        // Platform operations (admins only)
-        Route::prefix('admin')->middleware('throttle:trading')->group(function () {
+        // Platform operations (admins only, website only)
+        Route::prefix('admin')->middleware(['web.only', 'throttle:trading'])->group(function () {
             Route::post('halt', [AdminController::class, 'halt']);
             Route::post('resume', [AdminController::class, 'resume']);
+            // Strategy emergency stop: blocks NEW entries from one strategy for everyone.
+            Route::post('strategies/{strategy}/disable', [AdminController::class, 'disableStrategy']);
+            Route::post('strategies/{strategy}/enable', [AdminController::class, 'enableStrategy']);
         });
     });
 });

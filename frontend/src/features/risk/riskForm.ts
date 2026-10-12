@@ -44,6 +44,7 @@ export const ADVANCED_GROUPS: { title: string; fields: LimitField[] }[] = [
     { key: "max_drawdown_pct", label: "Maximum drawdown", unit: "pct", term: "drawdown", help: "Hitting this switches trading off for the account until you review it." },
     { key: "cooldown_after_losses", label: "Pause after losses in a row", unit: "count", help: "Start a pause after this many losses in a row…" },
     { key: "cooldown_minutes", label: "Pause length", unit: "minutes", help: "…for this long. Set both or neither." },
+    { key: "min_account_balance", label: "Minimum account balance", unit: "money", help: "No new trades while the balance is below this. Empty = off." },
   ] },
   { title: "Exposure", fields: [
     { key: "max_positions_per_symbol", label: "Positions per symbol", unit: "count", help: "Avoid stacking trades on one instrument." },

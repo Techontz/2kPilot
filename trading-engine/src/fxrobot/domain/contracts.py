@@ -488,3 +488,9 @@ class StakeQuote:
     payout: Decimal | None = None
     simulated: bool = False
     detail: str = ""
+    # Multipliers: the broker's range for limit_order amounts (Deriv:
+    # validation_params.stop_loss / take_profit). None = not reported.
+    stop_loss_min: Decimal | None = None
+    stop_loss_max: Decimal | None = None
+    take_profit_min: Decimal | None = None
+    take_profit_max: Decimal | None = None

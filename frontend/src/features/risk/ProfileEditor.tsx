@@ -135,7 +135,7 @@ export function ProfileEditor({
 
           {action.error && Object.keys(errors).length === 0 && <Notice tone="danger">{action.error}</Notice>}
         </form>
-        <SheetFooter className="flex-row justify-end border-t border-line">
+        <SheetFooter className="flex-row justify-end border-t border-line max-sm:grid max-sm:grid-cols-2">
           <Button variant="ghost" onClick={onClose} disabled={action.busy}>Cancel</Button>
           <Button type="submit" form="risk-profile-form" disabled={action.busy || !form.name.trim()}>
             {action.busy ? "Saving…" : "Save profile"}

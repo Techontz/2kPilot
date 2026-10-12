@@ -14,6 +14,7 @@ import { api, ApiError } from "@/lib/api";
 import { contractSummary } from "@/lib/contracts";
 import type { Strategy } from "@/lib/types";
 import type { StrategyActions } from "./StrategiesSection";
+import { StrategyInsights } from "./StrategyInsights";
 import { strategyTimeframe, uniqueName } from "./strategyUtils";
 
 const LEVEL_ORDER: Record<string, number> = { beginner: 0, intermediate: 1, advanced: 2 };
@@ -94,13 +95,14 @@ export function TemplateGallery({ strategies, actions }: { strategies: Loaded; a
           ))}
         </ul>
       </section>
-      <TemplateSheet template={open} onClose={() => setOpen(null)} copying={copying} onUse={(t) => void use(t)} onTest={(t) => { setOpen(null); actions.test(t); }} />
+      <TemplateSheet template={open} onClose={() => setOpen(null)} copying={copying} onUse={(t) => void use(t)} onTest={(t) => { setOpen(null); actions.test(t); }} onChanged={actions.reload} />
     </div>
   );
 }
 
-function TemplateSheet({ template: t, onClose, copying, onUse, onTest }: {
+function TemplateSheet({ template: t, onClose, copying, onUse, onTest, onChanged }: {
   template: Strategy | null;
+  onChanged?: () => void;
   onClose: () => void;
   copying: string | null;
   onUse: (t: Strategy) => void;
@@ -113,7 +115,7 @@ function TemplateSheet({ template: t, onClose, copying, onUse, onTest }: {
         {t && (
           <>
             <SheetHeader className="gap-3 p-5 pt-12 pb-4">
-              <Artwork seed={`${t.name} ${t.description}`} className="aspect-[16/9] w-full shadow-raised" />
+              <Artwork seed={`${t.name} ${t.description}`} className="aspect-[16/9] w-full shadow-raised max-sm:aspect-[5/2]" />
               <div className="flex items-center gap-2 pt-1"><DifficultyBadge level={d.difficulty} /><span className="eyebrow text-fg-subtle">Template</span></div>
               <SheetTitle className="text-2xl font-extrabold">{t.name}</SheetTitle>
               <SheetDescription>{t.description}</SheetDescription>
@@ -136,11 +138,13 @@ function TemplateSheet({ template: t, onClose, copying, onUse, onTest }: {
                 {d.suggested_symbols?.length ? <><dt className="text-fg-subtle">Markets</dt><dd className="font-semibold break-words text-fg">{d.suggested_symbols.join(", ")}</dd></> : null}
                 {d.suggested_contract && <><dt className="text-fg-subtle">Contract</dt><dd className="font-semibold text-fg">{contractSummary({ ...d.suggested_contract }).replace(/ · stake from risk profile$/, "")}</dd></>}
               </dl>
+              {t.key !== "rules" && <StrategyInsights strategy={t} onChanged={onChanged} />}
+              {d.suggested_contract_note && <p className="text-xs text-fg-muted">{d.suggested_contract_note}</p>}
               <p role="note" className="rounded-lg border border-line p-3 text-xs leading-relaxed text-fg-muted">
                 {d.disclaimer ?? "Educational template — not a recommendation. No strategy is claimed to be profitable; test it on history and run it on a demo account first."}
               </p>
             </div>
-            <SheetFooter className="flex-row gap-2 border-t border-line p-4">
+            <SheetFooter className="flex-row gap-2 border-t border-line p-4 max-sm:pb-[calc(1rem+env(safe-area-inset-bottom))]">
               <Button className="flex-1" onClick={() => onUse(t)} disabled={copying !== null}>
                 <Copy aria-hidden /> {copying === t.id ? "Copying…" : "Use this template"}
               </Button>

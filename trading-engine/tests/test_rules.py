@@ -502,7 +502,18 @@ def test_fixed_window_makes_live_and_backtest_agree() -> None:
 def test_catalog_lists_everything_the_builder_needs() -> None:
     cat = catalog_json(ai_drafting_available=False)
     keys = {i["key"] for i in cat["indicators"]}
-    assert keys == {"sma", "ema", "rsi", "macd", "bollinger", "atr", "highest", "lowest", "roc"}
+    assert keys == {
+        "sma",
+        "ema",
+        "rsi",
+        "macd",
+        "bollinger",
+        "atr",
+        "highest",
+        "lowest",
+        "roc",
+        "adx",
+    }
     macd_spec = next(i for i in cat["indicators"] if i["key"] == "macd")
     assert [o["key"] for o in macd_spec["outputs"]] == ["line", "signal", "histogram"]
     assert {p["key"]: p["default"] for p in macd_spec["params"]} == {

@@ -2,7 +2,9 @@
 
 use App\Exceptions\DomainException;
 use App\Http\Middleware\EnsureMfaEnrolled;
+use App\Http\Middleware\EnsureMobileToken;
 use App\Http\Middleware\EnsureUserIsActive;
+use App\Http\Middleware\EnsureWebSession;
 use App\Http\Middleware\SecurityHeaders;
 use App\Services\Engine\EngineException;
 use Illuminate\Foundation\Application;
@@ -19,6 +21,8 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware): void {
         // Cookie sessions + CSRF for the Next.js dashboard (Sanctum SPA auth).
+        // The mobile app sends no Origin/Referer: Sanctum treats its requests as
+        // stateless and authenticates the bearer token (no session, no CSRF).
         $middleware->statefulApi();
         // Proxies trusted for X-Forwarded-For (the client IP behind rate limits and
         // audit logs) come from config/trustedproxy.php (TRUSTED_PROXIES).
@@ -29,6 +33,8 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->alias([
             'active' => EnsureUserIsActive::class,
             'mfa.enrolled' => EnsureMfaEnrolled::class,
+            'web.only' => EnsureWebSession::class,       // refused with a mobile token
+            'mobile.token' => EnsureMobileToken::class,  // needs a mobile token
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
@@ -41,5 +47,5 @@ return Application::configure(basePath: dirname(__DIR__))
         $exceptions->render(fn (EngineException $e) => response()->json(
             ['message' => $e->getMessage(), 'code' => $e->errorCode] + ($e->problems() ? ['problems' => $e->problems()] : []), $e->httpStatus()));
         // Never log secrets that might sit in request input.
-        $exceptions->dontFlash(['password', 'password_confirmation', 'current_password', 'token', 'code', 'mfa_code']);
+        $exceptions->dontFlash(['password', 'password_confirmation', 'current_password', 'token', 'code', 'mfa_code', 'mfa_token', 'fcm_token']);
     })->create();

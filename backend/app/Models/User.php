@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Enums\UserRole;
+use App\Services\Mobile\MobileTokens;
 use Database\Factories\UserFactory;
 use Illuminate\Database\Eloquent\Attributes\Hidden;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
@@ -15,7 +16,8 @@ use Laravel\Sanctum\HasApiTokens;
  * A 2kPilot user. Signs up at /signup or is created with `php artisan tp:user`
  * (both go through UserProvisioner). Owns their brokers, accounts, risk
  * profiles, strategies and backtests. MFA secret and recovery codes are
- * encrypted at rest (cast `encrypted`).
+ * encrypted at rest (cast `encrypted`). The mobile app signs in with Sanctum
+ * tokens (HasApiTokens; MobileTokens).
  */
 #[Hidden(['password', 'remember_token', 'two_factor_secret', 'two_factor_recovery_codes'])]
 class User extends Authenticatable
@@ -26,6 +28,17 @@ class User extends Authenticatable
     protected $dateFormat = 'Y-m-d H:i:s.u';
 
     protected $fillable = ['name', 'email', 'password', 'role', 'is_active'];
+
+    protected static function booted(): void
+    {
+        // Deactivating a user signs every mobile device out (the dashboard
+        // session ends on its next request: EnsureUserIsActive).
+        static::updated(function (User $user) {
+            if ($user->wasChanged('is_active') && ! $user->is_active) {
+                app(MobileTokens::class)->revokeAll($user, 'deactivated');
+            }
+        });
+    }
 
     protected function casts(): array
     {

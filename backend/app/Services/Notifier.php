@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\AppNotification;
 use App\Services\Audit\Masker;
+use App\Services\Push\PushNotifications;
 
 /**
  * Creates in-app notifications from Laravel (the engine writes its own).
@@ -11,6 +12,10 @@ use App\Services\Audit\Masker;
  *
  * Every notification has a recipient: a user id, or NULL for a platform
  * notification shown to admins (engine offline, platform halt).
+ *
+ * Each one is also queued as a phone push for the recipient's registered
+ * devices (PushNotifications; a no-op until FCM is configured). A push
+ * problem never breaks the notification itself.
  */
 class Notifier
 {
@@ -24,19 +29,24 @@ class Notifier
         'platform.halted' => ['critical', 'Platform halted'],
         'platform.resumed' => ['info', 'Platform halt lifted'],
         'strategy.paused' => ['warning', 'Strategy paused'],
+        'strategy.entries_disabled' => ['critical', 'Strategy stopped by an administrator'],
+        'strategy.entries_enabled' => ['info', 'Strategy allowed to trade again'],
         'system.engine_offline' => ['critical', 'Trading engine offline'],
         'system.engine_online' => ['success', 'Trading engine running'],
         'security.mfa' => ['info', 'Two-factor authentication'],
         'security.password' => ['info', 'Password changed'],
+        'trading.live_revoked' => ['warning', 'Real-money trading turned off'],
         'report.daily' => ['info', 'Daily summary'],
         'backtest.failed' => ['warning', 'Backtest failed'],
     ];
+
+    public function __construct(private readonly PushNotifications $push) {}
 
     public function notify(string $type, string $message, ?string $userId, ?string $accountId = null, array $data = []): AppNotification
     {
         [$severity, $title] = self::TYPES[$type] ?? ['info', $type];
 
-        return AppNotification::query()->create([
+        $notification = AppNotification::query()->create([
             'user_id' => $userId,
             'type' => $type,
             'severity' => $severity,
@@ -45,5 +55,8 @@ class Notifier
             'account_id' => $accountId,
             'data' => Masker::mask($data),
         ]);
+        $this->push->queue($notification);
+
+        return $notification;
     }
 }

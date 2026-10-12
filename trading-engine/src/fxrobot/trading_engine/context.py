@@ -28,6 +28,7 @@ from fxrobot.domain.trading import TradeStatus
 from fxrobot.models import (
     AccountSnapshot,
     RiskProfile,
+    Strategy,
     SystemState,
     Trade,
     TradingAccount,
@@ -81,6 +82,20 @@ def live_authorization_problem(
     profile = db.get(RiskProfile, account.risk_profile_id)
     if profile is None or profile.updated_at > owner.live_authorized_at:
         return f"{AUTHORISATION_MISMATCH} (the risk limits were edited since)"
+    return None
+
+
+def strategy_stop_reason(strategy: Strategy | None) -> str | None:
+    """Why new entries from `strategy` are blocked by an administrator's emergency
+    stop (on the strategy itself, or on the built-in it was copied from). Open
+    positions are never closed by it."""
+    for row in (strategy, strategy.copied_from if strategy is not None else None):
+        if row is not None and row.entries_disabled_at is not None:
+            reason = row.entries_disabled_reason or "no reason given"
+            which = "" if row is strategy else f" (copied from {row.name})"
+            return (
+                f"new entries from {row.name}{which} are stopped by an administrator: {reason}"
+            )[:300]
     return None
 
 

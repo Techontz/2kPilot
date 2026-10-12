@@ -63,6 +63,8 @@ class RiskProfileRequest extends FormRequest
             'max_daily_loss_amount' => ['nullable', 'numeric', 'gt:0', 'max:100000000'],
             'max_consecutive_losses' => $count,
             'daily_profit_target_amount' => ['nullable', 'numeric', 'gt:0', 'max:100000000'],
+            // No new trades while the account balance is below this (empty = off).
+            'min_account_balance' => ['nullable', 'numeric', 'gt:0', 'max:100000000'],
         ];
     }
 

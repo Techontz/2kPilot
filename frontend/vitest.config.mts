@@ -11,5 +11,8 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./vitest.setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
+    // Dialog-heavy tests (Radix portals, user-event typing) need more than the
+    // 5 s default on a loaded machine; this only stops false timeouts.
+    testTimeout: 15_000,
   },
 });

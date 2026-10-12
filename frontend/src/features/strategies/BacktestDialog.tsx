@@ -4,6 +4,7 @@ import { FlaskConical } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
+import { MarketPicker, useInstruments } from "@/components/app/market-picker";
 import { Notice } from "@/components/app/states";
 import { Term } from "@/components/app/term";
 import { useAppData } from "@/components/providers/AppDataProvider";
@@ -15,8 +16,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { api, ApiError } from "@/lib/api";
 import { contractProblems, specForFamily } from "@/lib/contracts";
 import { useApi } from "@/lib/hooks";
+import { findMarket } from "@/lib/markets";
 import type { Account, Backtest, ContractFamily, ContractSpec, Dataset, RiskProfile, Strategy, Timeframe } from "@/lib/types";
 import { ContractFields } from "./ContractFields";
+import { familiesFor } from "./insights";
 import { latestVersion, strategyTimeframe } from "./strategyUtils";
 
 const TIMEFRAMES: { value: Timeframe; label: string; minutes: number }[] = [
@@ -93,6 +96,10 @@ function BacktestForm({ strategy, onClose }: { strategy: Strategy; onClose: () =
   const [timeframe, setTimeframe] = useState<Timeframe>(strategyTf);
   const [symbol, setSymbol] = useState(strategy.details?.suggested_symbols?.[0] ?? "R_75");
   const [days, setDays] = useState(30);
+  // Real prices: only markets this account's broker reports (practice data takes any symbol).
+  const markets = useInstruments(account?.id);
+  const market = account ? findMarket(markets.instruments ?? undefined, symbol.trim()) : undefined;
+  const marketMissing = Boolean(account && markets.instruments && !market);
   const suggestion = strategy.details?.suggested_contract;
   const [spec, setSpec] = useState<ContractSpec>(() => {
     const family: ContractFamily = suggestion?.contract_family ?? "RISE_FALL";
@@ -109,8 +116,10 @@ function BacktestForm({ strategy, onClose }: { strategy: Strategy; onClose: () =
   const [error, setError] = useState<string | null>(null);
   const [problems, setProblems] = useState<string[]>([]);
 
-  const families: ContractFamily[] = isDeriv ? ["RISE_FALL", "MULTIPLIER"] : ["RISE_FALL", "MULTIPLIER", "SPOT"];
+  // Only the contract families the strategy supports (e.g. never Rise/Fall for a strategy that needs a stop and a target).
+  const families: ContractFamily[] = familiesFor(strategy, isDeriv ? ["RISE_FALL", "MULTIPLIER"] : ["RISE_FALL", "MULTIPLIER", "SPOT"]);
   const errors = contractProblems({ ...spec, stake: spec.contract_family === "SPOT" ? null : stakeValue }, null, { isDeriv, maxStake: null });
+  if (!families.includes(spec.contract_family) && !errors.contract_family) errors.contract_family = `${strategy.name} can't be tested with this contract type.`;
   const payoutNum = Number(payout);
   const payoutError = spec.contract_family === "RISE_FALL" && !(payoutNum >= 0.01 && payoutNum <= 2) ? "Enter a number between 0.01 and 2 (0.95 means a win pays 95% of the stake as profit)." : null;
   const tfMinutes = TIMEFRAMES.find((t) => t.value === timeframe)?.minutes ?? 5;
@@ -118,7 +127,7 @@ function BacktestForm({ strategy, onClose }: { strategy: Strategy; onClose: () =
   // Practice data: any candle size, with a capped period on 1- and 5-minute candles.
   const practiceMaxDays = PRACTICE_MAX_DAYS[timeframe] ?? 3650;
   const practiceTooLong = !account && days > practiceMaxDays;
-  const invalid = practiceTooLong || !symbol.trim() || Object.keys(errors).length > 0 || Boolean(payoutError) || !(Number(capitalValue) > 0) || tooMuchData;
+  const invalid = practiceTooLong || !symbol.trim() || marketMissing || Object.keys(errors).length > 0 || Boolean(payoutError) || !(Number(capitalValue) > 0) || tooMuchData;
   const version = latestVersion(strategy);
 
   const { start, end } = useMemo(() => {
@@ -185,12 +194,14 @@ function BacktestForm({ strategy, onClose }: { strategy: Strategy; onClose: () =
       <div className="space-y-6">
         <section className="space-y-3">
           <h3 className="text-sm font-semibold text-fg">1. Market and period</h3>
-          <div className="grid gap-3 sm:grid-cols-3">
-            <div className="grid gap-1.5">
-              <Label htmlFor="bt-symbol">Market (symbol)</Label>
-              <Input id="bt-symbol" value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} list="bt-symbols" autoComplete="off" />
-              <datalist id="bt-symbols">{(strategy.details?.suggested_symbols ?? []).map((s) => <option key={s} value={s} />)}</datalist>
-            </div>
+          <div className={account ? "grid gap-3 sm:grid-cols-2" : "grid gap-3 sm:grid-cols-3"}>
+            {!account && (
+              <div className="grid gap-1.5">
+                <Label htmlFor="bt-symbol">Market (symbol)</Label>
+                <Input id="bt-symbol" value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} list="bt-symbols" autoComplete="off" />
+                <datalist id="bt-symbols">{(strategy.details?.suggested_symbols ?? []).map((s) => <option key={s} value={s} />)}</datalist>
+              </div>
+            )}
             <div className="grid gap-1.5">
               <Label htmlFor="bt-tf">Candles</Label>
               <Select value={timeframe} onValueChange={(v) => setTimeframe(v as Timeframe)}>
@@ -206,6 +217,14 @@ function BacktestForm({ strategy, onClose }: { strategy: Strategy; onClose: () =
               </Select>
             </div>
           </div>
+          {account && (
+            <div className="space-y-1.5">
+              <p className="text-sm font-medium text-fg">Market on {account.label}{market ? <span className="font-normal text-fg-muted"> · {market.description || market.name} ({market.name})</span> : null}</p>
+              <MarketPicker instruments={markets.instruments} value={market?.name ?? ""} onChange={setSymbol} loading={markets.loading}
+                error={markets.error} onRefresh={markets.refresh} refreshing={markets.refreshing} />
+              {marketMissing && symbol.trim() && <p role="alert" className="text-xs text-negative">{account.label} doesn&apos;t offer {symbol.trim()}. Pick one of its markets.</p>}
+            </div>
+          )}
           {(strategy.details?.suggested_symbols?.length ?? 0) > 0 && (
             <p className="text-xs text-fg-subtle">Designed for: {strategy.details!.suggested_symbols!.join(", ")}.</p>
           )}

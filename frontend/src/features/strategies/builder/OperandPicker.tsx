@@ -39,13 +39,13 @@ export function OperandPicker({
   };
 
   return (
-    <div className="flex min-w-0 flex-wrap items-end gap-2">
-      <div className="flex flex-col gap-1">
+    <div className="grid min-w-0 grid-cols-2 items-end gap-2 sm:flex sm:flex-wrap">
+      <div className={cn("flex min-w-0 flex-col gap-1", value.kind === "indicator" && "max-sm:col-span-2")}>
         <span className="text-xs text-fg-subtle" aria-hidden>
           {label}
         </span>
         <Select value={value.kind} onValueChange={(k) => onChange({ ...value, kind: k as OperandKind })}>
-          <SelectTrigger size="sm" aria-label={`${label}: type`} className="w-30" aria-invalid={invalid || undefined}>
+          <SelectTrigger size="sm" aria-label={`${label}: type`} className="w-30 max-sm:w-full" aria-invalid={invalid || undefined}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -60,7 +60,7 @@ export function OperandPicker({
 
       {value.kind === "price" && (
         <Select value={value.price} onValueChange={(p) => onChange({ ...value, price: p as PriceField })}>
-          <SelectTrigger size="sm" aria-label={`${label}: price`} className="w-28">
+          <SelectTrigger size="sm" aria-label={`${label}: price`} className="w-28 max-sm:w-full">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -80,7 +80,7 @@ export function OperandPicker({
           step="any"
           aria-label={`${label}: number`}
           aria-invalid={invalid || undefined}
-          className="h-7 w-28"
+          className="h-7 w-28 max-sm:w-full"
           value={value.value}
           onChange={(e) => onChange({ ...value, value: e.target.value })}
         />
@@ -89,7 +89,7 @@ export function OperandPicker({
       {value.kind === "indicator" && (
         <>
           <Select value={value.indicator} onValueChange={setIndicator}>
-            <SelectTrigger size="sm" aria-label={`${label}: indicator`} className="max-w-full min-w-36">
+            <SelectTrigger size="sm" aria-label={`${label}: indicator`} className="max-w-full min-w-36 max-sm:col-span-2 max-sm:w-full max-sm:min-w-0">
               <SelectValue placeholder="Choose an indicator" />
             </SelectTrigger>
             <SelectContent>
@@ -106,13 +106,13 @@ export function OperandPicker({
             const current = value.params[p.key] ?? String(p.default);
             const setParam = (v: string) => onChange({ ...value, params: { ...value.params, [p.key]: v } });
             return (
-              <div key={p.key} className="flex flex-col gap-1">
-                <label htmlFor={id} className="text-xs text-fg-subtle">
+              <div key={p.key} className="flex min-w-0 flex-col gap-1">
+                <label htmlFor={id} className="truncate text-xs text-fg-subtle">
                   {p.label}
                 </label>
                 {p.type === "source" ? (
                   <Select value={current} onValueChange={setParam}>
-                    <SelectTrigger id={id} size="sm" className="w-24" aria-label={`${label}: ${spec.short} ${p.label.toLowerCase()}`}>
+                    <SelectTrigger id={id} size="sm" className="w-24 max-sm:w-full" aria-label={`${label}: ${spec.short} ${p.label.toLowerCase()}`}>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -134,7 +134,7 @@ export function OperandPicker({
                     title={p.description || undefined}
                     aria-label={`${label}: ${spec.short} ${p.label.toLowerCase()}`}
                     aria-invalid={invalid || undefined}
-                    className={cn("h-7", p.type === "integer" ? "w-20" : "w-24")}
+                    className={cn("h-7 max-sm:w-full", p.type === "integer" ? "w-20" : "w-24")}
                     value={current}
                     onChange={(e) => setParam(e.target.value)}
                   />
@@ -144,12 +144,12 @@ export function OperandPicker({
           })}
 
           {spec && spec.outputs.length > 1 && (
-            <div className="flex flex-col gap-1">
+            <div className="flex min-w-0 flex-col gap-1">
               <label htmlFor={`${uid}-output`} className="text-xs text-fg-subtle">
                 Line
               </label>
               <Select value={value.output || spec.default_output} onValueChange={(o) => onChange({ ...value, output: o })}>
-                <SelectTrigger id={`${uid}-output`} size="sm" className="max-w-full min-w-32" aria-label={`${label}: ${spec.short} line`}>
+                <SelectTrigger id={`${uid}-output`} size="sm" className="max-w-full min-w-32 max-sm:w-full max-sm:min-w-0" aria-label={`${label}: ${spec.short} line`}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -164,8 +164,8 @@ export function OperandPicker({
           )}
 
           {spec && (
-            <details className="w-full text-xs text-fg-muted">
-              <summary className="w-fit cursor-pointer text-fg-subtle hover:text-fg">What is {spec.short}?</summary>
+            <details className="w-full text-xs text-fg-muted max-sm:col-span-2">
+              <summary className="w-fit cursor-pointer text-fg-subtle hover:text-fg max-sm:py-2">What is {spec.short}?</summary>
               <p className="mt-1 max-w-prose leading-relaxed">{spec.description}</p>
               {spec.notes.map((n) => (
                 <p key={n} className="mt-1 max-w-prose leading-relaxed">

@@ -40,6 +40,40 @@ BUILTIN_DETAILS: dict[str, dict[str, Any]] = {
             "educational": True,
         },
     },
+    "adaptive_trend_momentum": {
+        "slug": "adaptive-trend-momentum",
+        "summary": "Advanced: M15 trend regime, M5 pullback, renewed RSI momentum, ATR stop, 2:1.",
+        "details": {
+            "how_it_works": (
+                "The M15 chart must be in a trend regime: ADX at least 25, EMA 20 above EMA 50 "
+                "(below for sells) and sloping, and volatility not extreme. On M5 it waits for a "
+                "pullback to EMA 20, RSI turning back up through 50 (down for sells) and a "
+                "closed candle confirming the move. The stop is 1.5 × ATR, the target 2:1."
+            ),
+            "struggles": (
+                "Choppy or range-bound markets (the regime filter then keeps it out, so it may "
+                "trade rarely), sudden reversals after a pullback, and volatility spikes. On one "
+                "year of real Deriv R_10/R_25 history (Oct 2025 – Oct 2026) it showed no "
+                "reliable edge after costs: about break-even, with a win rate near 34 % at 2:1."
+            ),
+            "suggested_timeframe": "M5",
+            "suggested_symbols": ["R_10", "R_25"],
+            "suggested_contract": {"contract_family": "MULTIPLIER", "multiplier": 400},
+            "suggested_contract_paper": {"contract_family": "SPOT"},
+            "suggested_contract_note": (
+                "Multipliers on Deriv (stop and target sent as money amounts), Spot on Paper. "
+                "Not Rise/Fall: it has no stop loss or take profit."
+            ),
+            "supported_contract_families": ["SPOT", "MULTIPLIER"],
+            "supported_symbols": ["R_10", "R_25"],
+            "difficulty": "advanced",
+            "educational": True,
+            "disclaimer": (
+                "Educational research strategy — not advice and not claimed to be profitable. "
+                "Past results, in backtests or on demo, do not predict future results."
+            ),
+        },
+    },
 }
 
 
@@ -93,6 +127,13 @@ def catalog() -> list[dict[str, Any]]:
             "description": impl.description,
             "parameter_schema": impl.Params.model_json_schema(),
             "defaults": impl.default_params(),
+            # None = no restriction.
+            "contract_families": (
+                None
+                if impl.contract_families is None
+                else [f.value for f in impl.contract_families]
+            ),
+            "symbols": None if impl.symbols is None else list(impl.symbols),
         }
         for impl in list_strategies()
     ]

@@ -6,6 +6,7 @@ Definitions (also shown in the UI glossary):
 * profit factor = gross profit / gross loss (None when there are no losses)
 * max drawdown  = largest peak-to-trough fall of the equity curve
 * avg R:R       = average win / |average loss|
+* expectancy_r_tstat = mean R ÷ its standard error (≈ 2 or more: unlikely to be noise)
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ class TradeStat:
     r_multiple: Decimal | None = None
     costs: Decimal = Decimal(0)
     strategy: str | None = None
+    regime: str | None = None  # market regime at entry (backtests)
 
 
 def _f(value: Decimal | float | None, places: int = 2) -> float | None:
@@ -50,6 +52,20 @@ def _streaks(results: Sequence[bool | None]) -> tuple[int, int]:
         else:
             best_loss = max(best_loss, cur)
     return best_win, best_loss
+
+
+def _tstat(values: Sequence[Decimal]) -> float | None:
+    """t-statistic of the mean (mean ÷ standard error): how far the average result
+    is from zero relative to its noise. None with fewer than 2 values or no spread."""
+    n = len(values)
+    if n < 2:
+        return None
+    xs = [float(v) for v in values]
+    mean = sum(xs) / n
+    var = sum((x - mean) ** 2 for x in xs) / (n - 1)
+    if var <= 0:
+        return None
+    return round(mean / float((var / n) ** 0.5), 2)
 
 
 def drawdown_curve(
@@ -79,22 +95,42 @@ def downsample(points: Sequence[Any], limit: int = 1500) -> list[Any]:
 
 
 def group_stats(trades: Iterable[TradeStat], key: str) -> list[dict[str, Any]]:
+    """Per-group results (by symbol, session, side, strategy, regime …), in exit order.
+
+    max_drawdown is the deepest fall of the group's own cumulative net P/L.
+    """
     groups: dict[str, list[TradeStat]] = defaultdict(list)
-    for t in trades:
+    for t in sorted(trades, key=lambda x: x.exit_time):
         groups[str(getattr(t, key) or "—")].append(t)
     out = []
     for name, items in sorted(groups.items()):
         wins = [t for t in items if t.net_pnl > 0]
+        losses = [t for t in items if t.net_pnl < 0]
         gp = sum((t.net_pnl for t in wins), Decimal(0))
-        gl = -sum((t.net_pnl for t in items if t.net_pnl < 0), Decimal(0))
+        gl = -sum((t.net_pnl for t in losses), Decimal(0))
+        net = sum((t.net_pnl for t in items), Decimal(0))
+        rs = [t.r_multiple for t in items if t.r_multiple is not None]
+        avg_win = gp / len(wins) if wins else None
+        avg_loss = gl / len(losses) if losses else None
+        running = peak = worst = Decimal(0)
+        for t in items:
+            running += t.net_pnl
+            peak = max(peak, running)
+            worst = max(worst, peak - running)
+        _, losing = _streaks([None if t.net_pnl == 0 else t.net_pnl > 0 for t in items])
         out.append(
             {
                 "key": name,
                 "trades": len(items),
                 "wins": len(wins),
                 "win_rate": _f(Decimal(len(wins)) / len(items) * 100, 1),
-                "net_pnl": _f(sum((t.net_pnl for t in items), Decimal(0))),
+                "net_pnl": _f(net),
                 "profit_factor": _f(gp / gl) if gl > 0 else None,
+                "expectancy": _f(net / len(items)),
+                "expectancy_r": _f(sum(rs, Decimal(0)) / len(rs), 3) if rs else None,
+                "avg_rr": _f(avg_win / avg_loss) if avg_win and avg_loss else None,
+                "max_drawdown": _f(worst),
+                "longest_losing_streak": losing,
             }
         )
     return out
@@ -164,6 +200,7 @@ def compute(
         "largest_loss": _f(min((t.net_pnl for t in losses), default=None)),
         "expectancy": _f(net / n) if n else None,
         "expectancy_r": _f(sum(rs, Decimal(0)) / len(rs), 3) if rs else None,
+        "expectancy_r_tstat": _tstat(rs),
         "profit_factor": _f(gross_profit / gross_loss) if gross_loss > 0 else None,
         "gross_profit": _f(gross_profit),
         "gross_loss": _f(gross_loss),
@@ -184,6 +221,8 @@ def compute(
         "by_session": group_stats(ordered, "session"),
         "by_side": group_stats(ordered, "side"),
         "by_strategy": group_stats(ordered, "strategy"),
+        # Only backtests know the regime at entry.
+        "by_regime": group_stats(ordered, "regime") if any(t.regime for t in ordered) else [],
     }
 
 

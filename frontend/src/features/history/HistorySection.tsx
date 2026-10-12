@@ -1,6 +1,6 @@
 "use client";
 
-import { Download, History, Inbox, ListChecks, OctagonX } from "lucide-react";
+import { Download, History, Inbox, ListChecks, OctagonX, SlidersHorizontal } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -16,9 +16,11 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { api } from "@/lib/api";
 import { formatDateTime, humanize } from "@/lib/format";
 import { useAction, useApi } from "@/lib/hooks";
+import { cn } from "@/lib/utils";
 import type { Account, JournalEvent, Order, Paginated, Strategy, Trade } from "@/lib/types";
 import { detectPreset, EMPTY_FILTERS, exportUrl, historyQuery, type HistoryFilters, OUTCOME_OPTIONS, presetRange, type RangePreset, rangeProblem } from "./filters";
 import { TradeDetailSheet } from "./TradeDetailSheet";
@@ -58,13 +60,13 @@ interface TabProps {
   setFilters: (f: HistoryFilters) => void;
 }
 
-function AccountFilter({ filters, setFilters }: TabProps) {
+function AccountFilter({ filters, setFilters, idPrefix = "history", className, fill }: TabProps & { idPrefix?: string; className?: string; fill?: boolean }) {
   const { accounts } = useAppData();
   return (
-    <div className="grid gap-1.5">
-      <Label htmlFor="history-account">Account</Label>
+    <div className={cn("grid w-full gap-1.5 sm:w-auto", className)}>
+      <Label htmlFor={`${idPrefix}-account`}>Account</Label>
       <Select value={filters.accountId || ALL} onValueChange={(v) => v && setFilters({ ...filters, accountId: v === ALL ? "" : v })}>
-        <SelectTrigger id="history-account" className="w-full sm:w-56"><SelectValue /></SelectTrigger>
+        <SelectTrigger id={`${idPrefix}-account`} className={cn("w-full", !fill && "sm:w-56")}><SelectValue /></SelectTrigger>
         <SelectContent>
           <SelectItem value={ALL}>All accounts</SelectItem>
           {(accounts ?? []).map((a: Account) => (
@@ -101,7 +103,7 @@ function OpenTab({ filters, setFilters, onSelect }: TabProps & { onSelect: (id: 
       <div className="flex flex-wrap items-end justify-between gap-3">
         <AccountFilter filters={filters} setFilters={setFilters} />
         {list && list.length > 0 && (
-          <Button variant="outline" className="border-negative/40 text-negative hover:bg-negative-soft hover:text-negative" onClick={() => { action.reset(); setConfirm(true); }}>
+          <Button variant="outline" className="border-negative/40 text-negative hover:bg-negative-soft hover:text-negative max-sm:w-full" onClick={() => { action.reset(); setConfirm(true); }}>
             <OctagonX aria-hidden /> Close all open trades…
           </Button>
         )}
@@ -159,57 +161,115 @@ function ClosedTab({ filters, setFilters, onSelect }: TabProps & { onSelect: (id
   const strategies = useApi<Strategy[]>("/strategies");
   const preset = detectPreset(filters);
   const [custom, setCustom] = useState(preset === "custom");
+  const [sheet, setSheet] = useState(false);
   const strategyOptions = useMemo(() => (strategies.data ?? []).filter((s) => !s.built_in || s.assignments.length > 0), [strategies.data]);
   const data = history.data;
 
+  const choosePreset = (p: RangePreset) => {
+    setCustom(p === "custom");
+    if (p !== "custom") update({ ...filters, ...presetRange(p) });
+  };
+  const fields = (idPrefix: string) => (
+    <>
+      <div className="grid gap-1.5">
+        <Label htmlFor={`${idPrefix}-range`}>Period</Label>
+        <Select value={custom ? "custom" : preset} onValueChange={(v) => choosePreset(v as RangePreset)}>
+          <SelectTrigger id={`${idPrefix}-range`} className="w-full"><SelectValue /></SelectTrigger>
+          <SelectContent>{PRESETS.map((p) => <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>)}</SelectContent>
+        </Select>
+      </div>
+      {custom && (
+        <>
+          <div className="grid gap-1.5">
+            <Label htmlFor={`${idPrefix}-from`}>From</Label>
+            <Input id={`${idPrefix}-from`} type="date" value={filters.from} onChange={(e) => update({ ...filters, from: e.target.value })} aria-invalid={Boolean(problem)} />
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor={`${idPrefix}-to`}>To</Label>
+            <Input id={`${idPrefix}-to`} type="date" value={filters.to} onChange={(e) => update({ ...filters, to: e.target.value })} aria-invalid={Boolean(problem)} />
+          </div>
+        </>
+      )}
+      <AccountFilter filters={filters} setFilters={update} idPrefix={idPrefix} className="min-w-0 sm:w-full" fill />
+      <div className="grid gap-1.5">
+        <Label htmlFor={`${idPrefix}-strategy`}>Strategy</Label>
+        <Select value={filters.strategyId || ALL} onValueChange={(v) => update({ ...filters, strategyId: v === ALL ? "" : v })}>
+          <SelectTrigger id={`${idPrefix}-strategy`} className="w-full"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ALL}>All strategies</SelectItem>
+            {strategyOptions.map((s) => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="grid gap-1.5">
+        <Label htmlFor={`${idPrefix}-outcome`}>Result</Label>
+        <Select value={filters.outcome || ALL} onValueChange={(v) => update({ ...filters, outcome: v === ALL ? "" : (v as HistoryFilters["outcome"]) })}>
+          <SelectTrigger id={`${idPrefix}-outcome`} className="w-full"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            {OUTCOME_OPTIONS.map((o) => <SelectItem key={o.value || ALL} value={o.value || ALL}>{o.label}</SelectItem>)}
+          </SelectContent>
+        </Select>
+      </div>
+    </>
+  );
+  // Filters beyond the period (the period has its own chips on phones).
+  const extra = [filters.accountId, filters.strategyId, filters.outcome].filter(Boolean).length + (custom ? 1 : 0);
+  const exportButton = problem ? (
+    <Button variant="outline" disabled><Download aria-hidden /> Export CSV</Button>
+  ) : (
+    <Button variant="outline" asChild>
+      <a href={exportUrl(filters)} download onClick={() => toast.success("Exporting CSV", { description: "Your download starts in a moment." })}>
+        <Download aria-hidden /> Export CSV
+      </a>
+    </Button>
+  );
+
   return (
     <div className="space-y-4">
-      <Card size="sm" className="bg-surface-raised shadow-none">
+      {/* Phones: period chips, then Filters (bottom sheet) and Export side by side. */}
+      <div className="space-y-3 sm:hidden">
+        <div role="group" aria-label="Quick period" className="no-scrollbar -mx-4 flex gap-2 overflow-x-auto px-4">
+          {PRESETS.map((p) => {
+            const on = (custom ? "custom" : preset) === p.value;
+            return (
+              <button key={p.value} type="button" aria-pressed={on} onClick={() => { choosePreset(p.value); if (p.value === "custom") setSheet(true); }}
+                className={cn("h-10 shrink-0 rounded-full px-4 text-sm font-semibold whitespace-nowrap transition-colors",
+                  on ? "bg-foreground text-background" : "bg-muted text-fg hover:bg-surface-hover dark:bg-[#2a2a2a]")}>
+                {p.label}
+              </button>
+            );
+          })}
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <Button variant="outline" onClick={() => setSheet(true)} aria-label={extra ? `Filters, ${extra} active` : "Filters"}>
+            <SlidersHorizontal aria-hidden /> Filters
+            {extra > 0 && <span className="num rounded-full bg-primary px-1.5 text-xs font-bold text-primary-foreground" aria-hidden>{extra}</span>}
+          </Button>
+          {exportButton}
+        </div>
+        {problem && <p role="alert" className="text-sm text-negative">{problem}</p>}
+      </div>
+      <Sheet open={sheet} onOpenChange={setSheet}>
+        <SheetContent side="bottom" className="gap-0 overflow-y-auto sm:hidden">
+          <SheetHeader className="px-5 pt-7 pb-2">
+            <SheetTitle className="text-xl font-extrabold">Filter finished trades</SheetTitle>
+            <SheetDescription>Changes apply straight away.</SheetDescription>
+          </SheetHeader>
+          <form className="grid gap-4 px-5 pt-2 pb-4" onSubmit={(e) => { e.preventDefault(); setSheet(false); }} aria-label="Filters">
+            {fields("history-m")}
+            {problem && <p role="alert" className="text-sm text-negative">{problem}</p>}
+          </form>
+          <SheetFooter className="grid grid-cols-2 border-t border-line">
+            <Button variant="outline" onClick={() => { setCustom(false); update({ ...EMPTY_FILTERS }); }}>Clear filters</Button>
+            <Button onClick={() => setSheet(false)}>Show {data ? data.total.toLocaleString() : ""} trades</Button>
+          </SheetFooter>
+        </SheetContent>
+      </Sheet>
+
+      <Card size="sm" className="bg-surface-raised shadow-none max-sm:hidden">
         <CardContent>
           <form className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5" onSubmit={(e) => e.preventDefault()} aria-label="Filters">
-            <div className="grid gap-1.5">
-              <Label htmlFor="history-range">Period</Label>
-              <Select value={custom ? "custom" : preset} onValueChange={(v) => {
-                const p = v as RangePreset;
-                setCustom(p === "custom");
-                if (p !== "custom") update({ ...filters, ...presetRange(p) });
-              }}>
-                <SelectTrigger id="history-range" className="w-full"><SelectValue /></SelectTrigger>
-                <SelectContent>{PRESETS.map((p) => <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>)}</SelectContent>
-              </Select>
-            </div>
-            {custom && (
-              <>
-                <div className="grid gap-1.5">
-                  <Label htmlFor="history-from">From</Label>
-                  <Input id="history-from" type="date" value={filters.from} onChange={(e) => update({ ...filters, from: e.target.value })} aria-invalid={Boolean(problem)} />
-                </div>
-                <div className="grid gap-1.5">
-                  <Label htmlFor="history-to">To</Label>
-                  <Input id="history-to" type="date" value={filters.to} onChange={(e) => update({ ...filters, to: e.target.value })} aria-invalid={Boolean(problem)} />
-                </div>
-              </>
-            )}
-            <AccountFilter filters={filters} setFilters={update} />
-            <div className="grid gap-1.5">
-              <Label htmlFor="history-strategy">Strategy</Label>
-              <Select value={filters.strategyId || ALL} onValueChange={(v) => update({ ...filters, strategyId: v === ALL ? "" : v })}>
-                <SelectTrigger id="history-strategy" className="w-full"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={ALL}>All strategies</SelectItem>
-                  {strategyOptions.map((s) => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="history-outcome">Result</Label>
-              <Select value={filters.outcome || ALL} onValueChange={(v) => update({ ...filters, outcome: v === ALL ? "" : (v as HistoryFilters["outcome"]) })}>
-                <SelectTrigger id="history-outcome" className="w-full"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {OUTCOME_OPTIONS.map((o) => <SelectItem key={o.value || ALL} value={o.value || ALL}>{o.label}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </div>
+            {fields("history")}
           </form>
           {problem && <p role="alert" className="mt-2 text-sm text-negative">{problem}</p>}
         </CardContent>
@@ -218,15 +278,7 @@ function ClosedTab({ filters, setFilters, onSelect }: TabProps & { onSelect: (id
         <p className="text-sm text-fg-muted" aria-live="polite">
           {data ? <>{data.total.toLocaleString()} finished trade{data.total === 1 ? "" : "s"}{data.data.length > 0 && <> · this page <PnlTotal trades={data.data} /></>}</> : " "}
         </p>
-        {problem ? (
-          <Button variant="outline" disabled><Download aria-hidden /> Export CSV</Button>
-        ) : (
-          <Button variant="outline" asChild>
-            <a href={exportUrl(filters)} download onClick={() => toast.success("Exporting CSV", { description: "Your download starts in a moment." })}>
-              <Download aria-hidden /> Export CSV
-            </a>
-          </Button>
-        )}
+        <span className="max-sm:hidden">{exportButton}</span>
       </div>
       {history.error && !data ? <ErrorState message={history.error} onRetry={() => void reload()} />
         : !data ? <ListSkeleton rows={5} />

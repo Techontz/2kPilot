@@ -33,6 +33,7 @@ FIELDS = [
     "max_daily_loss_amount",
     "max_consecutive_losses",
     "daily_profit_target_amount",
+    "min_account_balance",
 ]
 
 

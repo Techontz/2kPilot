@@ -31,6 +31,7 @@ Otherwise the engine only monitors the account (sync, reconcile).
 | # | Rule | Rejects when |
 |---|---|---|
 | 1 | Kill switch | the owner's STOP switch is engaged, or the platform is halted |
+| 1b | Strategy enabled | an administrator stopped new entries from the signal's strategy (or the built-in it was copied from) — *"new entries from … are stopped by an administrator: <reason>"*. Never closes positions |
 | 2 | Operating mode | account environment not allowed in the owner's mode, or LIVE account while hard-locked or without the owner's LIVE authorisation. The engine binds the authorisation: the account must be `live_authorized_account_id`, its risk profile must be `live_authorized_profile_id`, and that profile must not have been edited after `live_authorized_at` — otherwise *"Real-money authorization doesn't cover this account/limits — re-authorize"* |
 | 3 | Account trading enabled | account switched off |
 | 4 | Broker connected | disconnected |
@@ -45,6 +46,7 @@ Otherwise the engine only monitors the account (sync, reconcile).
 | 11 | Reward/risk | below `min_reward_risk`, or no take profit when a minimum is set (SPOT only) |
 | 12 | Daily loss limit | realised today + open P/L ≥ `max_daily_loss_pct` of start-of-day balance |
 | 13 | Weekly loss limit | same, per ISO week |
+| 14a | Minimum balance | optional `min_account_balance`: the balance is below it (or unknown) |
 | 14 | Max drawdown | equity ≥ `max_drawdown_pct` below its peak → **account trading is disabled** until reviewed |
 | 14b | Settled P/L | a closed trade on the account has no confirmed P/L yet (the broker's history lagged) — the loss limits cannot see it, so new entries wait until reconciliation settles it |
 | 15 | Loss cooldown | `cooldown_after_losses` consecutive losses, paused for `cooldown_minutes` |
@@ -54,6 +56,7 @@ Otherwise the engine only monitors the account (sync, reconcile).
 | 16 | Trades per day | `max_trades_per_day` reached |
 | 17 | Open positions | `max_open_positions` or `max_positions_per_symbol` reached |
 | 18c | Stake (contracts) | stake above `max_stake_amount`, above the balance, above the per-trade budget `risk_per_trade_pct` × balance (refused, never shrunk), a Multiplier `stop_loss_amount` above the stake, outside the **broker's** stake range (`validation_params.stake.min/max` from a live `proposal` — **fails closed** when the broker reports no limits) |
+| 18d | Stop/target amounts (Multipliers) | the money amounts the Multiplier will be bought with — the assignment's own, or the strategy's stop/target prices converted from the current price exactly as the adapter does — fall outside the broker's `validation_params.stop_loss` / `take_profit` range (Deriv R_10/R_25, 1.00 stake: stop 0.10–1.00, target 0.10–50.00). A stop beyond the stake is left to the broker's stop out (loss bounded by the stake). When the broker does not report the range the rule passes and says so — the broker refuses out-of-range amounts before anything is bought |
 | 18 | Position size | risk budget buys less than the broker minimum volume (never rounded **up**); manual: volume off-step, outside broker range, above `max_position_lots`, or risking more than the budget |
 | 18b | Symbol exposure | lots on this symbol after the trade > `max_symbol_exposure_lots` |
 | 19 | Total exposure | total lots > `max_total_exposure_lots`, or total open risk > `max_total_risk_pct`, or **any open position has unknown risk** (e.g. opened outside 2kPilot) |
@@ -80,6 +83,12 @@ volume      = floor(budget / loss_per_lot, broker volume step)  → capped by ma
 
 The point value comes from the broker when it reports one, or is converted from quotes (direct, inverse or USD cross). If no rate is available, the trade is rejected. Approved decisions also carry `max_slippage_points` (from `max_slippage_pips`), which is sent to the broker as the maximum deviation.
 
+### Strategy risk caps
+
+A strategy may declare caps (`Strategy.risk_caps`; Adaptive Trend & Momentum: 0.5 % per trade, 2 % daily loss, 1 open position). Live and in backtests they are applied with `RiskLimits.tightened()`: the smaller of the profile's value and the cap wins, a disabled limit takes the cap, nothing is ever loosened. For contracts the stake is the maximum loss, so with 0.5 % per trade a 1.00 stake needs a balance of at least 200.
+
+Never implemented, by design: martingale, doubling after losses, recovery or revenge trading, increasing size after losses, or any guaranteed-profit logic.
+
 ## Uncertainty rules
 
 * An account with any order in `PENDING_SUBMIT`, `SUBMITTED` or `UNKNOWN` takes **no new entries** until reconciliation resolves it.
@@ -89,6 +98,6 @@ The point value comes from the broker when it reports one, or is converted from 
 
 ## Profiles
 
-`risk_profiles` hold typed limits and belong to a user; each account uses one of its owner's profiles. `NULL` disables an optional limit; `risk_per_trade_pct`, `max_data_age_seconds`, `allowed_sessions` and `stake_amount` are mandatory. Every new user gets a *Beginner* profile: 0.5 % per trade, 2 % daily, 4 % weekly, 10 % drawdown, 3 positions, 1 per symbol, 20 trades a day, spread ≤ 2.5 pips, stop 8–150 pips, RR ≥ 1.5, London/Overlap/New York sessions, a 240-minute cooldown after 3 losses — and for contracts a **1.00 stake** (maximum 5.00; with 0.5 % per trade a stake must also fit 0.5 % of the balance: 1.00 needs ≥ 200, 5.00 needs ≥ 1 000), trading halted for the rest of the UTC day after **3 losses in a row**, no money loss limit or profit target (optional). Every change is audited.
+`risk_profiles` hold typed limits and belong to a user; each account uses one of its owner's profiles. `NULL` disables an optional limit; `risk_per_trade_pct`, `max_data_age_seconds`, `allowed_sessions` and `stake_amount` are mandatory. Every new user gets a *Beginner* profile: 0.5 % per trade, 2 % daily, 4 % weekly, 10 % drawdown, 3 positions, 1 per symbol, 20 trades a day, spread ≤ 2.5 pips, stop 8–150 pips, RR ≥ 1.5, London/Overlap/New York sessions, a 240-minute cooldown after 3 losses — and for contracts a **1.00 stake** (maximum 5.00; with 0.5 % per trade a stake must also fit 0.5 % of the balance: 1.00 needs ≥ 200, 5.00 needs ≥ 1 000), trading halted for the rest of the UTC day after **3 losses in a row**, no money loss limit or profit target (optional). Every change is audited. `min_account_balance` (optional, added by migration `2026_10_11_000100`) is off by default.
 
 Tests: `trading-engine/tests/test_risk_engine.py` (107 cases), `test_manual_orders.py`, and the pipeline and reliability suites. Risk profiles are edited in Laravel with the same validation (`app/Http/Requests/RiskProfileRequest.php`).

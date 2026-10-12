@@ -41,7 +41,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         <div style={style} className="relative isolate min-h-[calc(100vh-4rem)] bg-background lg:min-h-[calc(100vh-4.5rem)] lg:overflow-clip lg:rounded-lg">
           <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-[360px] bg-[linear-gradient(180deg,color-mix(in_oklab,var(--wash)_10%,transparent)_0%,color-mix(in_oklab,var(--wash)_3%,transparent)_55%,transparent_100%)] transition-[background] duration-700 dark:bg-[linear-gradient(180deg,color-mix(in_oklab,var(--wash)_20%,transparent)_0%,color-mix(in_oklab,var(--wash)_6%,transparent)_55%,transparent_100%)]" />
           <EnvironmentStrip />
-          <main id="main" className="mx-auto w-full max-w-[1320px] min-w-0 px-4 pt-6 pb-28 sm:px-6 lg:px-8 lg:pt-8 lg:pb-12">
+          <main id="main" className="pb-tabbar mx-auto w-full max-w-[1320px] min-w-0 px-[max(1rem,env(safe-area-inset-left))] pt-5 sm:px-6 sm:pt-6 lg:px-8 lg:pt-8 lg:pb-12">
             {children}
           </main>
         </div>

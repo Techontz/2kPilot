@@ -84,7 +84,7 @@ export function GroupCard({
   const uid = useId();
   const on = group !== null;
   return (
-    <section aria-labelledby={`${uid}-title`} className={cn("min-w-0 rounded-xl border border-line bg-card p-4", !on && "bg-surface-raised/40")}>
+    <section aria-labelledby={`${uid}-title`} className={cn("min-w-0 rounded-xl border border-line bg-card p-3.5 sm:p-4", !on && "bg-surface-raised/40")}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 id={`${uid}-title`} className="font-semibold text-fg">

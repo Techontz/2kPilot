@@ -24,6 +24,7 @@ import { useApi, useNow } from "@/lib/hooks";
 import { deriveRobotStatus } from "@/lib/status";
 import type { Blocker, Overview, Trade, TradingStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { LiveWatch } from "./LiveWatch";
 import { isSetupComplete, SetupChecklist } from "./SetupChecklist";
 
 /**
@@ -67,16 +68,16 @@ export function HomeScreen() {
       {o.account ? (
         <>
           <Blockers blockers={o.blockers ?? []} running={!(robotStatus ?? o.robot).kill_switch_engaged} />
-          <section aria-label="Profit and loss" className="grid gap-3 sm:gap-4 md:grid-cols-3">
+          <section aria-label="Profit and loss" className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3">
             <Kpi icon={CalendarClock} label={<>Today&apos;s <Term id="realizedPnl">P/L</Term></>} hint="Finished trades since 00:00 UTC">
-              <PnlText value={o.figures?.today_pnl} currency={currency} className="text-3xl font-extrabold tracking-tight" />
+              <PnlText value={o.figures?.today_pnl} currency={currency} className="text-[clamp(1.25rem,6.2vw,1.875rem)] font-extrabold tracking-tight sm:text-3xl" />
             </Kpi>
             <Kpi icon={Sigma} label={<>Total <Term id="realizedPnl">realized P/L</Term></>} hint="All finished trades on this account">
-              <PnlText value={o.figures?.total_pnl} currency={currency} className="text-3xl font-extrabold tracking-tight" />
+              <PnlText value={o.figures?.total_pnl} currency={currency} className="text-[clamp(1.25rem,6.2vw,1.875rem)] font-extrabold tracking-tight sm:text-3xl" />
             </Kpi>
-            <Kpi icon={Activity} label="Open trades" hint={o.figures?.open_positions ? "Current P/L — not final until they finish" : "Nothing open right now"}>
+            <Kpi className="col-span-2 md:col-span-1" icon={Activity} label="Open trades" hint={o.figures?.open_positions ? "Current P/L — not final until they finish" : "Nothing open right now"}>
               <span className="flex items-baseline gap-2">
-                <span className="num text-3xl font-extrabold tracking-tight text-fg">{o.figures?.open_positions ?? 0}</span>
+                <span className="num text-[clamp(1.25rem,6.2vw,1.875rem)] font-extrabold tracking-tight text-fg sm:text-3xl">{o.figures?.open_positions ?? 0}</span>
                 {Boolean(o.figures?.open_positions) && <PnlText value={o.figures?.open_pnl} currency={currency} className="text-sm font-bold" />}
               </span>
             </Kpi>
@@ -111,17 +112,17 @@ function StartButton() {
 function HomeSkeleton() {
   return (
     <div className="space-y-8" role="status" aria-label="Loading">
-      <div className="flex flex-col gap-6 pt-2 sm:flex-row sm:items-end sm:pt-6">
-        <Skeleton className="size-36 rounded-lg sm:size-48" />
+      <div className="flex flex-col gap-5 pt-1 sm:flex-row sm:items-end sm:gap-6 sm:pt-6">
+        <Skeleton className="size-14 rounded-lg sm:size-48" />
         <div className="flex-1 space-y-3">
           <Skeleton className="h-3 w-32" />
           <Skeleton className="h-14 w-72 max-w-full" />
           <Skeleton className="h-3 w-56" />
         </div>
       </div>
-      <Skeleton className="h-14 w-56 rounded-full" />
-      <div className="grid gap-4 md:grid-cols-3">
-        <Skeleton className="h-28 rounded-lg" /><Skeleton className="h-28 rounded-lg" /><Skeleton className="h-28 rounded-lg" />
+      <Skeleton className="h-14 w-full rounded-full sm:w-56" />
+      <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3">
+        <Skeleton className="h-28 rounded-lg" /><Skeleton className="h-28 rounded-lg" /><Skeleton className="col-span-2 h-28 rounded-lg md:col-span-1" />
       </div>
       <Skeleton className="h-64 w-full rounded-lg" />
     </div>
@@ -141,35 +142,48 @@ function AccountHero({ overview: o, status, unknown }: { overview: Overview; sta
   const dot = robot.running ? "bg-positive" : robot.tone === "negative" ? "bg-negative" : robot.tone === "neutral" ? "bg-fg-subtle" : "bg-warning";
   return (
     <section aria-label="Account and bot" className="motion-safe:animate-fade-up">
-      <div className="flex flex-col gap-5 pt-2 sm:flex-row sm:items-end sm:gap-7 sm:pt-6">
-        <SeriesArtwork values={values} tone={live ? "live" : a.environment === "DEMO" ? "demo" : "paper"}
-          className={cn("size-20 shrink-0 rounded-lg shadow-[0_8px_30px_rgb(0_0_0/0.25)] sm:size-44 lg:size-52", live && "ring-4 ring-live")} />
+      <div className="flex flex-col gap-4 pt-1 sm:flex-row sm:items-end sm:gap-7 sm:pt-6">
+        <div className="flex items-center gap-3.5 sm:contents">
+          <SeriesArtwork values={values} tone={live ? "live" : a.environment === "DEMO" ? "demo" : "paper"}
+            className={cn("size-14 shrink-0 rounded-lg shadow-[0_8px_30px_rgb(0_0_0/0.25)] sm:size-44 lg:size-52", live && "ring-4 ring-live max-sm:ring-2")} />
+          {/* Phones: badge + account name sit beside the small artwork. */}
+          <div className="min-w-0 sm:hidden">
+            <p className="flex flex-wrap items-center gap-2 text-sm font-semibold text-fg">
+              <EnvBadge env={a.environment} />
+              <span>{kind}</span>
+            </p>
+            <p className="mt-1 truncate text-[15px] font-semibold text-fg-muted">{a.label}</p>
+          </div>
+        </div>
         <div className="min-w-0 flex-1">
-          <p className="flex flex-wrap items-center gap-2 text-sm font-semibold text-fg">
+          <p className="hidden flex-wrap items-center gap-2 text-sm font-semibold text-fg sm:flex">
             <EnvBadge env={a.environment} />
             <span>{kind}</span>
           </p>
-          <p className="mt-3 truncate text-sm font-semibold text-fg-muted sm:text-base">{a.label}</p>
-          <div className="mt-1">
+          <p className="mt-3 hidden truncate text-base font-semibold text-fg-muted sm:block">{a.label}</p>
+          <div className="sm:mt-1">
             <span className="sr-only">Balance</span>
-            <Money value={balance} currency={a.currency} className="title-xl block text-5xl text-fg sm:text-6xl lg:text-7xl" />
+            <Money value={balance} currency={a.currency} className="title-xl block text-[clamp(2.25rem,12vw,3rem)] text-fg sm:text-6xl lg:text-7xl" />
           </div>
           <p className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-fg-muted">
             <ConnectionDot status={broker.connection_status} />
             <span className="font-bold text-fg">{broker.name}</span>
             <span aria-hidden>•</span>
             <span>{connectionLabel(broker.connection_status)}</span>
-            {broker.connection_status !== "CONNECTED" && broker.connection_detail && <span className="text-xs text-fg-subtle">({broker.connection_detail})</span>}
-            {a.broker_account_id && <><span aria-hidden>•</span><span className="mono-id text-xs">{a.broker_account_id}</span></>}
-            <span aria-hidden>•</span>
-            <span><Term id="balance" /> updated {formatRelative(a.synced_at)}</span>
+            {broker.connection_status !== "CONNECTED" && broker.connection_detail && <span className="min-w-0 text-xs break-words text-fg-subtle">({broker.connection_detail})</span>}
+            {/* Phones: the id and sync time start their own line instead of leaving a dangling "•". */}
+            <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 max-sm:w-full">
+              {a.broker_account_id && <><span aria-hidden className="max-sm:hidden">•</span><span className="mono-id min-w-0 truncate text-xs">{a.broker_account_id}</span><span aria-hidden>•</span></>}
+              {!a.broker_account_id && <span aria-hidden className="max-sm:hidden">•</span>}
+              <span><Term id="balance" /> updated {formatRelative(a.synced_at)}</span>
+            </span>
           </p>
           {live && <p className="mt-2 text-sm font-extrabold text-live">Real money — every loss is real.</p>}
         </div>
       </div>
-      <div className="mt-7 flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-6">
+      <div className="mt-6 flex flex-col gap-3.5 sm:mt-7 sm:flex-row sm:items-center sm:gap-6">
         <BigTradingButton className="sm:w-auto sm:min-w-56" />
-        <div className="min-w-0">
+        <div className="min-w-0 max-sm:rounded-lg max-sm:bg-surface-raised max-sm:px-4 max-sm:py-3 max-sm:ring-1 max-sm:ring-line">
           <div role="status" aria-live="polite" className="flex items-center gap-2.5 text-sm">
             <span className="relative flex size-3" aria-hidden>
               {robot.running && <span className={cn("absolute inset-0 rounded-full motion-safe:animate-pulse-ring", dot)} />}
@@ -177,7 +191,7 @@ function AccountHero({ overview: o, status, unknown }: { overview: Overview; sta
             </span>
             <span className="text-base font-bold text-fg">{robot.running ? "Bot running" : robot.label === "Trading stopped" ? "Bot stopped" : robot.label}</span>
           </div>
-          <p className="mt-1 max-w-md text-[13px] text-fg-muted">{robot.running ? "It keeps trading on the server even when you close this page." : robot.detail}</p>
+          <p className="mt-1 max-w-md text-[13px] text-fg-muted max-sm:pl-[1.375rem] max-sm:text-sm">{robot.running ? "It keeps trading on the server even when you close this page." : robot.detail}</p>
         </div>
       </div>
     </section>
@@ -218,12 +232,12 @@ function Blockers({ blockers, running }: { blockers: Blocker[]; running: boolean
           {blockers.map((b) => {
             const action = BLOCKER_ACTION[b.code];
             return (
-              <li key={`${b.code}:${b.message}`} className="flex flex-wrap items-center justify-between gap-3 rounded-md bg-surface-raised py-2.5 pr-2.5 pl-4">
-                <span className="flex min-w-0 items-center gap-2.5 text-sm text-fg"><span aria-hidden className="size-1.5 shrink-0 rounded-full bg-warning" />{b.message}</span>
+              <li key={`${b.code}:${b.message}`} className="flex flex-col gap-3 rounded-md bg-surface-raised p-3.5 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:py-2.5 sm:pr-2.5 sm:pl-4">
+                <span className="flex min-w-0 items-start gap-2.5 text-sm text-fg sm:items-center"><span aria-hidden className="mt-2 size-1.5 shrink-0 rounded-full bg-warning sm:mt-0" />{b.message}</span>
                 {b.code === "trading_stopped" ? (
-                  <Button size="sm" onClick={requestStart} className="bg-positive font-bold text-positive-foreground hover:bg-positive/90">Start trading</Button>
+                  <Button size="sm" onClick={requestStart} className="bg-positive font-bold text-positive-foreground hover:bg-positive/90 max-sm:w-full">Start trading</Button>
                 ) : action ? (
-                  <Button size="sm" variant="outline" asChild><Link href={action.href}>{action.label} <ArrowRight aria-hidden /></Link></Button>
+                  <Button size="sm" variant="outline" asChild className="max-sm:w-full"><Link href={action.href}>{action.label} <ArrowRight aria-hidden /></Link></Button>
                 ) : null}
               </li>
             );
@@ -234,16 +248,16 @@ function Blockers({ blockers, running }: { blockers: Blocker[]; running: boolean
   );
 }
 
-function Kpi({ icon: Icon, label, hint, children }: { icon: LucideIcon; label: React.ReactNode; hint?: string; children: React.ReactNode }) {
+function Kpi({ icon: Icon, label, hint, children, className }: { icon: LucideIcon; label: React.ReactNode; hint?: string; children: React.ReactNode; className?: string }) {
   return (
-    <Card size="sm" className="transition-colors hover:bg-surface-raised">
+    <Card size="sm" className={cn("min-w-0 transition-colors hover:bg-surface-raised max-sm:[--card-spacing:--spacing(3.5)]", className)}>
       <CardContent className="space-y-2">
-        <p className="flex items-center gap-2 text-sm font-semibold text-fg-muted">
-          <span className="flex size-7 items-center justify-center rounded-full bg-surface-hover"><Icon className="size-3.5 text-fg" aria-hidden /></span>
-          {label}
+        <p className="flex items-center gap-2 text-sm leading-tight font-semibold text-fg-muted">
+          <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-surface-hover"><Icon className="size-3.5 text-fg" aria-hidden /></span>
+          <span className="min-w-0">{label}</span>
         </p>
         <div>{children}</div>
-        {hint && <p className="text-xs text-fg-subtle">{hint}</p>}
+        {hint && <p className="text-xs leading-snug text-fg-subtle">{hint}</p>}
       </CardContent>
     </Card>
   );
@@ -268,24 +282,26 @@ function Positions({ positions, currency, onOpen }: { positions: Trade[]; curren
               const left = p.contract_family === "RISE_FALL" ? formatCountdown(p.expires_at, now) : null;
               return (
                 <li key={p.id}>
-                  <button type="button" onClick={() => onOpen(p.id)} className="group flex w-full items-center gap-3 rounded-md px-2 py-2.5 text-left transition-colors hover:bg-surface-hover focus-visible:bg-surface-hover">
-                    <span className="num w-5 shrink-0 text-center text-sm text-fg-subtle group-hover:text-fg" aria-hidden>{i + 1}</span>
+                  <button type="button" onClick={() => onOpen(p.id)} className="group flex min-h-16 w-full items-center gap-3 rounded-md px-2 py-2.5 text-left transition-colors hover:bg-surface-hover focus-visible:bg-surface-hover active:bg-surface-hover">
+                    <span className="num hidden w-5 shrink-0 text-center text-sm text-fg-subtle group-hover:text-fg sm:block" aria-hidden>{i + 1}</span>
                     <Countdown trade={p} now={now} />
                     <span className="min-w-0 flex-1">
-                      <span className="flex flex-wrap items-center gap-2">
-                        <span className="font-bold text-fg">{p.symbol}</span>
+                      <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                        <span className="min-w-0 truncate text-[15px] font-bold text-fg sm:text-sm">{p.symbol}</span>
                         <Direction trade={p} />
                         <span className="text-xs text-fg-subtle">{tradeContractLabel(p)}</span>
                       </span>
-                      <span className="mt-0.5 flex flex-wrap gap-x-3 text-xs text-fg-muted">
+                      <span className="mt-0.5 flex min-w-0 flex-wrap gap-x-3 text-xs text-fg-muted">
                         <span>{p.contract_family && p.contract_family !== "SPOT" ? "Stake" : "Size"} <span className="num text-fg">{sizeText(p, currency)}</span></span>
                         {p.strategy && <span className="truncate">{p.strategy}</span>}
                       </span>
                     </span>
-                    {left !== null && (
-                      <span className="num shrink-0 text-sm text-fg-muted" aria-label={`Time left ${left}`}>{left}</span>
-                    )}
-                    <PnlText value={p.unrealized_pnl} currency={currency} className="w-24 shrink-0 text-right text-sm font-bold" />
+                    <span className="flex shrink-0 flex-col items-end gap-0.5 sm:flex-row sm:items-center sm:gap-3">
+                      {left !== null && (
+                        <span className="num order-last text-xs text-fg-muted sm:order-none sm:text-sm" aria-label={`Time left ${left}`}>{left}</span>
+                      )}
+                      <PnlText value={p.unrealized_pnl} currency={currency} className="text-right text-base font-extrabold sm:w-24 sm:text-sm sm:font-bold" />
+                    </span>
                   </button>
                 </li>
               );
@@ -363,6 +379,7 @@ function ActiveStrategies({ overview: o }: { overview: Overview }) {
                   {s.last_bar_evaluated ? `Last candle checked: ${formatTime(s.last_bar_evaluated)}` : "Waiting for the next candle to close"}
                   {s.last_signal_at ? ` · last signal ${formatRelative(s.last_signal_at)}` : ""}
                 </p>
+                {o.account && <LiveWatch accountId={o.account.id} strategy={s} />}
                 </div>
               </li>
             ))}

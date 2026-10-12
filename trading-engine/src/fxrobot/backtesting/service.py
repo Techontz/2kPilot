@@ -28,6 +28,7 @@ from fxrobot.backtesting.engine import (
     CostModel,
     expiry_bars,
 )
+from fxrobot.backtesting.validation import demo_forward_gate
 from fxrobot.core.errors import NotFoundError, UnprocessableError
 from fxrobot.db.types import utcnow
 from fxrobot.domain.contracts import ContractFamily, ContractSpec
@@ -187,6 +188,9 @@ class BacktestService:
         dataset = db.get(Dataset, req.dataset_id)
         if dataset is None:
             raise NotFoundError("Dataset not found")
+        problem = strategy.support_problem(dataset.symbol, contract.contract_family)
+        if problem is not None:
+            raise BacktestRequestError(problem)
         if contract.contract_family is ContractFamily.RISE_FALL:
             try:
                 expiry_bars(contract, dataset.timeframe)
@@ -382,6 +386,7 @@ class BacktestService:
                     net_pnl=t.net_pnl,
                     r_multiple=t.r_multiple,
                     session=t.session,
+                    regime=t.regime,
                     reasons=t.reasons,
                 )
             )
@@ -472,6 +477,7 @@ class BacktestService:
             "out_of_sample": metrics_mod.summary(oos_res.metrics),
             **comparison,
             "warnings": comparison["warnings"] + warnings_for(oos_res.metrics, row),
+            "validation": demo_forward_gate(oos_res.metrics, None, synthetic=is_synthetic(row)),
         }
         db.commit()
 
@@ -482,11 +488,7 @@ class BacktestService:
         combos = [dict(zip(grid, c, strict=True)) for c in itertools.product(*grid.values())] or [
             {}
         ]
-        windows = []
-        cursor = row.start
-        while cursor + train + test <= row.end + timedelta(days=1):
-            windows.append((cursor, cursor + train, min(cursor + train + test, row.end)))
-            cursor += test
+        windows = walk_forward_windows(row.start, row.end, train, test)
         if not windows:
             raise BacktestError("Date range too short for one train+test window")
         oos_trades: list[metrics_mod.TradeStat] = []
@@ -518,6 +520,7 @@ class BacktestService:
                     t.session,
                     t.r_multiple,
                     t.costs,
+                    regime=t.regime,
                 )
                 for t in res.trades
             ]
@@ -540,6 +543,9 @@ class BacktestService:
             "windows": table,
             "profitable_windows": profitable,
             "total_windows": len(table),
+            "validation": demo_forward_gate(
+                row.metrics, [w["test"] for w in table], synthetic=is_synthetic(row)
+            ),
             "warnings": warnings_for(row.metrics, row)
             + (
                 [f"Only {profitable} of {len(table)} out-of-sample windows were profitable."]
@@ -588,6 +594,22 @@ class BacktestService:
         db.commit()
 
 
+def walk_forward_windows(
+    start: datetime, end: datetime, train: timedelta, test: timedelta
+) -> list[tuple[datetime, datetime, datetime]]:
+    """Rolling (train start, test start, test end) windows; test windows never overlap."""
+    windows = []
+    cursor = start
+    while cursor + train + test <= end + timedelta(days=1):
+        windows.append((cursor, cursor + train, min(cursor + train + test, end)))
+        cursor += test
+    return windows
+
+
+def is_synthetic(row: Backtest) -> bool:
+    return bool(row.config.get("synthetic_data")) or row.data_source == DataSource.SYNTHETIC.value
+
+
 def compare(is_m: dict[str, Any], oos_m: dict[str, Any]) -> dict[str, Any]:
     warnings = []
     is_e, oos_e = is_m.get("expectancy_r"), oos_m.get("expectancy_r")
@@ -612,7 +634,7 @@ def compare(is_m: dict[str, Any], oos_m: dict[str, Any]) -> dict[str, Any]:
 
 def warnings_for(m: dict[str, Any], row: Backtest) -> list[str]:
     out = ["Historical results do not guarantee future performance."]
-    if row.config.get("synthetic_data") or row.data_source == DataSource.SYNTHETIC.value:
+    if is_synthetic(row):
         out.insert(0, "SYNTHETIC data: these results say nothing about real markets.")
     trades = m.get("trades") or 0
     if trades < MIN_TRADES_FOR_CONFIDENCE:

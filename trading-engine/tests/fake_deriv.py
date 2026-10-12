@@ -113,6 +113,7 @@ class FakeDeriv:
     ask_markup: Decimal = Decimal(0)  # added to the ask price (to test "ask above stake")
     stake_limits: bool = True  # include validation_params.stake in proposals
     suspended: set[str] = field(default_factory=set)
+    history_from: int = 1_760_000_000  # oldest candle the server serves (history limit)
 
     # ── REST ─────────────────────────────────────────────────────────────
     def transport(self) -> httpx.MockTransport:
@@ -392,9 +393,20 @@ class FakeDeriv:
                 },
             )
         if "ticks_history" in msg:
-            gran = int(msg["granularity"])
-            start, end = int(msg["start"]), int(msg["end"])
-            first = start - start % gran
+            # As Deriv's servers behave (checked 2026-10): `end` must be a string,
+            # adjust_start_time only accepts 1, `start` does not select a window
+            # (the latest bars come back), and an `end` before the history limit
+            # also returns the latest bars.
+            if not isinstance(msg.get("end"), str) or msg.get("adjust_start_time", 1) != 1:
+                return error(
+                    "ticks_history", "InputValidationFailed", "Input validation failed: end"
+                )
+            gran = int(msg.get("granularity", 60))
+            count = int(msg.get("count", 1000))
+            end = self.now if msg["end"] == "latest" else min(int(msg["end"]), self.now)
+            if "start" in msg or end < self.history_from:
+                end = self.now
+            last = end - end % gran
             price = self.price(msg["ticks_history"])
             candles = [
                 {
@@ -404,7 +416,8 @@ class FakeDeriv:
                     "low": float(price) * 0.999,
                     "close": float(price),
                 }
-                for t in range(first, min(end, self.now) + 1, gran)
+                for t in range(max(last - (count - 1) * gran, self.history_from), last + 1, gran)
+                if t >= self.history_from
             ]
             return reply("candles", candles)
         if "proposal" in msg and "proposal_open_contract" not in msg:
@@ -445,8 +458,10 @@ class FakeDeriv:
                     "spot": float(self.price(symbol)),
                     "multiplier": msg["multiplier"],
                     "validation_params": {
+                        # The shape Deriv's public servers returned for R_10 (2026-10).
                         "stake": {"min": "1.00", "max": "2000.00"},
-                        "stop_loss": {"max": str(stake)},
+                        "stop_loss": {"min": "0.10", "max": str(stake)},
+                        "take_profit": {"min": "0.10", "max": "50.00"},
                     },
                 },
             )

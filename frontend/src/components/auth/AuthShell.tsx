@@ -35,8 +35,9 @@ export function AuthLogo({ className, compact = false }: { className?: string; c
  * phones, many errors) only the card scrolls — never the page.
  */
 export function AuthShell({ children, footer }: { children: ReactNode; footer: ReactNode }) {
+  // The auth screens are tuned to fit without scrolling, so they keep the base type scale (no phone bump).
   return (
-    <main style={AUTH_TOKENS} className="dark relative isolate h-dvh overflow-hidden bg-[#050507] text-white">
+    <main style={AUTH_TOKENS} className="dark relative isolate h-dvh overflow-hidden bg-[#050507] text-white [--text-sm--line-height:calc(1.25/0.875)] [--text-sm:0.875rem] [--text-xs--line-height:calc(1/0.75)] [--text-xs:0.75rem]">
       <AuthBackground className="absolute inset-0 -z-20" />
       {/* Legibility scrims: darken behind the brand copy (left/bottom) and the form (right). */}
       <div aria-hidden className="pointer-events-none absolute inset-0 -z-10 bg-[linear-gradient(180deg,rgb(5_5_7/0.55),rgb(5_5_7/0.2)_30%,rgb(5_5_7/0.75))] lg:bg-[linear-gradient(90deg,rgb(5_5_7/0.82),rgb(5_5_7/0.35)_45%,rgb(5_5_7/0.15)_60%,rgb(5_5_7/0.6))]" />

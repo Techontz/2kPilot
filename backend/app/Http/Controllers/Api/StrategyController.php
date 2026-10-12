@@ -79,6 +79,10 @@ class StrategyController extends Controller
                 'code_version' => $catalog[$s->key]['code_version'] ?? null,
                 // Rule-based strategies use the builder catalogue instead (GET /api/strategies/catalog).
                 'parameter_schema' => $s->isRules() ? null : ($catalog[$s->key]['parameter_schema'] ?? null),
+                // null = any market / contract family.
+                'contract_families' => $catalog[$s->key]['contract_families'] ?? ($s->details['supported_contract_families'] ?? null),
+                'symbols' => $catalog[$s->key]['symbols'] ?? ($s->details['supported_symbols'] ?? null),
+                'entries_disabled' => $this->entriesDisabled($s),
                 'latest_version' => $latest ? self::version($latest) : null,
                 'rules_text' => $latest?->rules_text,
                 'versions' => $s->versions->map(fn (StrategyVersion $v) => self::version($v))->values(),
@@ -86,6 +90,10 @@ class StrategyController extends Controller
                     ->where('strategy_id', $s->id)->get()->map(fn ($a) => self::assignment($a)),
                 'performance' => $this->performance($user, $versionIds->all()),
                 'backtest' => $backtest ? self::backtestHeadline($backtest) : null,
+                // The latest completed backtest per market: results by instrument.
+                'backtests_by_symbol' => Backtest::query()->ownedBy($user)->whereIn('strategy_version_id', $versionIds)->whereNull('parent_id')
+                    ->where('status', 'COMPLETED')->latest('finished_at')->limit(30)->get()->unique('symbol')->values()
+                    ->map(fn (Backtest $b) => self::backtestHeadline($b)),
                 // Kept for older dashboards: every closed trade of this strategy (all environments).
                 'live_trades' => (clone $closed)->count(),
                 'live_net_pnl' => round((float) (clone $closed)->sum('net_pnl'), 2),
@@ -244,7 +252,9 @@ class StrategyController extends Controller
         $account = TradingAccount::query()->ownedBy($request->user())->with('connection')->findOrFail($data['account_id']);
         $this->authorize('trade', $account);
         $version = $this->visibleVersion($request, $data['strategy_version_id']);
-        [$contract, $check] = $this->strategies->checkContract($account, $data['symbol'], ContractSpec::validate($data, $account));
+        $spec = ContractSpec::validate($data, $account);
+        $this->strategies->ensureSupported($version->strategy, $data['symbol'], $spec);
+        [$contract, $check] = $this->strategies->checkContract($account, $data['symbol'], $spec);
         $assignment = $this->strategies->assign($version, $account, $data['symbol'], $request->user(), $contract);
 
         return response()->json(self::assignment($assignment->load('account.connection', 'version')) + ['contract_check' => $check], 201);
@@ -256,7 +266,9 @@ class StrategyController extends Controller
         $this->authorize('update', $assignment);
         $data = $request->validate(ContractSpec::rules());
         $account = $assignment->account()->with('connection')->firstOrFail();
-        [$contract, $check] = $this->strategies->checkContract($account, $assignment->symbol, ContractSpec::validate($data, $account));
+        $spec = ContractSpec::validate($data, $account);
+        $this->strategies->ensureSupported($assignment->strategy()->firstOrFail(), $assignment->symbol, $spec);
+        [$contract, $check] = $this->strategies->checkContract($account, $assignment->symbol, $spec);
         $assignment = $this->strategies->changeContract($assignment, $contract, $request->user());
 
         return response()->json(self::assignment($assignment->load('account.connection', 'version')) + ['contract_check' => $check]);
@@ -327,6 +339,7 @@ class StrategyController extends Controller
         $account = TradingAccount::query()->ownedBy($user)->with('connection')->findOrFail($data['account_id']);
         $this->authorize('trade', $account);
         $contract = ContractSpec::validate($request->all(), $account, 'contract.');
+        $this->strategies->ensureSupported($strategy, $data['symbol'], $contract);
         [$contract, $check] = $this->strategies->checkContract($account, $data['symbol'], $contract);
         $blockers = [...$this->blockers->controls($user, $account), ...$this->blockers->marketClosed($account, [$data['symbol']])];
         $assignment = $this->strategies->activate($strategy, $account, $data['symbol'], $contract, $user,
@@ -437,6 +450,29 @@ class StrategyController extends Controller
             'max_drawdown_pct' => $m['max_drawdown_pct'] ?? null,
             'contract_family' => $b->config['contract']['contract_family'] ?? null,
             'run_at' => ($b->finished_at ?? $b->created_at)?->toIso8601String(),
+            'kind' => $b->kind,
+            'data_source' => $b->data_source,
+            'profit_factor' => $m['profit_factor'] ?? null,
+            'expectancy' => $m['expectancy'] ?? null,
+            'avg_rr' => $m['avg_rr'] ?? null,
+            'longest_losing_streak' => $m['longest_losing_streak'] ?? null,
+            'by_regime' => $m['by_regime'] ?? [],
+            'validation' => ((array) $b->report)['validation'] ?? null,
+        ];
+    }
+
+    /** The emergency stop on this strategy, or on the built-in it was copied from. */
+    private function entriesDisabled(Strategy $s): ?array
+    {
+        $source = $s->entriesDisabled() ? $s : ($s->copied_from_id ? Strategy::query()->find($s->copied_from_id) : null);
+        if ($source === null || ! $source->entriesDisabled()) {
+            return null;
+        }
+
+        return [
+            'at' => $source->entries_disabled_at?->toIso8601String(),
+            'reason' => $source->entries_disabled_reason,
+            'inherited' => $source->id !== $s->id,
         ];
     }
 

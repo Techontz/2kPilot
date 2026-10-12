@@ -672,3 +672,15 @@ def test_rise_fall_backtest_via_api_on_a_synthetic_index(client: SignedClient, d
     )
     assert too_short.status_code == 422
     assert "do not show individual ticks" in too_short.json()["error"]["message"]
+
+
+def test_a_priced_stake_passes_without_a_full_broker_range() -> None:
+    """Seen live (2026-10-12, frxUSDJPY Rise/Fall): Deriv priced the $1 stake but
+    its reply lacked part of validation_params.stake; every signal was refused."""
+    partial = StakeQuote(D("0.35"), None, ask_price=D("1.00"), payout=D("1.80"))
+    decision = evaluate(make_signal(), contract_ctx(stake_quote=partial), RiskLimits())
+    assert decision.approved, decision.rejection_reason
+    assert "the broker priced this stake" in rule(decision, "Stake").detail
+    too_low = StakeQuote(D("5.00"), None, ask_price=D("1.00"))
+    decision = evaluate(make_signal(), contract_ctx(stake_quote=too_low), RiskLimits())
+    assert "outside the broker's stake range 5.00 USD–?" in (decision.rejection_reason or "")

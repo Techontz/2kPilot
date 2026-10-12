@@ -87,4 +87,5 @@ class BacktestTrade(Base):
     net_pnl: Mapped[Decimal] = mapped_column(Money())
     r_multiple: Mapped[Decimal] = mapped_column(Price())
     session: Mapped[str] = mapped_column(String(20))
+    regime: Mapped[str | None] = mapped_column(String(20))  # market regime at entry
     reasons: Mapped[list[str]] = mapped_column(JSON)

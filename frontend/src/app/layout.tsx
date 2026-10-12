@@ -17,6 +17,12 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  // Draw under the iPhone notch / home indicator; the shell pads with env(safe-area-inset-*).
+  viewportFit: "cover",
+  // The on-screen keyboard shrinks the layout (and dvh), so sheets keep their buttons visible.
+  interactiveWidget: "resizes-content",
   themeColor: [
     { media: "(prefers-color-scheme: light)", color: "#ededed" },
     { media: "(prefers-color-scheme: dark)", color: "#000000" },

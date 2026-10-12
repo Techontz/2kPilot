@@ -46,7 +46,7 @@ import { cn } from "@/lib/utils";
 export function RealMoneyDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto border-t-4 border-live ring-live/30 sm:max-w-lg">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto border-t-4 border-live ring-live/30 sm:max-w-lg max-sm:flex max-sm:h-dvh max-sm:max-h-dvh max-sm:flex-col max-sm:rounded-none max-sm:border-t-4 max-sm:border-live max-sm:pt-[calc(1.5rem+env(safe-area-inset-top))] max-sm:before:hidden">
         <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-36 bg-[linear-gradient(180deg,color-mix(in_oklab,var(--live)_16%,transparent),transparent)]" />
         {/* Mounted only while open, so each opening starts fresh. */}
         {open && <Flow onClose={() => onOpenChange(false)} />}
@@ -154,6 +154,7 @@ function Flow({ onClose }: { onClose: () => void }) {
     }
   };
 
+  const canGoBack = step !== "done" && step !== "prepare" && step !== firstStep(ctx);
   const fieldErr = (field: LiveAuthField) => (fieldError?.field === field ? fieldError.message : null);
 
   return (
@@ -306,23 +307,24 @@ function Flow({ onClose }: { onClose: () => void }) {
         {error && <Notice tone="danger">{error}</Notice>}
       </div>
 
-      <DialogFooter className="gap-2 sm:justify-between">
-        {step !== "done" && step !== "prepare" && step !== firstStep(ctx) ? (
-          <Button variant="ghost" onClick={() => go(previousStep(step))} disabled={busy}>Back</Button>
+      {/* Phones: the next step is the wide button on top; Back and Cancel share the row below. */}
+      <DialogFooter className="gap-2 sm:justify-between max-sm:mt-auto max-sm:grid max-sm:grid-cols-2">
+        {canGoBack ? (
+          <Button variant="ghost" onClick={() => go(previousStep(step))} disabled={busy} className="max-sm:order-2 max-sm:bg-surface-hover">Back</Button>
         ) : <span className="hidden sm:block" />}
-        <div className="flex flex-col-reverse gap-2 sm:flex-row">
+        <div className="flex flex-col-reverse gap-2 sm:flex-row max-sm:contents">
           {step === "done" ? (
-            <Button onClick={onClose}>Done</Button>
+            <Button onClick={onClose} className="max-sm:col-span-2">Done</Button>
           ) : (
             <>
-              <Button variant="outline" onClick={onClose} disabled={busy}>Cancel</Button>
+              <Button variant="outline" onClick={onClose} disabled={busy} className={cn("max-sm:order-3", !canGoBack && "max-sm:col-span-2")}>Cancel</Button>
               {step === "credentials" ? (
                 <Button type="submit" form="live-auth-form" disabled={busy || !canAdvance(step, ctx)}
-                  className="bg-live text-live-foreground hover:bg-live/90">
+                  className="bg-live text-live-foreground hover:bg-live/90 max-sm:order-1 max-sm:col-span-2">
                   {busy ? "Turning on…" : "Turn on LIVE mode"}
                 </Button>
               ) : (blocker === null || step !== "prepare") && (
-                <Button onClick={() => go(nextStep(step))} disabled={busy || !canAdvance(step, ctx)}>Continue</Button>
+                <Button onClick={() => go(nextStep(step))} disabled={busy || !canAdvance(step, ctx)} className="max-sm:order-1 max-sm:col-span-2">Continue</Button>
               )}
             </>
           )}
@@ -366,6 +368,11 @@ function FieldBlock({ id, label, error, children }: { id: string; label: React.R
 function Stepper({ step }: { step: LiveAuthStep }) {
   const current = stepIndex(step);
   return (
+    <div className="space-y-2">
+    <p aria-hidden className="text-sm font-bold text-fg sm:hidden">
+      Step <span className="num">{current + 1}</span> of <span className="num">{LIVE_AUTH_STEPS.length}</span>
+      <span className="font-semibold text-fg-muted"> · {LIVE_AUTH_STEPS[current]?.label}</span>
+    </p>
     <ol className="flex items-center gap-1" aria-label="Progress">
       {LIVE_AUTH_STEPS.map((s, i) => (
         <li key={s.step} className="flex flex-1 flex-col gap-1" aria-current={i === current ? "step" : undefined}>
@@ -377,5 +384,6 @@ function Stepper({ step }: { step: LiveAuthStep }) {
         </li>
       ))}
     </ol>
+    </div>
   );
 }

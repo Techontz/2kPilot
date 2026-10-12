@@ -33,7 +33,7 @@ export function EnvironmentStrip() {
         </div>
       )}
       {(status?.platform_halted || engineBanner || !user.mfa_enabled) && (
-        <div className="mx-auto flex w-full max-w-[1320px] flex-col gap-2 px-4 pt-4 sm:px-6 lg:px-8">
+        <div className="mx-auto flex w-full max-w-[1320px] flex-col gap-2 px-[max(1rem,env(safe-area-inset-left))] pt-4 sm:px-6 lg:px-8">
           {status?.platform_halted && (
             <div role="alert" className="flex items-start gap-3 rounded-lg border border-negative/30 bg-negative-soft px-4 py-3 text-sm text-fg backdrop-blur">
               <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-negative text-negative-foreground"><AlertOctagon className="size-4" aria-hidden /></span>
@@ -41,7 +41,7 @@ export function EnvironmentStrip() {
             </div>
           )}
           {engine && engineBanner && (
-            <div role={engine.tone === "negative" ? "alert" : "status"} className={`flex items-start gap-3 rounded-lg border px-4 py-3 text-sm text-fg backdrop-blur ${engineBanner.box}`}>
+            <div role={engine.tone === "negative" ? "alert" : "status"} className={`flex items-start gap-3 rounded-lg border px-4 py-3 text-sm text-fg backdrop-blur ${engineBanner.box} ${engine.tone === "info" ? "max-sm:py-2.5 max-sm:text-[13px] max-sm:leading-snug" : ""}`}>
               <span className={`flex size-7 shrink-0 items-center justify-center rounded-full ${engineBanner.badge}`}><engineBanner.Icon className="size-4" aria-hidden /></span>
               <p className="min-w-0 self-center"><span className={`font-bold ${engineBanner.text}`}>{engine.label}</span> — {engine.message}</p>
             </div>
@@ -49,7 +49,7 @@ export function EnvironmentStrip() {
           {!user.mfa_enabled && (
             <div className="flex items-center gap-3 rounded-2xl sm:rounded-full bg-[color-mix(in_oklab,var(--card)_70%,transparent)] py-1.5 pr-4 pl-1.5 text-sm text-fg-muted ring-1 ring-warning/30 backdrop-blur">
               <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-warning-soft text-warning"><ShieldCheck className="size-4" aria-hidden /></span>
-              <span className="min-w-0">Protect this account: <Link href="/settings?tab=security" className="font-semibold text-fg underline decoration-warning/60 underline-offset-4 hover:decoration-warning">turn on two-factor authentication</Link>.</span>
+              <span className="min-w-0"><span className="max-sm:sr-only">Protect this account: </span><Link href="/settings?tab=security" className="font-semibold text-fg underline decoration-warning/60 underline-offset-4 hover:decoration-warning max-sm:inline-block max-sm:py-2 max-sm:first-letter:uppercase">turn on two-factor authentication</Link><span className="max-sm:hidden">.</span></span>
             </div>
           )}
         </div>

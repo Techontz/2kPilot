@@ -2,8 +2,12 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Enums\AuditOutcome;
 use App\Enums\TradingMode;
+use App\Exceptions\DomainException;
 use App\Http\Controllers\Controller;
+use App\Http\Middleware\EnsureWebSession;
+use App\Services\Audit\AuditLogger;
 use App\Services\Trading\TradingControl;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -12,10 +16,16 @@ use Illuminate\Validation\Rule;
 /**
  * The current user's STOP TRADING / Resume, operating mode, and the separate
  * "Close positions" action. Everything here acts on the user's own accounts.
+ *
+ * The mobile app (bearer token) may stop, start, close positions and return
+ * to DEMO, but never enter LIVE mode: real money is authorised on the website.
  */
 class TradingController extends Controller
 {
-    public function __construct(private readonly TradingControl $control) {}
+    public function __construct(
+        private readonly TradingControl $control,
+        private readonly AuditLogger $audit,
+    ) {}
 
     public function status(Request $request): JsonResponse
     {
@@ -55,6 +65,11 @@ class TradingController extends Controller
             'confirmation_phrase' => ['nullable', 'string', 'max:100'],
             'account_id' => ['nullable', 'uuid'], // the LIVE account whose limits are being authorised
         ]);
+        if ($data['mode'] === TradingMode::Live->value && EnsureWebSession::viaToken($request)) {
+            $this->audit->record('trading.mode.change_denied', AuditOutcome::Denied, $request->user(), 'user_trading_state', $request->user()->id,
+                details: ['to' => TradingMode::Live->value, 'reason' => 'live_requires_web']);
+            throw DomainException::forbidden('Authorize real-money trading on the 2kPilot website.', 'live_requires_web');
+        }
         $this->control->setMode($request->user(), TradingMode::from($data['mode']),
             $data['password'] ?? null, $data['confirmation_phrase'] ?? null, $data['account_id'] ?? null, $data['mfa_code'] ?? null);
 

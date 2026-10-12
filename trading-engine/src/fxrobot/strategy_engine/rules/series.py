@@ -15,6 +15,7 @@ import numpy as np
 from fxrobot.domain.market import Candle
 from fxrobot.strategy_engine.indicators import (
     FloatArray,
+    adx,
     atr,
     bollinger,
     ema,
@@ -78,6 +79,9 @@ class Frame:
             return highest(src, period)
         if o.indicator == "lowest":
             return lowest(src, period)
+        if o.indicator == "adx":
+            line, plus, minus = adx(self.prices["high"], self.prices["low"], close, period)
+            return {"adx": line, "plus_di": plus, "minus_di": minus}[o.output or "adx"]
         if o.indicator == "macd":
             line, signal, hist = macd(close, int(p["fast"]), int(p["slow"]), int(p["signal"]))
             return {"line": line, "signal": signal, "histogram": hist}[o.output or "line"]

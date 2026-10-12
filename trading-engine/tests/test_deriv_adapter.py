@@ -9,7 +9,9 @@ requires a real App ID and token (see docs/BROKERS.md).
 from __future__ import annotations
 
 import dataclasses
+import itertools
 import json
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -220,6 +222,53 @@ def test_contract_capabilities_parse_contracts_for(deriv: DerivAdapter) -> None:
     assert eur.check(ContractSpec(contract_family=ContractFamily.MULTIPLIER, multiplier=50))
 
 
+def test_contract_capabilities_read_the_current_contracts_for_shape(deriv: DerivAdapter) -> None:
+    """Deriv's current Options API (2026-10, Volatility indices) lists one CALL/PUT
+    row per expiry with `barriers: 1` and no `barrier_category` — still Rise/Fall."""
+    rows = [
+        {
+            "contract_category": "callput",
+            "contract_type": t,
+            "expiry_type": expiry,
+            "barriers": 1,
+            "min_contract_duration": lo,
+            "max_contract_duration": hi,
+        }
+        for t in ("CALL", "PUT", "CALLE", "PUTE")
+        for expiry, lo, hi in (
+            ("daily", "1d", "365d"),
+            ("intraday", "15s", "1d"),
+            ("tick", "1t", "10t"),
+        )
+    ] + [
+        {"contract_category": "multiplier", "contract_type": t, "multiplier_range": [50, 100]}
+        for t in ("MULTUP", "MULTDOWN")
+    ]
+    deriv.resolve("R_100")
+    deriv._offered["R_100"] = (rows, time.monotonic())  # pyright: ignore[reportPrivateUsage]
+    caps = deriv.contract_capabilities("R_100")
+    assert caps.rise_fall and caps.allow_equals
+    assert {(r.minimum, r.maximum) for r in caps.durations} == {
+        ("1d", "365d"),
+        ("15s", "1d"),
+        ("1t", "10t"),
+    }
+    assert (
+        caps.check(
+            ContractSpec(contract_family=ContractFamily.RISE_FALL, duration=5, duration_unit="m")
+        )
+        is None
+    )
+    assert caps.multipliers == (50, 100)
+
+    # Rows explicitly marked as Higher/Lower are never read as Rise/Fall.
+    deriv._offered["R_100"] = (
+        [{**r, "barrier_category": "euro_non_atm"} for r in rows],
+        time.monotonic(),
+    )  # pyright: ignore[reportPrivateUsage]
+    assert not deriv.contract_capabilities("R_100").rise_fall
+
+
 def test_quote_contract_reads_stake_limits_from_the_proposal(
     deriv: DerivAdapter, fake: FakeDeriv
 ) -> None:
@@ -260,6 +309,36 @@ def test_candles_are_closed_bars_only(deriv: DerivAdapter, fake: FakeDeriv) -> N
     bars = deriv.get_candles("frxEURUSD", Timeframe.H1, now - timedelta(hours=10), now)
     assert bars and all(b.time + Timeframe.H1.delta <= now for b in bars)
     assert [b.time for b in bars] == sorted(b.time for b in bars)
+
+
+def test_candle_history_pages_backwards_like_deriv_serves_it(
+    deriv: DerivAdapter, fake: FakeDeriv
+) -> None:
+    """Deriv ignores `start` and wants `end` as a string: the adapter pages back by `end`."""
+    now = datetime.fromtimestamp(fake.now, UTC)
+    start = now - timedelta(days=10)  # 2,880 M5 bars: three pages of 1,000
+    bars = deriv.get_candles("R_100", Timeframe.M5, start, now)
+    requests = [r for r in fake.requests if "ticks_history" in r]
+    assert len(requests) >= 3
+    assert all(isinstance(r["end"], str) and "start" not in r for r in requests)
+    assert all("adjust_start_time" not in r for r in requests)
+    times = [b.time for b in bars]
+    assert times == sorted(set(times))  # no duplicates across pages
+    assert all(b - a == Timeframe.M5.delta for a, b in itertools.pairwise(times))
+    assert times[0] >= start and times[-1] + Timeframe.M5.delta <= now
+    assert len(bars) >= 2870
+
+
+def test_candle_history_stops_at_the_server_history_limit(
+    deriv: DerivAdapter, fake: FakeDeriv
+) -> None:
+    """Before its history limit Deriv answers with the LATEST bars: never mixed in."""
+    now = datetime.fromtimestamp(fake.now, UTC)
+    fake.history_from = fake.now - 3 * 86400
+    old_end = now - timedelta(days=20)
+    assert deriv.get_candles("R_100", Timeframe.M5, now - timedelta(days=30), old_end) == []
+    bars = deriv.get_candles("R_100", Timeframe.M5, now - timedelta(days=30), now)
+    assert bars[0].time >= datetime.fromtimestamp(fake.history_from, UTC)
 
 
 # ── Rise/Fall ────────────────────────────────────────────────────────────
@@ -803,3 +882,29 @@ def test_sold_contract_missing_from_profit_table_is_reported_from_its_details(
     exits = [d for d in deriv.get_deals(*window(fake)) if d.entry is DealEntry.OUT]
     assert len(exits) == 1 and exits[0].position_id == result.broker_position_id
     assert exits[0].profit == Decimal("2.20")
+
+
+def test_a_closed_market_is_rechecked_within_a_minute(
+    deriv: DerivAdapter, fake: FakeDeriv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seen live (2026-10-12): forex opened at 00:00 UTC but the cached "closed"
+    status held for up to 10 minutes, so the first signal arrived too late to trade."""
+    import fxrobot.broker_engine.adapters.deriv as deriv_module
+
+    clock = [1000.0]
+    monkeypatch.setattr(deriv_module.time, "monotonic", lambda: clock[0])
+    fake.market_closed.add("frxEURUSD")
+    deriv._active_at = 0.0  # pyright: ignore[reportPrivateUsage]
+    assert deriv.get_symbol("EURUSD").market_open is False
+
+    fake.market_closed.clear()  # the market opens
+    clock[0] += 30
+    assert deriv.get_symbol("EURUSD").market_open is False  # still within the recheck window
+    clock[0] += 31
+    assert deriv.get_symbol("EURUSD").market_open is True
+
+    # An open market keeps the long cache (no extra requests per tick).
+    asked = len(fake.requests)
+    clock[0] += 120
+    deriv.get_symbol("EURUSD")
+    assert len(fake.requests) == asked

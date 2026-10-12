@@ -61,7 +61,7 @@ function DialogContent({
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-2xl bg-popover p-5 text-sm text-popover-foreground shadow-overlay ring-1 ring-line duration-150 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+          "fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-2xl bg-popover p-5 text-sm text-popover-foreground shadow-overlay ring-1 ring-line duration-150 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95 max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:max-h-[94dvh] max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:overflow-y-auto max-sm:overscroll-contain max-sm:rounded-t-3xl max-sm:rounded-b-none max-sm:pt-7 max-sm:pb-[calc(1.25rem+env(safe-area-inset-bottom))] max-sm:ring-0 max-sm:border-t max-sm:border-line max-sm:before:absolute max-sm:before:top-2.5 max-sm:before:left-1/2 max-sm:before:h-1 max-sm:before:w-10 max-sm:before:-translate-x-1/2 max-sm:before:rounded-full max-sm:before:bg-line-strong max-sm:data-open:zoom-in-100 max-sm:data-open:slide-in-from-bottom-12 max-sm:data-closed:zoom-out-100 max-sm:data-closed:slide-out-to-bottom-12 max-sm:duration-200",
           className
         )}
         {...props}
@@ -107,7 +107,7 @@ function DialogFooter({
     <div
       data-slot="dialog-footer"
       className={cn(
-        "-mx-5 -mb-5 mt-1 flex flex-col-reverse gap-2 rounded-b-2xl border-t bg-surface-raised px-5 py-4 sm:flex-row sm:justify-end",
+        "-mx-5 -mb-5 mt-1 flex flex-col-reverse gap-2 rounded-b-2xl border-t bg-surface-raised px-5 py-4 sm:flex-row sm:justify-end max-sm:sticky max-sm:bottom-0 max-sm:z-10 max-sm:-mb-[calc(1.25rem+env(safe-area-inset-bottom))] max-sm:rounded-none max-sm:pb-[calc(1rem+env(safe-area-inset-bottom))]",
         className
       )}
       {...props}

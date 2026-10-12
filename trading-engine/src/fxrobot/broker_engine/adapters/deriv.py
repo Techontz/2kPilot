@@ -115,6 +115,9 @@ from fxrobot.domain.modes import AccountEnvironment
 CENT = Decimal("0.01")
 ASK_TOLERANCE = Decimal("0.01")  # rounding allowance between stake and ask price
 SYMBOLS_TTL = 600.0  # seconds
+# A market listed as closed is asked about again sooner, so trading resumes within
+# a minute of the open (forex: Monday 00:00 UTC) instead of up to SYMBOLS_TTL later.
+CLOSED_RECHECK = 60.0
 CONTRACTS_TTL = 600.0
 QUOTE_FRESH = 10.0
 PORTFOLIO_REFRESH = 30.0
@@ -138,6 +141,7 @@ CATEGORIES = {
     "stocks": "stocks",
 }
 GRANULARITIES = {60, 120, 180, 300, 600, 900, 1800, 3600, 7200, 14400, 28800, 86400}
+HISTORY_MAX_PAGES = 400  # × 1000 candles per ticks_history request
 
 
 def _dec(value: Any) -> Decimal | None:
@@ -159,6 +163,28 @@ def _epoch(value: Any) -> datetime | None:
 
 def _flag(value: Any) -> bool:
     return value in (1, True, "1")
+
+
+def _rise_fall_rows(offered: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The `contracts_for` rows that are Rise/Fall (CALL/PUT without a barrier).
+
+    Older replies list Rise/Fall (`barriers: 0`, "euro_atm") apart from
+    Higher/Lower (`barriers: 1`, "euro_non_atm"). Deriv's current Options API
+    (checked 2026-10 on Volatility indices) lists one CALL/PUT row per expiry
+    with `barriers: 1` and no `barrier_category`: the barrier is optional and a
+    proposal without one is Rise/Fall. Each trade is still priced by a
+    proposal first, so Deriv confirms the contract before anything is bought.
+    """
+    call_put = [c for c in offered if str(c.get("contract_type")) in RISE_FALL_TYPES]
+    atm = [
+        c
+        for c in call_put
+        if c.get("barrier_category") == "euro_atm"
+        or str(c.get("barriers") if c.get("barriers") is not None else 0) in ("0", "")
+    ]
+    if atm:
+        return atm
+    return [c for c in call_put if not c.get("barrier_category")]
 
 
 def _contract_type(value: Any) -> ContractType | None:
@@ -372,8 +398,8 @@ class DerivAdapter(BrokerAdapter):
         return self._account.currency if self._account else "USD"
 
     # ── symbols ──────────────────────────────────────────────────────────
-    def _active_symbols(self) -> dict[str, dict[str, Any]]:
-        if self._active and time.monotonic() - self._active_at < SYMBOLS_TTL:
+    def _active_symbols(self, max_age: float = SYMBOLS_TTL) -> dict[str, dict[str, Any]]:
+        if self._active and time.monotonic() - self._active_at < max_age:
             return self._active
         reply = self._ws().request({"active_symbols": "brief"})
         items = reply.get("active_symbols")
@@ -435,6 +461,8 @@ class DerivAdapter(BrokerAdapter):
 
     def get_symbol(self, name: str) -> SymbolInfo:
         broker_name = self.resolve(name)
+        if not _flag(self._active[broker_name].get("exchange_is_open")):
+            self._active_symbols(max_age=CLOSED_RECHECK)
         return self._base_info(self._active[broker_name])
 
     # ── contracts offered (contracts_for) ────────────────────────────────
@@ -452,13 +480,7 @@ class DerivAdapter(BrokerAdapter):
         name = self.resolve(symbol)
         item = self._active[name]
         offered = self._contracts_for(name)
-        # Rise/Fall = CALL/PUT without a barrier (with a barrier they are Higher/Lower).
-        rise_fall = [
-            c
-            for c in offered
-            if str(c.get("contract_type")) in RISE_FALL_TYPES
-            and str(c.get("barriers") if c.get("barriers") is not None else 0) in ("0", "")
-        ]
+        rise_fall = _rise_fall_rows(offered)
         durations: list[DurationRange] = []
         for c in rise_fall:
             lo, hi = c.get("min_contract_duration"), c.get("max_contract_duration")
@@ -501,13 +523,24 @@ class DerivAdapter(BrokerAdapter):
             proposal = self._proposal(name, contract, None)
         except (DerivApiError, BrokerRateLimitError, InvalidBrokerResponseError) as exc:
             return StakeQuote(None, None, detail=f"Deriv did not price it: {exc}")
-        stake = (proposal.get("validation_params") or {}).get("stake") or {}
+        params = proposal.get("validation_params") or {}
+        stake = params.get("stake") or {}
+        stop = params.get("stop_loss") or {}  # Multipliers only
+        take = params.get("take_profit") or {}
         return StakeQuote(
             stake_min=_dec(stake.get("min")),
             stake_max=_dec(stake.get("max")),
             ask_price=_dec(proposal.get("ask_price")),
             payout=_dec(proposal.get("payout")),
-            detail="" if stake else "Deriv's proposal had no validation_params.stake",
+            detail=(
+                ""
+                if stake.get("min") and stake.get("max")
+                else f"Deriv's proposal validation_params.stake: {stake or 'none'}"
+            ),
+            stop_loss_min=_dec(stop.get("min")),
+            stop_loss_max=_dec(stop.get("max")),
+            take_profit_min=_dec(take.get("min")),
+            take_profit_max=_dec(take.get("max")),
         )
 
     # ── prices ───────────────────────────────────────────────────────────
@@ -538,31 +571,43 @@ class DerivAdapter(BrokerAdapter):
     def get_candles(
         self, symbol: str, timeframe: Timeframe, start: datetime, end: datetime
     ) -> list[Candle]:
-        """Closed candles from `ticks_history` (style "candles") — public market data."""
+        """Closed candles from `ticks_history` (style "candles") — public market data.
+
+        Checked against Deriv's public servers (2026-10): `end` is a STRING
+        ("latest" or epoch digits), `adjust_start_time` only accepts 1, and a
+        request with `start` returns the LATEST candles whatever the window. So we
+        page BACKWARDS with `end` + `count` only. Beyond Deriv's history limit the
+        server answers with the latest candles instead — that ends the paging.
+        """
         name = self.resolve(symbol)
         if timeframe.seconds not in GRANULARITIES:
             raise BrokerError(f"Deriv has no {timeframe} candles")
         now = self.now()
         candles: dict[datetime, Candle] = {}
-        cursor = start
-        chunk = timeframe.delta * 1000
-        while cursor < end:
-            stop = min(cursor + chunk, end)
+        cursor = min(end, now)
+        for _ in range(HISTORY_MAX_PAGES):
+            if cursor <= start:
+                break
             try:
                 reply = self._ws().request(
                     {
                         "ticks_history": name,
                         "style": "candles",
                         "granularity": timeframe.seconds,
-                        "start": int(cursor.timestamp()),
-                        "end": int(stop.timestamp()),
+                        "end": str(int(cursor.timestamp())),
                         "count": 1000,
-                        "adjust_start_time": 0,
                     }
                 )
             except DerivApiError as exc:
                 raise BrokerError(f"Deriv candles unavailable: {exc}") from exc
-            for row in reply.get("candles") or []:
+            rows = [r for r in reply.get("candles") or [] if _epoch(r.get("epoch")) is not None]
+            if not rows:
+                break
+            first = min(e for r in rows if (e := _epoch(r.get("epoch"))) is not None)
+            last = max(e for r in rows if (e := _epoch(r.get("epoch"))) is not None)
+            if last > cursor + timeframe.delta:
+                break  # beyond the history limit: Deriv answered with the latest bars
+            for row in rows:
                 opened = _epoch(row.get("epoch"))
                 values = [_dec(row.get(k)) for k in ("open", "high", "low", "close")]
                 if opened is None or any(v is None for v in values):
@@ -571,7 +616,9 @@ class DerivAdapter(BrokerAdapter):
                     continue  # outside the window, or still forming
                 o, h, low, c = (v for v in values if v is not None)
                 candles[opened] = Candle(opened, o, h, low, c)
-            cursor = stop
+            if first >= cursor:
+                break  # no progress
+            cursor = first
         return [candles[t] for t in sorted(candles)]
 
     # ── positions & history ──────────────────────────────────────────────

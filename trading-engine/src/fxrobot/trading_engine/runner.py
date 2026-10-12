@@ -30,6 +30,7 @@ from fxrobot.execution_engine.reconciliation import reconcile_account, unresolve
 from fxrobot.market_data.sessions import calendar_span, is_fx_market_open
 from fxrobot.market_data.validation import bar_problem
 from fxrobot.models import (
+    BrokerSymbol,
     RiskProfile,
     Signal,
     StrategyAssignment,
@@ -45,7 +46,12 @@ from fxrobot.services.risk_profiles import limits_of
 from fxrobot.strategy_engine import Outcome, get_strategy
 from fxrobot.strategy_engine.base import SignalIntent, Strategy
 from fxrobot.strategy_engine.view import StaticView
-from fxrobot.trading_engine.context import attach_contract, build_risk_context, load_controls
+from fxrobot.trading_engine.context import (
+    attach_contract,
+    build_risk_context,
+    load_controls,
+    strategy_stop_reason,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +166,22 @@ class AccountRunner:
             return None
         return finest.floor(adapter.now()) + finest.delta
 
+    @staticmethod
+    def _store_market_open(
+        db: Session, account: TradingAccount, name: str, market_open: bool | None
+    ) -> None:
+        """Keep the stored open/closed flag current: the dashboard reads it to say
+        why nothing trades ("market is closed"), and otherwise only a full symbol
+        sync updated it."""
+        row = db.scalar(
+            select(BrokerSymbol).where(
+                BrokerSymbol.connection_id == account.connection_id, BrokerSymbol.name == name
+            )
+        )
+        if row is not None and row.market_open != market_open:
+            row.market_open = market_open
+            db.commit()
+
     # ── account sync ─────────────────────────────────────────────────────
     def _sync(
         self, db: Session, account: TradingAccount, adapter: BrokerAdapter, rs: _RunnerState
@@ -198,6 +220,24 @@ class AccountRunner:
         if assignment.last_bar_evaluated is not None and assignment.last_bar_evaluated >= bar_open:
             return 0
         symbol = adapter.get_symbol(assignment.symbol)
+        self._store_market_open(db, account, symbol.name, symbol.market_open)
+        try:
+            family: ContractFamily | None = assignment.contract_spec().contract_family
+        except ValueError:
+            family = None  # invalid settings are rejected (with the reason) at signal time
+        problem = strategy.support_problem(symbol.canonical_name, family)
+        if problem is not None:
+            # e.g. a Rise/Fall assignment of a strategy that needs a stop and a target:
+            # never evaluated, never traded — NO_TRADE with the reason.
+            self._record_eval(
+                db,
+                assignment,
+                bar_open,
+                Outcome.NO_SETUP,
+                f"No trade: {problem}",
+                [{"name": "Supported market & contract", "passed": False, "detail": problem}],
+            )
+            return 0
         if symbol.market_open is False:
             return 0  # the broker says the market is closed: nothing to evaluate
         if (
@@ -259,7 +299,15 @@ class AccountRunner:
         if evaluation.signal is None:
             return 0
         self._handle_signal(
-            db, account, assignment, version, evaluation.signal, adapter, controls, rs
+            db,
+            account,
+            assignment,
+            version,
+            evaluation.signal,
+            adapter,
+            controls,
+            rs,
+            caps=strategy.risk_caps(params),
         )
         return 1
 
@@ -330,6 +378,8 @@ class AccountRunner:
         adapter: BrokerAdapter,
         controls: TradingControls,
         rs: _RunnerState,
+        *,
+        caps: dict[str, object] | None = None,
     ) -> None:
         cid = new_correlation_id()
         set_correlation_id(cid)
@@ -414,7 +464,13 @@ class AccountRunner:
             account_info=info,
             broker_connected=adapter.is_connected,
         )
-        limits = limits_of(profile)
+        ctx.strategy_disabled = strategy_stop_reason(version.strategy)
+        try:
+            # A strategy's own caps (e.g. 0.5 % per trade, 1 position) only tighten.
+            limits = limits_of(profile).tightened(dict(caps or {}))
+        except (ValueError, ArithmeticError) as exc:
+            self._reject(db, account, signal, f"Invalid risk profile: {exc}", [])
+            return
         attach_contract(ctx, adapter, spec, intent.side, limits)
         decision = risk_evaluate(intent, ctx, limits)
         signal.risk_checks = decision.checks_json()

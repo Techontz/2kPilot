@@ -235,6 +235,35 @@ class StrategyService
         return [$spec, ['verified' => true]];
     }
 
+    /**
+     * Refuse a market or contract family the strategy does not support, e.g. Rise/Fall
+     * for a strategy that needs a stop loss and a take profit. The limits come from
+     * the strategy's details (supported_contract_families / supported_symbols),
+     * written by the engine when it registers a built-in and kept by users' copies;
+     * missing = any. The engine refuses the same combinations again before every
+     * evaluation (NO_TRADE), so this is a friendly early check, not the only one.
+     * Never substitutes another contract type.
+     */
+    public function ensureSupported(Strategy $strategy, string $symbol, array $spec): void
+    {
+        $details = (array) ($strategy->details ?? []);
+        $families = $details['supported_contract_families'] ?? null;
+        $symbols = $details['supported_symbols'] ?? null;
+        $family = $spec['contract_family'] ?? null;
+        $errors = [];
+        if (is_array($families) && $family !== null && ! in_array($family, $families, true)) {
+            $errors['contract_family'] = $family === 'RISE_FALL'
+                ? "{$strategy->name} needs a stop loss and a take profit; Rise/Fall contracts have neither and settle at expiry. Choose Multiplier on Deriv (or Spot on Paper)."
+                : "{$strategy->name} cannot be traded with {$family} contracts (supported: ".implode(', ', $families).').';
+        }
+        if (is_array($symbols) && ! in_array(trim($symbol), $symbols, true)) {
+            $errors['symbol'] = "{$strategy->name} is only enabled on ".implode(', ', $symbols).' — the markets it has been checked on.';
+        }
+        if ($errors) {
+            throw ValidationException::withMessages($errors);
+        }
+    }
+
     public function assign(StrategyVersion $version, TradingAccount $account, string $symbol, User $actor, array $contract): StrategyAssignment
     {
         $symbol = trim($symbol);

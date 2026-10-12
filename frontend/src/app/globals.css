@@ -369,6 +369,41 @@
   padding-bottom: env(safe-area-inset-bottom);
 }
 
+/*
+ * Phones: a tap target is at least 44×44 px even when the control is drawn
+ * smaller (icon buttons, compact chips). An invisible, centred ::after grows
+ * the hit area without changing the layout. Wider screens are untouched.
+ */
+@utility touch-hit {
+  @media (max-width: 639.98px) {
+    &:not(.absolute):not(.fixed):not(.sticky) {
+      position: relative;
+    }
+    &::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: max(100%, 44px);
+      height: max(100%, 44px);
+      transform: translate(-50%, -50%);
+    }
+  }
+}
+
+/* Room for the fixed bottom tab bar (64px + the home indicator) below the last item on phones. */
+@utility pb-tabbar {
+  padding-bottom: calc(6rem + env(safe-area-inset-bottom));
+}
+
+/* Phones: hide the scrollbar of sideways chip rows (they still scroll by touch / keyboard). */
+@utility no-scrollbar {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
 /* Faint engineering grid (brand panel, hero). */
 @utility bg-grid {
   background-image:
@@ -393,6 +428,20 @@
   background-color: var(--muted);
   background-image: linear-gradient(90deg, transparent 0%, color-mix(in oklab, var(--foreground) 5%, transparent) 50%, transparent 100%);
   background-size: 200% 100%;
+}
+
+/*
+ * Phones read at arm's length: the two smallest text steps grow a little
+ * (14 → 15 px for body copy, 12 → 13 px for secondary lines), so no main
+ * text is under 15 px. Desktop keeps the denser scale.
+ */
+@media (max-width: 639.98px) {
+  :root {
+    --text-sm: 0.9375rem;
+    --text-sm--line-height: calc(1.375 / 0.9375);
+    --text-xs: 0.8125rem;
+    --text-xs--line-height: calc(1.125 / 0.8125);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

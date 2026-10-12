@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { EnvBadge } from "@/components/app/badges";
+import { MarketPicker, useInstruments } from "@/components/app/market-picker";
 import { Money } from "@/components/app/money";
 import { Notice } from "@/components/app/states";
 import { useTradingControl } from "@/components/layout/TradingControls";
@@ -19,15 +20,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
 import { availableFamilies, contractProblems, contractSummary, initialContract } from "@/lib/contracts";
 import { useAction, useApi } from "@/lib/hooks";
-import type { ActivationResult, ContractOffer, ContractSpec, Instrument, RiskProfile, Strategy } from "@/lib/types";
+import type { ActivationResult, ContractOffer, ContractSpec, RiskProfile, Strategy } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { type ContractErrors, ContractFields } from "./ContractFields";
-
-interface InstrumentsResponse {
-  instruments: Instrument[];
-  connection_status: string;
-  simulated: boolean;
-}
+import { allowedSymbols, familiesFor } from "./insights";
 
 /**
  * Activate = run this strategy's latest version on one account + market with
@@ -52,9 +48,15 @@ function ActivateForm({ strategy, onClose, onDone }: { strategy: Strategy; onClo
   const isDeriv = account?.connector_type === "deriv";
   const profiles = useApi<RiskProfile[]>("/risk/profiles");
   const profile = profiles.data?.find((p) => p.id === account?.risk_profile?.id) ?? null;
-  const instruments = useApi<InstrumentsResponse>(accountId ? "/markets/instruments" : null, { account_id: accountId });
+  const markets = useInstruments(accountId);
   const suggested = useMemo(() => strategy.details?.suggested_symbols ?? [], [strategy.details]);
-  const tradable = useMemo(() => (instruments.data?.instruments ?? []).filter((i) => i.trade_allowed), [instruments.data]);
+  // Strategies limited to the markets they were checked on only list those.
+  const onlySymbols = allowedSymbols(strategy);
+  const listed = useMemo(
+    () => markets.instruments?.filter((i) => !onlySymbols || onlySymbols.includes(i.canonical || i.name) || onlySymbols.includes(i.name)) ?? null,
+    [markets.instruments, onlySymbols],
+  );
+  const tradable = useMemo(() => (listed ?? []).filter((i) => i.trade_allowed), [listed]);
 
   // Which suggested markets this account really offers a usable contract on.
   const [suggestedOffers, setSuggestedOffers] = useState<{ key: string; offers: Record<string, ContractOffer | null> }>({ key: "", offers: {} });
@@ -74,7 +76,7 @@ function ActivateForm({ strategy, onClose, onDone }: { strategy: Strategy; onClo
   const offersReady = suggestedOffers.key === offersKey;
   const usableSuggested = candidates.filter((s) => {
     const o = suggestedOffers.offers[s];
-    return o && availableFamilies(o, isDeriv).length > 0;
+    return o && familiesFor(strategy, availableFamilies(o, isDeriv)).length > 0;
   });
 
   const [symbol, setSymbol] = useState("");
@@ -83,7 +85,13 @@ function ActivateForm({ strategy, onClose, onDone }: { strategy: Strategy; onClo
   // The contract starts from the strategy's suggestion for each account+market.
   const [specState, setSpecState] = useState<{ key: string; spec: ContractSpec } | null>(null);
   const specKey = `${accountId}:${chosen}:${offer.data ? "offer" : "none"}`;
-  const spec = specState?.key === specKey ? specState.spec : initialContract(strategy.details?.suggested_contract, offer.data, isDeriv);
+  // Only the contract families the strategy supports (never Rise/Fall for one that
+  // needs a stop and a target); the starting contract is one of them.
+  const families = familiesFor(strategy, availableFamilies(offer.data, isDeriv));
+  const suggestion = (!isDeriv && strategy.details?.suggested_contract_paper) || strategy.details?.suggested_contract;
+  const initial = initialContract(suggestion, offer.data, isDeriv);
+  const start = families.includes(initial.contract_family) || families.length === 0 ? initial : initialContract({ contract_family: families[0]! }, offer.data, isDeriv);
+  const spec = specState?.key === specKey ? specState.spec : start;
   const setSpec = (next: ContractSpec) => setSpecState({ key: specKey, spec: next });
   const [customStake, setCustomStake] = useState(false);
 
@@ -91,6 +99,7 @@ function ActivateForm({ strategy, onClose, onDone }: { strategy: Strategy; onClo
   const [result, setResult] = useState<ActivationResult | null>(null);
   const maxStake = profile?.max_stake_amount ? Number(profile.max_stake_amount) : null;
   const local: ContractErrors = offer.data || spec.contract_family === "SPOT" ? contractProblems(spec, offer.data, { isDeriv, maxStake }) : {};
+  if (!families.includes(spec.contract_family) && !local.contract_family) local.contract_family = `${strategy.name} can't trade this contract type here.`;
   const server: ContractErrors = Object.fromEntries(Object.entries(action.fieldErrors)
     .filter(([k]) => k.startsWith("contract"))
     .map(([k, v]) => [k.replace(/^contract\./, ""), v[0]])) as ContractErrors;
@@ -138,7 +147,7 @@ function ActivateForm({ strategy, onClose, onDone }: { strategy: Strategy; onClo
 
         <section className="space-y-2">
           <p className="text-sm font-medium text-fg">Market</p>
-          {instruments.loading || (candidates.length > 0 && !offersReady) ? <Skeleton className="h-10 w-full" /> : (
+          {(markets.loading && !markets.instruments) || (candidates.length > 0 && !offersReady) ? <Skeleton className="h-10 w-full" /> : (
             <>
               {usableSuggested.length > 0 && (
                 <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Suggested markets">
@@ -150,12 +159,16 @@ function ActivateForm({ strategy, onClose, onDone }: { strategy: Strategy; onClo
                   ))}
                 </div>
               )}
-              <Select value={chosen} onValueChange={setSymbol}>
-                <SelectTrigger aria-label="Market" className="w-full"><SelectValue placeholder={tradable.length ? "Or choose another market…" : "No markets available on this account"} /></SelectTrigger>
-                <SelectContent>
-                  {tradable.map((i) => <SelectItem key={i.name} value={i.name}>{i.description || i.canonical} ({i.name})</SelectItem>)}
-                </SelectContent>
-              </Select>
+              <MarketPicker
+                instruments={listed}
+                value={chosen}
+                onChange={setSymbol}
+                loading={markets.loading}
+                error={markets.error}
+                onRefresh={markets.refresh}
+                refreshing={markets.refreshing}
+                emptyText={onlySymbols ? `This account offers none of the markets ${strategy.name} is limited to (${onlySymbols.join(", ")}).` : undefined}
+              />
               <p className="text-xs text-fg-subtle">
                 {usableSuggested.length > 0 ? "Suggested markets are the ones this strategy was designed for and that this account offers." : suggested.length > 0 ? `This account offers none of the suggested markets (${suggested.join(", ")}); pick another.` : "Pick the market the strategy should watch."}
               </p>
@@ -167,7 +180,7 @@ function ActivateForm({ strategy, onClose, onDone }: { strategy: Strategy; onClo
           <section className="space-y-3">
             <p className="text-sm font-medium text-fg">How each trade works</p>
             {offer.loading ? <Skeleton className="h-24 w-full" /> : offer.error ? <Notice tone="warning" title="Couldn't ask the broker what it offers">{offer.error}</Notice> : (
-              <ContractFields spec={spec} onChange={setSpec} offer={offer.data} isDeriv={isDeriv} errors={errors} />
+              <ContractFields spec={spec} onChange={setSpec} offer={offer.data} isDeriv={isDeriv} errors={errors} families={families} />
             )}
             {offer.data?.notes.map((n) => <p key={n} className="text-xs text-fg-subtle">{n}</p>)}
           </section>

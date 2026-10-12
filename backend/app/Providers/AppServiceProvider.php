@@ -4,6 +4,7 @@ namespace App\Providers;
 
 use App\Models\User;
 use App\Services\Engine\EngineClient;
+use App\Services\Mobile\MobileMfaChallenges;
 use App\Services\Security\BrokerVault;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Database\Schema\Blueprint;
@@ -75,8 +76,10 @@ class AppServiceProvider extends ServiceProvider
         // MFA settings (signed in) per user; the sign-in code step per PENDING user + IP,
         // so starting a new session does not reset it (AuthController also locks the
         // user's code step after repeated misses, whatever the IP).
+        // The mobile app's code step is keyed the same way, by the user its mfa_token belongs to.
         RateLimiter::for('mfa', function (Request $request) {
             $pending = $request->hasSession() ? $request->session()->get('mfa.pending') : null;
+            $pending ??= app(MobileMfaChallenges::class)->find($request->input('mfa_token'));
 
             return Limit::perMinutes(15, 5)->by('mfa:'.($request->user()?->id ?? ($pending['user_id'] ?? 'none').'|'.$request->ip()));
         });

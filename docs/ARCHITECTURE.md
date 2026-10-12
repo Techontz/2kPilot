@@ -84,6 +84,10 @@ Every record belongs to a user: `user_id` on broker connections, trading account
 
 The engine reads the platform halt (`system_state`) and each owner's switch and mode (`user_trading_states`) on every tick, so STOP TRADING takes effect within one tick even if Laravel is down.
 
+## Mobile app
+
+The Flutter app (`app/`) talks to the same Laravel API with Sanctum **bearer tokens** instead of the cookie session: `POST /api/mobile/auth/login` (+ `/api/mobile/auth/mfa`) returns a token per device; every existing route, policy, throttle and the `active`/`mfa.enrolled` checks apply unchanged. A few actions stay on the website (`web.only`; entering LIVE mode). Push notifications go through Firebase Cloud Messaging. See [SECURITY.md](SECURITY.md#mobile-app) and [DEPLOYMENT.md](DEPLOYMENT.md#push-notifications-firebase).
+
 ## Secrets
 
 Broker credentials are encrypted by Laravel with AES-256-GCM using `BROKER_CREDENTIALS_KEY` (separate from `APP_KEY`), stored in `broker_connections.credentials_encrypted`, decrypted only inside the engine when it connects, and never returned to the browser. See [SECURITY.md](SECURITY.md).
@@ -99,6 +103,8 @@ The dashboard keeps one Server-Sent Events connection open to `GET /api/stream` 
 | `RunBacktest` (`backtests` queue) | `app/Jobs/RunBacktest.php` | Backtests take minutes; the request returns immediately. Runs on its own Horizon supervisor (timeout 30 min, one try) |
 | `tp:engine-watchdog` (every minute) | scheduler | If the engine dies it cannot warn anyone — Laravel notifies once per outage |
 | `tp:daily-summary` (21:05 UTC) | scheduler | One P/L summary per account that traded |
+| `SendPushNotification` (`notifications` queue) | `app/Jobs/SendPushNotification.php` | Phone pushes through Firebase Cloud Messaging for each new notification (queued by `Notifier`); off until FCM is configured |
+| `tp:push-notifications` (every 15 s) | scheduler | Queues pushes for the notifications the trading engine writes itself (positions, risk, broker…); each notification is pushed at most once |
 | `tp:prune` (daily) | scheduler | Old "no setup" evaluations and read notifications only — trades, orders, journal and audit are never pruned |
 
 Queues run under **Horizon** (`php artisan horizon`; `make dev` and `make worker` start it): `default` and `notifications` on one supervisor, `backtests` on another (connection `redis-long`). The dashboard at `/horizon` is for admins only.

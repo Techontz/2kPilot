@@ -12,7 +12,7 @@ Users create strategies **without programming**, in three ways:
 | B | **Visual rule builder** | Dropdowns and number fields: WHEN conditions → THEN a buy/sell → EXIT rules. |
 | C | **Describe it in plain English** | Claude drafts builder rules from your description; you review and edit them before saving. Nothing is saved automatically. |
 
-All three produce the same thing: a **rule set** run by the `rules` strategy. Advanced, code-based strategies (Trend Pullback V1) remain available as built-ins.
+All three produce the same thing: a **rule set** run by the `rules` strategy. Advanced, code-based strategies (Trend Pullback V1, Adaptive Trend & Momentum) remain available as built-ins.
 
 ## The rule-set format (`schema_version: 1`)
 
@@ -174,10 +174,67 @@ Strategies **never** place orders, size positions in money, or import a broker a
 
 Higher-timeframe trend (H4: close vs EMA200, EMA50 vs EMA200, slope, optional structure) → pullback to EMA50 on H1 (within 0.5 ATR, not deeper than 2.5 ATR) → not over-extended → confirmation bar → stop beyond the swing, target 2R. Every threshold is a parameter. It is a research starting point, not claimed to be profitable.
 
+### Adaptive Trend & Momentum (`adaptive_trend_momentum.py`, advanced)
+
+*"Uses trend, momentum, and volatility filters to identify potential trading opportunities while controlling risk."* Registered by the engine like Trend Pullback (shared template, slug `adaptive-trend-momentum`, version 1 = the defaults below; idempotent on every engine start). A research starting point — **not claimed to be profitable**: on one year of real Deriv R_10/R_25 history it was break-even within noise after costs and does **not** qualify for demo forward testing ([BACKTESTING.md](BACKTESTING.md#real-data-evaluation-of-adaptive-trend--momentum-2026-10-11)).
+
+| Parameter | Default | | Parameter | Default |
+|---|---|---|---|---|
+| `trend_timeframe` / `entry_timeframe` | M15 / M5 | | `stop_atr_mult` | 1.5 (× entry ATR) |
+| `ema_fast` / `ema_slow` | 20 / 50 | | `reward_risk` | 2.0 |
+| `rsi_period`, `adx_period`, `atr_period` | 14 | | `risk_per_trade_pct` (cap) | 0.5 % |
+| `min_adx` / `sideways_adx` | 25 / 20 | | `max_daily_loss_pct` (cap) | 2 % |
+| `pullback_lookback` / `pullback_atr_band` / `max_pullback_atr` | 6 / 0.5 / 2.0 | | `max_open_positions` (cap) | 1 |
+| `rsi_mode` / `rsi_level` / `rsi_lookback` | `cross` / 50 / 6 | | `rsi_upper` / `rsi_lower` | 70 / 30 |
+| `high_vol_percentile` / `atr_history_bars` | 90 / 100 | | `min_atr_pct` / `max_atr_pct` | 0.005 / 1.0 (% of price) |
+
+Every parameter is in the version's parameter schema, so changing one is a new immutable version, and every one can be backtested (and varied in walk-forward/sensitivity grids — they are top-level).
+
+**BUY** (SELL is the mirror image) — all must hold on **closed** candles:
+
+1. The M15 regime is `TREND_UP` (classifier below): ADX ≥ `min_adx`, EMA20 > EMA50 and rising, +DI > −DI, ATR not at an extreme of its own history.
+2. On M5, a low of one of the last `pullback_lookback` closed bars (before the signal bar) came within `pullback_atr_band` × ATR of EMA20, and no deeper than `max_pullback_atr` × ATR below it.
+3. RSI shows **renewed** momentum: it was below `rsi_level` within the last `rsi_lookback` bars and has turned back up through it, rising on the last bar (`rsi_mode: rising` = it rose over the last closed bar). It must stay below `rsi_upper`. A threshold alone never triggers a trade.
+4. The last closed candle is bullish and closes above the prior close or above EMA20.
+5. Entry-timeframe ATR is between `min_atr_pct` and `max_atr_pct` of price, and the M15 data is fresh (its last closed bar is the one that closed at or just before the decision).
+6. Stop = entry − 1.5 × ATR(M5), target = entry + 2 × the stop distance. The **risk engine** still decides everything else.
+
+**NO_TRADE** (stored as `NO_SETUP` / `INSUFFICIENT_DATA` with the first failed check, e.g. *"No trade: regime SIDEWAYS — ADX 14.2 below 20: no trend"*): no trend / weak ADX / conflicting indicators (the regime), missing candles on either timeframe, stale M15 data, failed pullback/momentum/confirmation/volatility checks. Broker disconnects, contract specs, an invalid or missing risk profile, the daily loss limit, the platform halt, the owner's STOP switch and the strategy emergency stop are enforced by the existing gates and risk rules, each with its reason (see [RISK_ENGINE.md](RISK_ENGINE.md)); a stopped engine supervisor evaluates nothing.
+
+**Closed candles, multi-timeframe, no look-ahead.** Like Trend Pullback, the strategy reads its higher timeframe from the view — `CursorView` in backtests (resampled, a bar visible only once its period ended) and closed broker candles live. On top of that it drops any M15 bar whose `open + 15 min` is after the M5 decision time (the close of the entry bar), and computes everything on a fixed trailing window (`ltf_window()` / `htf_window()`). Tests (`tests/test_adaptive_strategy.py`): the decision from history cut at bar *t* is identical to the one from the full series; spiking every later candle changes no earlier decision; a forming M15 bar handed over by a view is ignored.
+
+**Markets and contracts.** Enabled on **R_10** and **R_25** only (checked on Deriv's public API and present in the Paper feed); other markets are refused at activation and never evaluated. Contracts: **Multiplier** on Deriv (the ATR stop and the 2:1 target become `limit_order` money amounts — see [BROKERS.md](BROKERS.md)), **Spot** on Paper. **Rise/Fall is refused** — it has no stop loss or take profit and settles at expiry: a validation error when it is assigned/activated/changed, and NO_TRADE if an assignment with it is ever evaluated. No contract type is ever substituted.
+
+**Risk caps.** `risk_per_trade_pct`, `max_daily_loss_pct` and `max_open_positions` are strategy-level caps applied with `RiskLimits.tightened()`: they can only make the account's risk profile **stricter** (the smaller value wins), never looser. One position at a time is account-wide (conservative).
+
+### Market-regime classifier (`strategy_engine/regime.py`)
+
+Deterministic rules on the last closed bar of a series (all thresholds configurable, `RegimeConfig`):
+
+| Order | Regime | Rule (defaults) |
+|---|---|---|
+| 1 | `UNCERTAIN` | fewer than `required_bars()` closed bars (155 on M15 by default) |
+| 2 | `HIGH_VOLATILITY` | ATR(14) at or above the 90th percentile of its own last 100 values |
+| 3 | `TREND_UP` / `TREND_DOWN` | ADX(14) ≥ 25, EMA20 above (below) EMA50, EMA20 rising (falling) over 5 bars, +DI > −DI (−DI > +DI) |
+| 4 | `SIDEWAYS` | ADX < 20 |
+| 5 | `UNCERTAIN` | anything else: ADX between 20 and 25, or a strong ADX whose EMAs, slope and DIs disagree |
+
+It is used by the strategy (it trades only in the matching trend regime; otherwise NO_TRADE with the regime as the reason), by the backtester (`by_regime` = results by the regime **at entry**) and by the UI (the latest evaluation's *Market regime* check). ADX (Wilder, with +DI/−DI) lives in `indicators.py` and is also available in the rule builder (`adx`, outputs `adx`, `plus_di`, `minus_di`, a 0–100 scale).
+
+### Strategy support declarations and the emergency stop
+
+A code strategy may declare `contract_families` and `symbols` (exposed in `GET /internal/strategies` and copied into the built-in's `details` as `supported_contract_families` / `supported_symbols`). Laravel refuses other combinations at assign/activate/contract-change time (`StrategyService::ensureSupported`), the runner records NO_TRADE for them, and backtests refuse them. Admins can **stop new entries** from any strategy (`POST /api/admin/strategies/{id}/disable {reason}` / `.../enable {confirm}`): every user's signals from it — and from copies of a stopped built-in — are rejected by the risk rule *Strategy enabled* with the reason; positions are never closed; both actions are audited and affected users are notified.
+
+### Strategy selection
+
+An account can run several assignments (one per strategy × symbol), unchanged. No automatic recommendation or switching is built: picking, enabling and pausing strategies stay deliberate user actions.
+
 ### Adding a code strategy
 
 1. Implement `Strategy` in `strategy_engine/<name>.py` with a Pydantic `Params` model.
 2. Register it in `strategy_engine/registry.py`; the engine adds a shared template (version 1 = defaults) on start-up.
 3. Add tests: crafted candles for each outcome, parameter validation, look-ahead safety.
+
+4. Optionally declare `contract_families`, `symbols` and `risk_caps()`.
 
 **Known limitation:** walk-forward and sensitivity grids vary top-level parameters only, so they don't apply to rule sets yet (vary a rule by saving a new version and backtesting each).

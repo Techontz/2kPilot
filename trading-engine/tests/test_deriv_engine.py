@@ -299,9 +299,9 @@ def test_deriv_refuses_spot_and_unsupported_contracts(
     big = {**rise_fall_ticket(account, stake="6.00")}
     preview = client.post("/internal/orders/preview", json=big).json()
     assert "maximum stake 5.00 USD" in preview["rejection_reason"]
-    fake.stake_limits = False  # Deriv did not report stake limits: fail closed
+    fake.stake_limits = False  # no stake range, but Deriv priced this exact stake
     preview = client.post("/internal/orders/preview", json=rise_fall_ticket(account)).json()
-    assert "did not report its stake limits" in preview["rejection_reason"]
+    assert preview["approved"] is True, preview["rejection_reason"]
     assert not fake.contracts
 
 
@@ -377,3 +377,22 @@ def test_history_download_from_deriv_for_a_synthetic_index(
     assert dataset is not None and dataset.symbol == "R_100" and dataset.bar_count >= 70
     request = next(r for r in fake.requests if "ticks_history" in r)
     assert request["style"] == "candles" and request["granularity"] == 300
+
+
+def test_the_stored_open_flag_follows_the_broker(
+    client: SignedClient, db: Session, fake: FakeDeriv
+) -> None:
+    """The dashboard's "market is closed" reason reads the stored flag; each
+    strategy check keeps it current instead of waiting for a full symbol sync."""
+    from fxrobot.trading_engine.runner import AccountRunner
+
+    account = deriv_account(db)
+    client.post(f"/internal/connections/{account.connection_id}/connect")
+    db.expire_all()
+    row = db.scalar(select(BrokerSymbol).where(BrokerSymbol.name == "frxEURUSD"))
+    assert row is not None and row.market_open is True
+    AccountRunner._store_market_open(db, account, "frxEURUSD", False)  # pyright: ignore[reportPrivateUsage]
+    db.expire_all()
+    assert (
+        db.scalar(select(BrokerSymbol.market_open).where(BrokerSymbol.name == "frxEURUSD")) is False
+    )

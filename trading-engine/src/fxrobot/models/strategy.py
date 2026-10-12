@@ -45,7 +45,15 @@ class Strategy(TimestampMixin, Base):
         ForeignKey("strategies.id", ondelete="SET NULL")
     )
     archived_at: Mapped[datetime | None]
+    # Administrator's emergency stop: no NEW entries from this strategy (or its
+    # copies) for anyone. Open positions are never closed by it.
+    entries_disabled_at: Mapped[datetime | None]
+    entries_disabled_reason: Mapped[str | None] = mapped_column(String(300))
+    entries_disabled_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
 
+    copied_from: Mapped[Strategy | None] = relationship(remote_side="Strategy.id")
     versions: Mapped[list[StrategyVersion]] = relationship(
         back_populates="strategy", order_by="StrategyVersion.version"
     )

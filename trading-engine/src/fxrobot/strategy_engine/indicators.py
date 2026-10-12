@@ -38,6 +38,54 @@ def atr(high: FloatArray, low: FloatArray, close: FloatArray, period: int) -> Fl
     return out
 
 
+def adx(
+    high: FloatArray, low: FloatArray, close: FloatArray, period: int
+) -> tuple[FloatArray, FloatArray, FloatArray]:
+    """Wilder's Average Directional Index: (ADX, +DI, −DI), each 0–100.
+
+    +DM = today's high − yesterday's high when that beats yesterday's low − today's
+    low (and is positive); −DM the mirror. TR, +DM and −DM are Wilder-smoothed
+    (first value = the sum of the first `period` bars, then
+    S[i] = S[i−1] − S[i−1]/period + x[i]); ±DI = 100 × smoothed DM ÷ smoothed TR;
+    DX = 100 × |+DI − −DI| ÷ (+DI + −DI); ADX = the average of the first `period`
+    DX values, then Wilder-smoothed. ±DI start at index `period`, ADX at
+    2 × period − 1. Earlier entries are NaN. A bar range of zero gives DI 0
+    (and DX 0 when both DIs are 0).
+    """
+    n = len(close)
+    plus_di, minus_di, out = np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    if period <= 0 or n <= period:
+        return out, plus_di, minus_di
+    up = np.diff(high)
+    down = -np.diff(low)
+    plus_dm = np.where((up > down) & (up > 0), up, 0.0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0.0)
+    prev_close = close[:-1]
+    tr = np.maximum(
+        high[1:] - low[1:], np.maximum(np.abs(high[1:] - prev_close), np.abs(low[1:] - prev_close))
+    )
+    # Index j of tr/plus_dm/minus_dm describes bar j + 1.
+    s_tr, s_plus, s_minus = tr[:period].sum(), plus_dm[:period].sum(), minus_dm[:period].sum()
+    dx = np.full(n, np.nan)
+    for i in range(period, n):
+        if i > period:
+            j = i - 1
+            s_tr = s_tr - s_tr / period + tr[j]
+            s_plus = s_plus - s_plus / period + plus_dm[j]
+            s_minus = s_minus - s_minus / period + minus_dm[j]
+        p_di = 100.0 * s_plus / s_tr if s_tr > 0 else 0.0
+        m_di = 100.0 * s_minus / s_tr if s_tr > 0 else 0.0
+        plus_di[i], minus_di[i] = p_di, m_di
+        total = p_di + m_di
+        dx[i] = 100.0 * abs(p_di - m_di) / total if total > 0 else 0.0
+    first = 2 * period - 1
+    if n > first:
+        out[first] = dx[period : first + 1].mean()
+        for i in range(first + 1, n):
+            out[i] = (out[i - 1] * (period - 1) + dx[i]) / period
+    return out, plus_di, minus_di
+
+
 def swing_points(
     high: FloatArray, low: FloatArray, left: int = 2, right: int = 2
 ) -> tuple[list[int], list[int]]:

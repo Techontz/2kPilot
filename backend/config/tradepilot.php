@@ -63,6 +63,26 @@ return [
         'heartbeat_seconds' => (int) env('TP_STREAM_HEARTBEAT_SECONDS', 15),
     ],
 
+    // The mobile app signs in with Sanctum bearer tokens (one per device,
+    // ability "mobile"). They expire after this many days; 0 = never.
+    'mobile' => [
+        'token_days' => (int) env('TP_MOBILE_TOKEN_DAYS', 30),
+    ],
+
+    // Phone push notifications through Firebase Cloud Messaging (HTTP v1).
+    // Off until both are set. FCM_CREDENTIALS is the path to the Firebase
+    // service-account JSON key: keep it OUTSIDE the web root, readable only by
+    // the PHP user. See docs/DEPLOYMENT.md#push-notifications-firebase.
+    'push' => [
+        'project_id' => env('FCM_PROJECT_ID'),
+        'credentials' => env('FCM_CREDENTIALS'),
+        'timeout' => (int) env('FCM_TIMEOUT_SECONDS', 10),
+        // In-app only (no phone push): routine events that would be noisy.
+        // Comma-separated in FCM_SKIP_TYPES to override.
+        'skip_types' => array_values(array_filter(array_map('trim', explode(',', (string) env(
+            'FCM_SKIP_TYPES', 'signal.generated,order.submitted'))))),
+    ],
+
     'mfa' => [
         // When true, every user must enrol before using the dashboard.
         // MFA is always mandatory for LIVE mode, whatever this says.

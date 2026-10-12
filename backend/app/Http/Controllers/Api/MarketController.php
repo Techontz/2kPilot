@@ -9,6 +9,7 @@ use App\Services\Engine\EngineClient;
 use App\Services\Engine\EngineException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 use Illuminate\Validation\Rule;
 
 /**
@@ -17,22 +18,36 @@ use Illuminate\Validation\Rule;
  */
 class MarketController extends Controller
 {
+    /** Brokers add and suspend markets; a list older than this is fetched again. */
+    private const SYMBOLS_MAX_AGE_HOURS = 12;
+
     public function __construct(private readonly EngineClient $engine) {}
 
     public function instruments(Request $request): JsonResponse
     {
-        $data = $request->validate(['account_id' => ['required', 'uuid'], 'category' => ['nullable', 'string', 'max:30']]);
+        $data = $request->validate([
+            'account_id' => ['required', 'uuid'],
+            'category' => ['nullable', 'string', 'max:30'],
+            'refresh' => ['nullable', 'boolean'],
+        ]);
         $account = TradingAccount::query()->with('connection')->findOrFail($data['account_id']);
         $this->authorize('use', $account); // asks the broker: the owner only
-        $symbols = BrokerSymbol::query()->where('connection_id', $account->connection_id)
+        $stored = fn () => BrokerSymbol::query()->where('connection_id', $account->connection_id)
             ->when($data['category'] ?? null, fn ($q, $c) => $q->where('category', $c))
             ->orderBy('category')->orderBy('canonical')->get();
-        if ($symbols->isEmpty()) { // not synced yet: ask the broker now
+        $symbols = $stored();
+        $syncedAt = BrokerSymbol::query()->where('connection_id', $account->connection_id)->max('updated_at');
+        $stale = $syncedAt === null || now()->subHours(self::SYMBOLS_MAX_AGE_HOURS)->greaterThan($syncedAt);
+        $syncError = null;
+        // Never synced, out of date, or asked for: ask the broker now. A failure
+        // keeps the last list and says why, so an empty list is never silent.
+        if ($symbols->isEmpty() || $stale || $request->boolean('refresh')) {
             try {
                 $this->engine->get("/internal/accounts/{$account->id}/symbols");
-                $symbols = BrokerSymbol::query()->where('connection_id', $account->connection_id)->orderBy('category')->orderBy('canonical')->get();
-            } catch (EngineException) {
-                // shown as an empty state with the connection status
+                $symbols = $stored();
+                $syncedAt = BrokerSymbol::query()->where('connection_id', $account->connection_id)->max('updated_at');
+            } catch (EngineException $exception) {
+                $syncError = $exception->getMessage();
             }
         }
 
@@ -41,6 +56,8 @@ class MarketController extends Controller
             'provider' => config("brokers.{$account->connection->connector_type->value}.name"),
             'connection_status' => $account->connection->status->value,
             'simulated' => $account->isPaper(),
+            'synced_at' => $syncedAt === null ? null : Carbon::parse($syncedAt)->toIso8601String(),
+            'sync_error' => $syncError,
             'categories' => $symbols->countBy('category'),
             'instruments' => $symbols->map(fn (BrokerSymbol $s) => [
                 'name' => $s->name,

@@ -73,20 +73,20 @@ export function TradeList({ trades, open, onSelect, showAccount }: { trades: Tra
           </TableBody>
         </Table>
       </div>
-      <ul className="-mx-1 space-y-1 lg:hidden">
+      <ul className="space-y-2 lg:hidden">
         {trades.map((t) => {
           const currency = t.account?.currency;
           const left = t.contract_family === "RISE_FALL" ? formatCountdown(t.expires_at, now) : null;
           return (
             <li key={t.id}>
               <button type="button" onClick={() => onSelect(t.id)}
-                className="flex w-full gap-3 rounded-lg p-3 text-left transition-colors hover:bg-surface-hover focus-visible:bg-surface-hover active:bg-surface-hover">
+                className="flex w-full gap-3 rounded-lg bg-card p-3.5 text-left shadow-card ring-1 ring-line transition-colors hover:bg-surface-hover focus-visible:bg-surface-hover active:bg-surface-hover">
                 <DirectionTile trade={t} />
                 <span className="min-w-0 flex-1">
                 <span className="flex items-start justify-between gap-3">
                   <span className="min-w-0">
                     <span className="flex flex-wrap items-center gap-2">
-                      <span className="font-bold text-fg">{t.symbol}</span>
+                      <span className="min-w-0 truncate text-[15px] font-bold text-fg">{t.symbol}</span>
                       <Direction trade={t} />
                       <OutcomeBadge trade={t} />
                     </span>
@@ -94,19 +94,22 @@ export function TradeList({ trades, open, onSelect, showAccount }: { trades: Tra
                   </span>
                   <PnlText value={open ? t.unrealized_pnl : t.net_pnl} currency={currency} className="shrink-0 text-base font-extrabold" />
                 </span>
-                <span className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-fg-muted">
-                  <span>Stake / size <span className="num text-fg">{sizeText(t, currency)}</span></span>
-                  <span className={cn(!open && "text-right")}>{open ? <>Opened {formatTime(t.entry_time)}</> : <>Held {formatDuration(t.duration_seconds)}</>}</span>
+                <span className="mt-2 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-fg-muted">
+                  <span>{t.contract_family && t.contract_family !== "SPOT" ? "Stake" : "Size"} <span className="num text-fg">{sizeText(t, currency)}</span></span>
                   {open ? (
-                    left !== null && <span className="num flex items-center gap-1"><Timer className="size-3" aria-hidden /> {left} left</span>
+                    <>
+                      <span>Opened <span className="num">{formatTime(t.entry_time)}</span></span>
+                      {left !== null && <span className="num flex items-center gap-1 font-semibold text-fg"><Timer className="size-3" aria-hidden /> {left} left</span>}
+                    </>
                   ) : (
                     <>
-                      <span>Closed {formatTime(t.exit_time)}</span>
-                      <span className="text-right">Fees <Money value={t.fees ?? t.commission ?? 0} currency={currency} className="text-fg" /></span>
+                      <span>Held <span className="num text-fg">{formatDuration(t.duration_seconds)}</span></span>
+                      <span>Fees <Money value={t.fees ?? t.commission ?? 0} currency={currency} className="text-fg" /></span>
                     </>
                   )}
-                  {showAccount && t.account && <span className="col-span-2 flex items-center gap-1">{t.account.label} <EnvBadge env={t.account.environment} /></span>}
                 </span>
+                {!open && <span className="mt-0.5 block text-xs text-fg-subtle">Closed <span className="num">{formatTime(t.exit_time)}</span></span>}
+                {showAccount && t.account && <span className="mt-1 flex items-center gap-1.5 text-xs text-fg-muted">{t.account.label} <EnvBadge env={t.account.environment} /></span>}
                 </span>
               </button>
             </li>

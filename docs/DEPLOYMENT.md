@@ -15,6 +15,7 @@ Single machine (recommended to start): MySQL, Redis, Laravel (`php artisan serve
 5. Back up MySQL and `BROKER_CREDENTIALS_KEY`.
 6. Set `TP_REGISTRATION_ENABLED=false` if you don't want public sign-up.
 7. Client IPs behind proxies (see below): set `TRUSTED_PROXIES` and make the edge proxy overwrite `X-Forwarded-For`.
+8. Mobile app: it calls the Laravel API directly over HTTPS (`/api/*`), so that path must be reachable from phones. Optional push notifications: see [Push notifications (Firebase)](#push-notifications-firebase).
 
 ## Client IP addresses and proxies
 
@@ -43,3 +44,32 @@ The dashboard listens to `GET /api/stream` (Server-Sent Events) and refetches on
 * **Next.js** must forward `/api/stream` to Laravel without buffering or compressing it (the dashboard's own route handler for `/api/stream`).
 * **`php artisan serve`** (development) is a single worker unless started with `PHP_CLI_SERVER_WORKERS=N` **and** `--no-reload` (Laravel ignores the workers setting otherwise); `make dev` does this. With one worker, an open stream blocks every other API request for up to 55 s.
 * Rate limit: 30 stream connections per minute per user (`throttle:stream`).
+
+## Push notifications (Firebase)
+
+The mobile app gets phone notifications (trade opened/closed, stop loss, trading stopped, risk limits, broker problems…) through Firebase Cloud Messaging. Without this setup everything else works; pushes are simply off.
+
+1. **Create a Firebase project** at <https://console.firebase.google.com> (or add Firebase to an existing Google Cloud project). Note the **Project ID** (Project settings → General).
+2. **Add the apps** to the project: an Android app with the app's package name (download `google-services.json`) and an iOS app with its bundle id (download `GoogleService-Info.plist`; upload an APNs authentication key under Project settings → Cloud Messaging). These files go into the Flutter app (`app/`), not the server.
+3. **Create a service-account key** for the server: Project settings → Service accounts → *Generate new private key*. This downloads a JSON file with a private key — treat it like a password.
+4. **Store it outside the web root**, readable only by the PHP user, e.g.:
+
+   ```bash
+   mkdir -p ~/secrets && mv ~/Downloads/<project>-firebase-adminsdk-*.json ~/secrets/fcm-service-account.json
+   chmod 600 ~/secrets/fcm-service-account.json
+   ```
+
+   Never inside `public_html`/`public/` or the repository.
+5. **Set the backend `.env`** (absolute path), then `php artisan config:cache` if you cache config:
+
+   ```dotenv
+   FCM_PROJECT_ID=your-project-id
+   FCM_CREDENTIALS=/home/you/secrets/fcm-service-account.json
+   # Optional: mobile sign-in lifetime in days (default 30)
+   TP_MOBILE_TOKEN_DAYS=30
+   ```
+6. **Run the migrations** (`php artisan migrate --force`: adds `mobile_devices`) and restart the queue workers (`php artisan horizon:terminate`; Horizon's default supervisor runs the `notifications` queue).
+7. **Keep the scheduler running** (`schedule:work` or the per-minute cron `* * * * * php artisan schedule:run`): `tp:push-notifications` runs every 15 seconds and pushes the notifications the trading engine writes.
+8. Test: sign in on a phone, allow notifications, press STOP TRADING — a "Trading stopped" push should arrive. Failures are logged (`storage/logs`) as "Push notification…" warnings; they never affect trading or the in-app notifications.
+
+Outbound HTTPS to `oauth2.googleapis.com` and `fcm.googleapis.com` must be allowed from the server.

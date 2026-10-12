@@ -8,7 +8,7 @@ daily profit target), which apply to every trade.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from decimal import Decimal
 from typing import Any
 
@@ -17,7 +17,26 @@ MANDATORY = frozenset(
     {"risk_per_trade_pct", "allowed_sessions", "max_data_age_seconds", "stake_amount"}
 )
 MONEY_FIELDS = frozenset(
-    {"stake_amount", "max_stake_amount", "max_daily_loss_amount", "daily_profit_target_amount"}
+    {
+        "stake_amount",
+        "max_stake_amount",
+        "max_daily_loss_amount",
+        "daily_profit_target_amount",
+        "min_account_balance",
+    }
+)
+# Limits where a SMALLER value is stricter (strategy caps take the minimum).
+_TIGHTER_IS_SMALLER = frozenset(
+    {
+        "risk_per_trade_pct",
+        "max_daily_loss_pct",
+        "max_weekly_loss_pct",
+        "max_drawdown_pct",
+        "max_open_positions",
+        "max_positions_per_symbol",
+        "max_trades_per_day",
+        "max_total_risk_pct",
+    }
 )
 
 
@@ -52,6 +71,8 @@ class RiskLimits:
     max_daily_loss_amount: Decimal | None = None  # money, in addition to max_daily_loss_pct
     max_consecutive_losses: int | None = 3  # halt new trades for the rest of the UTC day
     daily_profit_target_amount: Decimal | None = None  # stop for the day once reached
+    # No new trades while the account balance is below this (account currency).
+    min_account_balance: Decimal | None = None
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> RiskLimits:
@@ -115,7 +136,12 @@ class RiskLimits:
             raise ValueError("stake_amount must be between 0 and 100000")
         if self.max_stake_amount is not None and self.stake_amount > self.max_stake_amount:
             raise ValueError("stake_amount cannot exceed max_stake_amount")
-        for name in ("max_stake_amount", "max_daily_loss_amount", "daily_profit_target_amount"):
+        for name in (
+            "max_stake_amount",
+            "max_daily_loss_amount",
+            "daily_profit_target_amount",
+            "min_account_balance",
+        ):
             value = getattr(self, name)
             if value is not None and value <= 0:
                 raise ValueError(f"{name} must be positive")
@@ -124,6 +150,24 @@ class RiskLimits:
         valid = {"ASIA", "LONDON", "OVERLAP", "NEW_YORK"}
         if not set(self.allowed_sessions) <= valid:
             raise ValueError(f"allowed_sessions must be within {sorted(valid)}")
+
+    def tightened(self, caps: dict[str, Any]) -> RiskLimits:
+        """These limits with a strategy's caps applied: a cap only ever makes a limit
+        STRICTER (the smaller value wins; a disabled limit takes the cap). Unknown
+        or loosening caps are ignored."""
+        changes: dict[str, Any] = {}
+        for name, cap in caps.items():
+            if name not in _TIGHTER_IS_SMALLER or cap is None:
+                continue
+            current = getattr(self, name)
+            value: Decimal | int = Decimal(str(cap)) if "pct" in name else int(cap)
+            if current is None or value < current:
+                changes[name] = value
+        if not changes:
+            return self
+        limits = replace(self, **changes)
+        limits.validate()
+        return limits
 
     def as_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {}

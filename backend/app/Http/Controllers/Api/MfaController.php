@@ -7,13 +7,17 @@ use App\Exceptions\DomainException;
 use App\Http\Controllers\Controller;
 use App\Services\Audit\AuditLogger;
 use App\Services\Mfa\TwoFactorService;
+use App\Services\Mobile\MobileTokens;
 use App\Services\Notifier;
 use App\Services\Trading\TradingControl;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 
-/** Settings → Security: turn two-factor authentication on or off. */
+/**
+ * Settings → Security: turn two-factor authentication on or off. Website only
+ * ("web.only": refused for the mobile app's bearer tokens).
+ */
 class MfaController extends Controller
 {
     public function __construct(
@@ -21,6 +25,7 @@ class MfaController extends Controller
         private readonly AuditLogger $audit,
         private readonly Notifier $notifier,
         private readonly TradingControl $control,
+        private readonly MobileTokens $tokens,
     ) {}
 
     public function setup(Request $request): JsonResponse
@@ -66,6 +71,7 @@ class MfaController extends Controller
         $this->audit->record('auth.mfa.disabled', actor: $user);
         $this->notifier->notify('security.mfa', "Two-factor authentication turned OFF for {$user->email}.", $user->id);
         $this->control->revokeLiveIf($user->id, $user, 'two-factor authentication was turned off', fn () => true);
+        $this->tokens->revokeAll($user, 'mfa_disabled'); // the mobile app signs in again
 
         return response()->json(['ok' => true]);
     }

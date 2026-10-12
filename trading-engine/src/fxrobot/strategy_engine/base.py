@@ -10,8 +10,10 @@ from typing import Any, ClassVar, Protocol
 
 from pydantic import BaseModel
 
+from fxrobot.domain.contracts import ContractFamily
 from fxrobot.domain.market import Candle, Side, SymbolInfo, Timeframe
 from fxrobot.domain.trading import OrderType
+from fxrobot.strategy_engine.regime import RegimeConfig, RegimeReading, classify
 
 
 class Outcome(StrEnum):
@@ -99,6 +101,13 @@ class Strategy(ABC):
     # True: the engine registers a shared template (version 1 = defaults) on
     # start-up. The `rules` strategy's templates are seeded by Laravel instead.
     seeds_template: ClassVar[bool] = True
+    # Contract families the strategy can be traded with (None = all). A family it
+    # cannot use is refused when it is assigned, and never evaluated (NO_TRADE).
+    contract_families: ClassVar[tuple[ContractFamily, ...] | None] = None
+    # Why a family is unsupported, in plain English (shown to the user).
+    contract_reasons: ClassVar[dict[ContractFamily, str]] = {}
+    # Markets the strategy has been checked on (canonical names; None = any).
+    symbols: ClassVar[tuple[str, ...] | None] = None
 
     def parse_params(self, raw: dict[str, Any]) -> BaseModel:
         return self.Params.model_validate(raw)
@@ -116,6 +125,33 @@ class Strategy(ABC):
 
     @abstractmethod
     def evaluate(self, view: MarketView, params: Any) -> Evaluation: ...
+
+    def support_problem(self, symbol: str | None, family: ContractFamily | None) -> str | None:
+        """Why this strategy may not run on `symbol` with `family` (None = it may)."""
+        families = self.contract_families
+        if family is not None and families is not None and family not in families:
+            allowed = ", ".join(f.value for f in families)
+            return self.contract_reasons.get(
+                family,
+                f"{self.name} cannot be traded with {family.value} contracts "
+                f"(supported: {allowed}).",
+            )
+        if symbol is not None and self.symbols is not None and symbol not in self.symbols:
+            return (
+                f"{self.name} is only enabled on {', '.join(self.symbols)} — the markets it "
+                f"has been checked on; {symbol} is not one of them."
+            )
+        return None
+
+    def risk_caps(self, params: Any) -> dict[str, Any]:
+        """Strategy-level risk limits. They can only TIGHTEN the account's risk
+        profile (RiskLimits.tightened), never loosen it."""
+        return {}
+
+    def regime(self, view: MarketView, params: Any) -> RegimeReading:
+        """The market regime as this strategy sees it (backtest reports: results by
+        regime at entry). Default: the classifier's defaults on the entry timeframe."""
+        return classify(view.candles(self.timeframes(params)[0]), RegimeConfig())
 
     def has_exit_rules(self, params: Any) -> bool:
         """True when `evaluate_exit` can ask to close open trades early."""

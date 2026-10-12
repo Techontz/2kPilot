@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from fxrobot.domain.contracts import ContractFamily, ContractSpec
 from fxrobot.domain.market import Quote, Side, SymbolInfo, Timeframe
 from fxrobot.domain.modes import AccountEnvironment, TradingMode
 from fxrobot.risk_engine import DEFAULT_LIMITS, RiskContext, RiskDecision, RiskLimits, evaluate
@@ -324,6 +325,43 @@ def test_session_not_allowed_rejects() -> None:
     asia = datetime(2026, 9, 30, 3, 0, 30, tzinfo=UTC)
     decision = run(make_signal(asia), make_context(asia))
     assert_rejected(decision, "Trading session", "ASIA session not allowed")
+
+
+R_75 = replace(
+    EURUSD,
+    name="R_75",
+    description="Volatility 75 Index",
+    base_currency="R_75",
+    digits=4,
+    point=D("0.0001"),
+    contract_size=D(1),
+    category="synthetic",
+)
+
+
+@pytest.mark.parametrize(
+    "contract",
+    [
+        ContractSpec(contract_family=ContractFamily.MULTIPLIER, multiplier=50),
+        ContractSpec(contract_family=ContractFamily.RISE_FALL, duration=5, duration_unit="m"),
+    ],
+)
+def test_synthetic_contracts_skip_fx_sessions_and_pip_spreads(contract: ContractSpec) -> None:
+    """Seen live (2026-10): every R_75 signal was refused for the ASIA session and an
+    8-point spread read as "80000.0 pips > max 2.50" — both forex measures."""
+    asia = datetime(2026, 10, 12, 1, 5, 30, tzinfo=UTC)
+    q = quote("R_75", "41477.928", "41485.928", asia - timedelta(seconds=5))
+    ctx = make_context(asia, symbol=R_75, quote=q, quote_lookup=lookup_from(q), contract=contract)
+    decision = run(make_signal(asia), ctx)
+    assert check(decision, "Trading session").passed
+    assert "around the clock" in check(decision, "Trading session").detail
+    assert check(decision, "Spread").passed
+
+
+def test_synthetic_spot_trades_still_check_the_spread() -> None:
+    q = quote("R_75", "41477.928", "41485.928")
+    decision = run(ctx=make_context(symbol=R_75, quote=q, quote_lookup=lookup_from(q)))
+    assert_rejected(decision, "Spread", "80000.0 pips > max 2.5")
 
 
 def test_empty_allowed_sessions_allows_any_session() -> None:

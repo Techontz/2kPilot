@@ -95,6 +95,11 @@ class BacktestConfig:
     commission_pct: Decimal = Decimal(0)  # Multipliers: % of stake × multiplier
     stake_min: Decimal = Decimal("0.01")  # simulated broker stake range
     stake_max: Decimal = Decimal(100_000)
+    # Simulated broker range for Multiplier stop loss / take profit amounts (None =
+    # unchecked). Deriv reports e.g. 0.10–stake for stop losses on R_10.
+    stop_loss_min: Decimal | None = None
+    take_profit_min: Decimal | None = None
+    take_profit_max: Decimal | None = None
 
 
 @dataclass
@@ -124,6 +129,7 @@ class SimTrade:
     multiplier: int | None = None
     take_amount: Decimal | None = None
     stop_amount: Decimal | None = None
+    regime: str | None = None  # market regime when the signal was taken
 
     @property
     def costs(self) -> Decimal:
@@ -169,6 +175,13 @@ class Backtester:
         self.strategy = get_strategy(config.strategy_key)
         self.params = self.strategy.parse_params(config.params)
         self.entry_tf = self.strategy.timeframes(self.params)[0]
+        problem = self.strategy.support_problem(
+            config.symbol.canonical_name, config.contract.contract_family
+        )
+        if problem is not None:
+            raise BacktestError(problem)
+        # The strategy's own risk caps tighten the risk settings, as in live trading.
+        self.limits = config.limits.tightened(self.strategy.risk_caps(self.params))
         # Early exits proposed by the strategy (rule sets with exit conditions).
         self.has_exits = self.strategy.has_exit_rules(self.params)
         self.pending_exit = False
@@ -208,7 +221,8 @@ class Backtester:
         self.sym = config.symbol
         self.balance = config.initial_capital
         self.position: SimTrade | None = None
-        self.pending: tuple[SignalIntent, Decimal, Decimal] | None = None  # signal, volume, risk
+        # signal, volume, risk, regime at the signal
+        self.pending: tuple[SignalIntent, Decimal, Decimal, str | None] | None = None
         self.closed: list[SimTrade] = []
         self.equity_points: list[tuple[datetime, Decimal]] = []
         self.peak_equity = config.initial_capital
@@ -357,10 +371,12 @@ class Backtester:
     def _open(self, bar: Candle) -> None:
         if self.pending is None:
             return
-        signal, volume, risk = self.pending
+        signal, volume, risk, regime = self.pending
         self.pending = None
         if self.spec.contract_family.is_contract:
             self._open_contract(bar, signal, risk)
+            if self.position is not None:
+                self.position.regime = regime
             return
         stop_loss = signal.stop_loss
         if stop_loss is None:
@@ -386,6 +402,7 @@ class Backtester:
             reasons=signal.reasons,
             session=session_at(bar.time).value,
             commission=_q2(self.cfg.costs.commission_per_lot * volume),
+            regime=regime,
         )
 
     def _check_exit(self, bar: Candle) -> None:
@@ -517,9 +534,17 @@ class Backtester:
             return None
         payout = None
         if self.spec.contract_family is ContractFamily.RISE_FALL:
-            stake = self.spec.stake if self.spec.stake is not None else self.cfg.limits.stake_amount
+            stake = self.spec.stake if self.spec.stake is not None else self.limits.stake_amount
             payout = _q2(stake * (1 + self.cfg.payout_ratio))
-        return StakeQuote(self.cfg.stake_min, self.cfg.stake_max, payout=payout, simulated=True)
+        return StakeQuote(
+            self.cfg.stake_min,
+            self.cfg.stake_max,
+            payout=payout,
+            simulated=True,
+            stop_loss_min=self.cfg.stop_loss_min,
+            take_profit_min=self.cfg.take_profit_min,
+            take_profit_max=self.cfg.take_profit_max,
+        )
 
     # ── main loop ────────────────────────────────────────────────────────
     def run(self, progress: ProgressFn | None = None) -> BacktestResult:
@@ -569,6 +594,7 @@ class Backtester:
                 session=t.session,
                 r_multiple=t.r_multiple,
                 costs=t.costs,
+                regime=t.regime,
             )
             for t in self.closed
         ]
@@ -657,14 +683,15 @@ class Backtester:
             key = "One contract at a time (backtest)"
             self.rejections[key] = self.rejections.get(key, 0) + 1
             return
-        decision = risk_evaluate(evaluation.signal, self._context(now, bar), self.cfg.limits)
+        decision = risk_evaluate(evaluation.signal, self._context(now, bar), self.limits)
         if not decision.approved:
             failed = next(c for c in decision.checks if not c.passed)
             self.rejections[failed.rule] = self.rejections.get(failed.rule, 0) + 1
             return
         if decision.volume is None or decision.risk_amount is None:
             return
-        self.pending = (evaluation.signal, decision.volume, decision.risk_amount)
+        regime = self.strategy.regime(self.view, self.params).regime.value
+        self.pending = (evaluation.signal, decision.volume, decision.risk_amount, regime)
 
 
 def expiry_bars(spec: ContractSpec, base_tf: Timeframe) -> int:

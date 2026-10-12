@@ -24,6 +24,7 @@ import { cn } from "@/lib/utils";
 import { EvaluationsSheet } from "./EvaluationsSheet";
 import { exportStrategy } from "./exportStrategy";
 import type { StrategyActions } from "./StrategiesSection";
+import { StrategyInsights } from "./StrategyInsights";
 import { isMine, isRuleBased, rulesText } from "./strategyUtils";
 
 interface Loaded {
@@ -60,7 +61,7 @@ export function MyStrategies({ strategies, actions, onAdd }: { strategies: Loade
           <ul className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-4">
             {templates.map((t) => (
               <li key={t.id}>
-                <Link href="/strategies?tab=templates" className="group block rounded-lg bg-card p-3 ring-1 ring-line transition-colors hover:bg-surface-hover">
+                <Link href="/strategies?tab=templates" className="group block h-full rounded-lg bg-card p-3 ring-1 ring-line transition-colors hover:bg-surface-hover">
                   <Artwork seed={`${t.name} ${t.description}`} className="aspect-[16/9] w-full shadow-raised transition-transform duration-300 group-hover:scale-[1.02]" />
                   <p className="mt-3 truncate text-sm font-bold text-fg">{t.name}</p>
                   <p className="mt-0.5 line-clamp-2 text-xs text-fg-muted">{t.description}</p>
@@ -129,21 +130,22 @@ function StrategyCard({ strategy: s, actions }: { strategy: Strategy; actions: S
 
   return (
     <Card className="group/strategy transition-colors hover:bg-[color-mix(in_oklab,var(--card),var(--foreground)_2%)]">
-      <CardHeader className="grid-cols-[auto_1fr_auto] gap-x-4 has-data-[slot=card-action]:grid-cols-[auto_1fr_auto]">
+      <CardHeader className="grid-cols-[auto_1fr_auto] gap-x-3.5 has-data-[slot=card-action]:grid-cols-[auto_1fr_auto] sm:gap-x-4">
         <div className="relative row-span-2 self-start">
-          <Artwork seed={`${s.name} ${s.description}`} className="size-16 shadow-raised sm:size-24" />
+          <Artwork seed={`${s.name} ${s.description}`} className="size-14 shadow-raised sm:size-24" />
           <button type="button" tabIndex={-1} aria-hidden onClick={() => actions.activate(s)}
             className="absolute right-1.5 bottom-1.5 flex size-10 translate-y-2 items-center justify-center rounded-full bg-primary text-primary-foreground opacity-0 shadow-fab transition-all duration-200 group-hover/strategy:translate-y-0 group-hover/strategy:opacity-100 hover:scale-105">
             <Play className="size-4 translate-x-px fill-current" />
           </button>
         </div>
         <div className="min-w-0">
-          <CardTitle className="text-lg font-extrabold sm:text-xl">{s.name}</CardTitle>
+          <CardTitle className="text-lg leading-tight font-extrabold break-words sm:text-xl">{s.name}</CardTitle>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <SourceBadge source={s.source} />
             {active.length > 0 ? <Pill tone="positive" dot>Active on {active.length}</Pill> : <Pill>Not active</Pill>}
+            {s.entries_disabled && <Pill tone="negative" dot>Stopped by admin</Pill>}
           </div>
-          {s.description && s.description !== text && <CardDescription className="mt-2">{s.description}</CardDescription>}
+          {s.description && s.description !== text && <CardDescription className="mt-2 hidden sm:block">{s.description}</CardDescription>}
         </div>
         <CardAction className="col-start-3">
           <DropdownMenu>
@@ -164,8 +166,10 @@ function StrategyCard({ strategy: s, actions }: { strategy: Strategy; actions: S
         </CardAction>
       </CardHeader>
       <CardContent className="space-y-4">
+        {/* Phones: the description uses the full card width instead of the column beside the artwork. */}
+        {s.description && s.description !== text && <p className="-mt-1 text-[15px] leading-relaxed text-fg-muted sm:hidden">{s.description}</p>}
         <div>
-          <ul className="space-y-1.5 text-[13px] leading-relaxed text-fg sm:text-sm">
+          <ul className="space-y-1.5 text-[15px] leading-relaxed text-fg sm:text-sm">
             {(expanded ? rules : rules.slice(0, 2)).map((r, i) => (
               <li key={i} className="flex gap-2.5">
                 <span aria-hidden className="mt-[0.6em] size-1 shrink-0 rounded-full bg-fg-subtle" />
@@ -173,9 +177,10 @@ function StrategyCard({ strategy: s, actions }: { strategy: Strategy; actions: S
               </li>
             ))}
           </ul>
-          {(rules.length > 2 || text.length > 180) && <button type="button" className="mt-1 text-xs text-brand-ink hover:underline" onClick={() => setExpanded(!expanded)} aria-expanded={expanded}>{expanded ? "Show less" : "Show all rules"}</button>}
+          {(rules.length > 2 || text.length > 180) && <button type="button" className="touch-hit mt-1 text-xs font-semibold text-brand-ink hover:underline max-sm:mt-2 max-sm:text-sm" onClick={() => setExpanded(!expanded)} aria-expanded={expanded}>{expanded ? "Show less" : "Show all rules"}</button>}
         </div>
-        <dl className="grid gap-3 sm:grid-cols-2">
+        {!isRuleBased(s) && <StrategyInsights strategy={s} onChanged={actions.reload} />}
+        <dl className="grid gap-2.5 sm:grid-cols-2 sm:gap-3">
           <div className="rounded-md bg-surface-raised p-3.5">
             <dt className="text-xs font-semibold text-fg-muted">Demo results (your Paper/demo trades)</dt>
             <dd className="mt-1 text-sm">
@@ -202,7 +207,7 @@ function StrategyCard({ strategy: s, actions }: { strategy: Strategy; actions: S
         {s.assignments.length > 0 && (
           <ul className="space-y-2" aria-label="Where it runs">
             {s.assignments.map((a) => (
-              <li key={a.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md px-3 py-2.5 ring-1 ring-line transition-colors hover:bg-surface-raised">
+              <li key={a.id} className="flex flex-col gap-3 rounded-md px-3 py-3 ring-1 ring-line transition-colors hover:bg-surface-raised sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-2 sm:py-2.5">
                 <span className="min-w-0 text-sm">
                   <span className="flex flex-wrap items-center gap-1.5">
                     {a.account && <EnvBadge env={a.account.environment} />}
@@ -210,10 +215,10 @@ function StrategyCard({ strategy: s, actions }: { strategy: Strategy; actions: S
                     <span className="text-fg-muted">on {a.account?.label ?? "account"}</span>
                     {a.status === "ENABLED" ? <Pill tone="positive" dot>Active</Pill> : <Pill>Paused</Pill>}
                   </span>
-                  <span className="block text-xs text-fg-subtle">{contractSummary(a.contract)}{a.last_bar_evaluated ? ` · checked ${formatRelative(a.last_bar_evaluated)}` : ""}</span>
+                  <span className="mt-1 block text-xs break-words text-fg-subtle sm:mt-0">{contractSummary(a.contract)}{a.last_bar_evaluated ? ` · checked ${formatRelative(a.last_bar_evaluated)}` : ""}</span>
                 </span>
-                <span className="flex gap-1">
-                  <Button size="sm" variant="ghost" onClick={() => setExplain(a)}>Why no trade?</Button>
+                <span className="flex gap-2 sm:gap-1 [&>*]:max-sm:flex-1">
+                  <Button size="sm" variant="ghost" className="max-sm:bg-surface-hover" onClick={() => setExplain(a)}>Why no trade?</Button>
                   {a.status === "ENABLED" && a.account && <Button size="sm" variant="outline" disabled={action.busy} onClick={() => void deactivate(a.account!.id)}>Deactivate</Button>}
                 </span>
               </li>
@@ -222,8 +227,8 @@ function StrategyCard({ strategy: s, actions }: { strategy: Strategy; actions: S
         )}
         {action.error && !confirmDelete && <p role="alert" className="text-sm text-negative">{action.error}</p>}
       </CardContent>
-      <CardFooter className="flex flex-wrap gap-2 border-t">
-        <Button onClick={() => actions.activate(s)}><Play aria-hidden /> {active.length ? "Activate on another market" : "Activate"}</Button>
+      <CardFooter className="flex flex-wrap gap-2 border-t [&>*]:max-sm:flex-1">
+        <Button onClick={() => actions.activate(s)} className="max-sm:basis-full"><Play aria-hidden /> {active.length ? "Activate on another market" : "Activate"}</Button>
         <Button variant="outline" onClick={() => actions.test(s)}><FlaskConical aria-hidden /> Test on history</Button>
         {editable && <Button variant="ghost" asChild><Link href={`/strategies/${s.id}/edit`}><Pencil aria-hidden /> Edit</Link></Button>}
       </CardFooter>

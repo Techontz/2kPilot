@@ -52,6 +52,8 @@ class RiskProfile(TimestampMixin, Base):
     max_daily_loss_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
     max_consecutive_losses: Mapped[int | None]
     daily_profit_target_amount: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    # No new trades while the balance is below this (NULL = off).
+    min_account_balance: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
 
     def as_dict(self) -> dict[str, Any]:
         return {c.name: getattr(self, c.name) for c in self.__table__.columns}

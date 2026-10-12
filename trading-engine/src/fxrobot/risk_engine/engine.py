@@ -30,6 +30,7 @@ from fxrobot.domain.contracts import (
     ContractOrder,
     ContractSpec,
     StakeQuote,
+    multiplier_limit_amounts,
 )
 from fxrobot.domain.market import Quote, Side, SymbolInfo
 from fxrobot.domain.modes import AccountEnvironment, TradingMode, environment_permitted
@@ -93,6 +94,9 @@ class RiskContext:
     # Closed trades whose P/L the broker has not confirmed yet: the loss limits
     # cannot be trusted until they are settled, so they block new entries.
     unsettled_trades: int = 0
+    # Why the strategy behind this signal may not open trades (an administrator's
+    # emergency stop for that strategy). None = it may; manual tickets have none.
+    strategy_disabled: str | None = None
 
 
 @dataclass(frozen=True)
@@ -152,6 +156,11 @@ def _is_contract(c: RiskContext) -> bool:
     return c.contract.contract_family.is_contract
 
 
+def _is_synthetic(c: RiskContext) -> bool:
+    """Deriv's synthetic indices (Volatility, Boom/Crash, …): open 24/7, no FX sessions."""
+    return c.symbol.category == "synthetic"
+
+
 # ── individual rules (each pure, each explainable) ───────────────────────
 
 
@@ -165,6 +174,28 @@ def rule_kill_switch(_: SignalIntent, c: RiskContext, __: RiskLimits) -> RuleRes
         not c.kill_switch_engaged,
         "STOP ALL TRADING is engaged" if c.kill_switch_engaged else "released",
     )
+
+
+def rule_strategy_enabled(_: SignalIntent, c: RiskContext, __: RiskLimits) -> RuleResult:
+    if c.strategy_disabled:
+        return RuleResult("Strategy enabled", False, c.strategy_disabled)
+    return RuleResult("Strategy enabled", True, "no emergency stop on this strategy")
+
+
+def rule_min_balance(_: SignalIntent, c: RiskContext, lim: RiskLimits) -> RuleResult:
+    name = "Minimum balance"
+    if lim.min_account_balance is None:
+        return RuleResult(name, True, "no minimum")
+    floor = _money(lim.min_account_balance, c.account_currency)
+    if c.balance is None:
+        return RuleResult(name, False, f"balance unknown (minimum {floor})")
+    if c.balance < lim.min_account_balance:
+        return RuleResult(
+            name,
+            False,
+            f"balance {_money(c.balance, c.account_currency)} is below the minimum {floor}",
+        )
+    return RuleResult(name, True, f"balance {_money(c.balance, c.account_currency)} ≥ {floor}")
 
 
 def rule_mode(_: SignalIntent, c: RiskContext, __: RiskLimits) -> RuleResult:
@@ -282,6 +313,12 @@ def rule_trading_hours(_: SignalIntent, c: RiskContext, lim: RiskLimits) -> Rule
 
 def rule_session(_: SignalIntent, c: RiskContext, lim: RiskLimits) -> RuleResult:
     session = session_at(c.now).value
+    if _is_synthetic(c):
+        return RuleResult(
+            "Trading session",
+            True,
+            f"{session}: not applicable, synthetic indices trade around the clock",
+        )
     if lim.allowed_sessions and session not in lim.allowed_sessions:
         return RuleResult(
             "Trading session",
@@ -295,6 +332,12 @@ def rule_spread(_: SignalIntent, c: RiskContext, lim: RiskLimits) -> RuleResult:
     if c.quote is None:
         return RuleResult("Spread", False, "no current price")
     spread = _pips(c.quote.spread, c.symbol)
+    if _is_synthetic(c) and _is_contract(c):
+        # A pip limit is a forex measure; on R_75 (~40,000) a normal 8-point spread is
+        # "80,000 pips". Deriv prices each contract (payout or commission) up front.
+        return RuleResult(
+            "Spread", True, f"{spread} pips: not applicable, Deriv prices the contract"
+        )
     if lim.max_spread_pips is not None and spread > lim.max_spread_pips:
         return RuleResult("Spread", False, f"{spread} pips > max {lim.max_spread_pips}")
     return RuleResult("Spread", True, f"{spread} pips")
@@ -495,6 +538,7 @@ def rule_open_positions(s: SignalIntent, c: RiskContext, lim: RiskLimits) -> Rul
 
 RULES: tuple[Rule, ...] = (
     rule_kill_switch,
+    rule_strategy_enabled,
     rule_mode,
     rule_account_enabled,
     rule_broker,
@@ -510,6 +554,7 @@ RULES: tuple[Rule, ...] = (
     rule_daily_loss,
     rule_weekly_loss,
     rule_drawdown,
+    rule_min_balance,
     rule_settlement,
     rule_cooldown,
     rule_losing_streak,
@@ -612,6 +657,12 @@ def rule_margin(volume: Decimal, c: RiskContext) -> RuleResult:
     if c.leverage is None or c.free_margin is None:
         return RuleResult("Margin", True, "broker enforces margin")
     rate = conversion_rate(c.symbol.base_currency, c.account_currency, c.quote_lookup)
+    if rate is None and c.symbol.base_currency in (c.symbol.name, c.symbol.canonical_name):
+        # An index (e.g. R_10) is its own "base currency": one unit is worth its price
+        # in the quote currency.
+        to_account = conversion_rate(c.symbol.quote_currency, c.account_currency, c.quote_lookup)
+        if c.quote is not None and c.quote.mid > 0 and to_account is not None:
+            rate = c.quote.mid * to_account
     if rate is None:
         return RuleResult("Margin", False, f"cannot value {c.symbol.base_currency} exposure")
     required = volume * c.symbol.contract_size * rate / Decimal(c.leverage)
@@ -665,17 +716,22 @@ def rule_stake(c: RiskContext, lim: RiskLimits) -> RuleResult:
             f"{_money(c.balance, ccy)} balance) — lower the stake or raise risk per trade",
         )
     quote = c.stake_quote
-    if quote is None or quote.stake_min is None or quote.stake_max is None:
+    full_range = quote is not None and quote.stake_min is not None and quote.stake_max is not None
+    # Deriv refuses to price a stake outside its limits, so a price for this exact
+    # stake proves it acceptable even when the reply lists only part of the range
+    # (seen live on frxUSDJPY Rise/Fall, 2026-10-12). No price at all: fail closed.
+    if quote is None or (not full_range and quote.ask_price is None):
         why = f" ({quote.detail})" if quote is not None and quote.detail else ""
         return RuleResult(
             name, False, f"the broker did not report its stake limits for this contract{why}"
         )
-    if stake < quote.stake_min or stake > quote.stake_max:
+    if (quote.stake_min is not None and stake < quote.stake_min) or (
+        quote.stake_max is not None and stake > quote.stake_max
+    ):
+        lo = _money(quote.stake_min, ccy) if quote.stake_min is not None else "?"
+        hi = _money(quote.stake_max, ccy) if quote.stake_max is not None else "?"
         return RuleResult(
-            name,
-            False,
-            f"{_money(stake, ccy)} is outside the broker's stake range "
-            f"{_money(quote.stake_min, ccy)}–{_money(quote.stake_max, ccy)}",
+            name, False, f"{_money(stake, ccy)} is outside the broker's stake range {lo}–{hi}"
         )
     payout = (
         f", pays {_money(quote.payout, ccy)} if it wins"
@@ -686,8 +742,86 @@ def rule_stake(c: RiskContext, lim: RiskLimits) -> RuleResult:
     return RuleResult(
         name,
         True,
-        f"{_money(stake, ccy)} at risk{payout}; broker range "
-        f"{_money(quote.stake_min, ccy)}–{_money(quote.stake_max, ccy)}{label}",
+        f"{_money(stake, ccy)} at risk{payout}; "
+        + (
+            f"broker range {_money(quote.stake_min, ccy)}–{_money(quote.stake_max, ccy)}"  # type: ignore[arg-type]
+            if full_range
+            else "the broker priced this stake"
+        )
+        + label,
+    )
+
+
+def multiplier_amounts(
+    s: SignalIntent, c: RiskContext, stake: Decimal
+) -> tuple[Decimal | None, Decimal | None]:
+    """The limit_order money amounts a Multiplier will be bought with — exactly what
+    the broker adapter sends: the assignment's own amounts, else the strategy's stop
+    and target PRICES converted from the current entry price."""
+    spec = c.contract
+    if spec.stop_loss_amount is not None or spec.take_profit_amount is not None:
+        return spec.stop_loss_amount, spec.take_profit_amount
+    entry = s.entry_price
+    if c.quote is not None:
+        entry = c.quote.ask if s.side is Side.BUY else c.quote.bid
+    return multiplier_limit_amounts(
+        s.side, stake, spec.multiplier or 1, entry, s.stop_loss, s.take_profit
+    )
+
+
+def rule_multiplier_limits(s: SignalIntent, c: RiskContext, lim: RiskLimits) -> RuleResult:
+    """A Multiplier's stop loss / take profit must fit the broker's limits.
+
+    The loss at the stop is at most the stake (a stop beyond the stake is left to
+    the broker's stop out, which closes the contract at a loss of the stake), and
+    the stake already fits the per-trade budget. Amounts outside the broker's
+    range (Deriv: validation_params.stop_loss / take_profit) are refused here
+    with the reason instead of being sent and refused by the broker.
+    """
+    name = "Stop/target amounts"
+    ccy = c.account_currency
+    stake = resolved_stake(c, lim)
+    stop, take = multiplier_amounts(s, c, stake)
+    q = c.stake_quote
+    problems = []
+    if stop is not None and q is not None:
+        if q.stop_loss_min is not None and stop < q.stop_loss_min:
+            problems.append(
+                f"stop loss {_money(stop, ccy)} is below the broker's minimum "
+                f"{_money(q.stop_loss_min, ccy)} — the stop is too close for this stake and "
+                "multiplier"
+            )
+        if q.stop_loss_max is not None and stop > q.stop_loss_max:
+            problems.append(
+                f"stop loss {_money(stop, ccy)} is above the broker's maximum "
+                f"{_money(q.stop_loss_max, ccy)}"
+            )
+    if take is not None and q is not None:
+        if q.take_profit_min is not None and take < q.take_profit_min:
+            problems.append(
+                f"take profit {_money(take, ccy)} is below the broker's minimum "
+                f"{_money(q.take_profit_min, ccy)}"
+            )
+        if q.take_profit_max is not None and take > q.take_profit_max:
+            problems.append(
+                f"take profit {_money(take, ccy)} is above the broker's maximum "
+                f"{_money(q.take_profit_max, ccy)}"
+            )
+    if problems:
+        return RuleResult(name, False, "; ".join(problems))
+    reported = q is not None and q.stop_loss_min is not None
+    stop_text = (
+        f"stop loss {_money(stop, ccy)}"
+        if stop is not None
+        else f"no stop amount (loss bounded by the stake {_money(stake, ccy)} via stop out)"
+    )
+    take_text = f", take profit {_money(take, ccy)}" if take is not None else ", no take profit"
+    return RuleResult(
+        name,
+        True,
+        stop_text
+        + take_text
+        + ("" if reported else " (broker range not reported; the broker checks it when buying)"),
     )
 
 
@@ -804,6 +938,8 @@ def _evaluate_contract(
     """Stake sizing: one contract, risking exactly its stake."""
     try:
         checks.append(rule_stake(ctx, limits))
+        if checks[-1].passed and ctx.contract.contract_family is ContractFamily.MULTIPLIER:
+            checks.append(rule_multiplier_limits(signal, ctx, limits))
         if checks[-1].passed:
             checks.append(rule_open_risk(resolved_stake(ctx, limits), ctx, limits))
     except (ArithmeticError, TypeError, ValueError, AttributeError) as exc:

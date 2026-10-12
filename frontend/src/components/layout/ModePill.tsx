@@ -27,7 +27,7 @@ export function ModePill() {
     // Never show a last-known DEMO/LIVE that may be wrong.
     return (
       <span role="status" aria-label="Status unknown — reconnecting" title="Status unknown — reconnecting"
-        className="inline-flex h-8 shrink-0 items-center gap-1 rounded-full bg-muted px-3 text-xs font-bold text-fg-muted ring-1 ring-line">
+        className="inline-flex h-8 shrink-0 items-center gap-1 rounded-full bg-muted px-3 text-xs font-bold text-fg-muted ring-1 ring-line max-sm:h-7 max-sm:px-2.5 max-sm:text-[11px]">
         <WifiOff className="size-3" aria-hidden />
         <span className="hidden min-[420px]:inline">Reconnecting…</span>
       </span>
@@ -57,7 +57,7 @@ export function ModePill() {
         <DropdownMenuTrigger
           aria-label={live ? "LIVE mode — real money. Change mode" : "Demo mode — virtual money. Change mode"}
           className={cn(
-            "inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs font-extrabold tracking-[0.12em] outline-none transition-transform hover:scale-[1.03] focus-visible:ring-3 focus-visible:ring-ring/50",
+            "touch-hit inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-xs font-extrabold tracking-[0.12em] outline-none transition-transform hover:scale-[1.03] focus-visible:ring-3 focus-visible:ring-ring/50 max-sm:h-7 max-sm:px-2.5 max-sm:text-[11px]",
             live ? "bg-live text-live-foreground shadow-[0_0_0_3px_color-mix(in_oklab,var(--live)_30%,transparent),0_6px_20px_-6px_var(--live)]" : "bg-transparent text-demo ring-1 ring-demo/55 hover:bg-demo-soft",
           )}
         >

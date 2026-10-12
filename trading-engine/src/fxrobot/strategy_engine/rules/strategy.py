@@ -91,7 +91,7 @@ class RulesStrategy(Strategy):
 
     def _frame(self, view: MarketView, rs: RuleSet) -> tuple[Frame | None, Evaluation | None]:
         need = rs.warmup_bars()
-        bars = list(view.candles(rs.timeframe))[-need:]
+        bars = list(view.candles(rs.timeframe)[-need:])
         if len(bars) < need:
             return None, Evaluation(
                 Outcome.INSUFFICIENT_DATA,

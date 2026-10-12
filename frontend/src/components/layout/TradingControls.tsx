@@ -153,7 +153,7 @@ export function useTradingControl(): TradingControl {
 const UNKNOWN_LABEL = "Status unknown — reconnecting";
 
 /** "Is my bot running?" — a dot always, the words from md up. */
-export function BotStatus() {
+export function BotStatus({ className }: { className?: string }) {
   const { status, statusUnknown } = useAppData();
   if (!status && !statusUnknown) return null;
   const robot = !status || statusUnknown
@@ -163,12 +163,12 @@ export function BotStatus() {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="flex h-9 shrink-0 items-center gap-2 rounded-full px-1.5 text-sm font-semibold text-fg md:bg-surface-hover md:px-3 md:dark:bg-[#1f1f1f]" role="status" aria-live="polite" aria-label={`Bot: ${robot.label}`} tabIndex={0}>
-          <span className="relative flex size-2.5" aria-hidden>
+        <span className={cn("flex shrink-0 items-center gap-1.5 rounded-full text-[11px] leading-none font-bold text-fg-muted sm:h-9 sm:gap-2 sm:px-1.5 sm:text-sm sm:font-semibold sm:text-fg md:bg-surface-hover md:px-3 md:dark:bg-[#1f1f1f]", className)} role="status" aria-live="polite" aria-label={`Bot: ${robot.label}`} tabIndex={0}>
+          <span className="relative flex size-2 sm:size-2.5" aria-hidden>
             {robot.running && <span className={cn("absolute inset-0 rounded-full motion-safe:animate-pulse-ring", DOT[robot.tone])} />}
-            <span className={cn("relative size-2.5 rounded-full", DOT[robot.tone])} />
+            <span className={cn("relative size-2 rounded-full sm:size-2.5", DOT[robot.tone])} />
           </span>
-          <span className="hidden md:inline">{label}</span>
+          <span className="sm:hidden md:inline">{label}</span>
         </span>
       </TooltipTrigger>
       <TooltipContent className="block max-w-64">
@@ -185,17 +185,17 @@ function showsStart(status: TradingStatus | null, unknown: boolean): boolean {
 }
 
 /** Compact Start / Stop in the top bar (always visible). */
-export function TradingToggle() {
+export function TradingToggle({ className }: { className?: string }) {
   const { status, statusUnknown } = useAppData();
   const { stop, requestStart, busy } = useTradingControl();
   return showsStart(status, statusUnknown) ? (
-    <Button size="lg" onClick={requestStart} aria-label="Start trading" className="shrink-0 bg-positive px-3.5 font-bold text-positive-foreground hover:bg-positive/90 sm:px-5">
+    <Button size="lg" onClick={requestStart} aria-label="Start trading" className={cn("shrink-0 bg-positive px-3.5 font-bold text-positive-foreground hover:bg-positive/90 max-sm:size-11 max-sm:px-0 sm:px-5", className)}>
       <Play aria-hidden className="fill-current" />
       <span className="hidden sm:inline">Start</span>
     </Button>
   ) : (
     <Button size="lg" variant="outline" onClick={() => void stop()} disabled={busy} aria-label="Stop trading"
-      className="shrink-0 border-negative/60 px-3.5 font-bold text-negative hover:border-negative hover:bg-negative-soft hover:text-negative sm:px-5 dark:border-negative/60 dark:hover:border-negative">
+      className={cn("shrink-0 border-negative/60 px-3.5 font-bold text-negative hover:border-negative hover:bg-negative-soft hover:text-negative max-sm:size-11 max-sm:border-2 max-sm:border-negative max-sm:bg-negative-soft max-sm:px-0 sm:px-5 dark:border-negative/60 dark:hover:border-negative max-sm:dark:border-negative", className)}>
       <Square aria-hidden className="fill-current" />
       <span className="hidden sm:inline">{busy ? "Stopping…" : "Stop"}</span>
     </Button>
