@@ -472,7 +472,13 @@ class FakeDeriv:
                 },
             )
         if "buy" in msg:
-            proposal = socket.proposals.pop(str(msg["buy"]), None)
+            if str(msg["buy"]) == "1":  # bought by parameters (no proposal id)
+                proposal = dict(msg.get("parameters") or {})
+                missing = {"contract_type", "currency", "underlying_symbol"} - set(proposal)
+                if missing:
+                    return error("buy", "InputValidationFailed", f"Missing {sorted(missing)}")
+            else:
+                proposal = socket.proposals.pop(str(msg["buy"]), None)
             if proposal is not None and self.forget_proposals > 0:
                 self.forget_proposals -= 1
                 proposal = None

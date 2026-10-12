@@ -945,11 +945,11 @@ class DerivAdapter(BrokerAdapter):
             self._reopen()
             return self._proposal(name, contract, limit_order)
 
-    def _proposal(
+    def _contract_params(
         self, name: str, contract: ContractOrder, limit_order: dict[str, float] | None
     ) -> dict[str, Any]:
+        """The contract as Deriv describes it, for both `proposal` and `buy.parameters`."""
         payload: dict[str, Any] = {
-            "proposal": 1,
             "contract_type": contract.contract_type.value,
             "underlying_symbol": name,
             "basis": "stake",
@@ -963,7 +963,14 @@ class DerivAdapter(BrokerAdapter):
             payload["multiplier"] = contract.multiplier
             if limit_order:
                 payload["limit_order"] = limit_order
-        reply = self._ws().request(payload)
+        return payload
+
+    def _proposal(
+        self, name: str, contract: ContractOrder, limit_order: dict[str, float] | None
+    ) -> dict[str, Any]:
+        reply = self._ws().request(
+            {"proposal": 1, **self._contract_params(name, contract, limit_order)}
+        )
         proposal = reply.get("proposal")
         if not isinstance(proposal, dict) or not proposal.get("id"):
             raise InvalidBrokerResponseError("Deriv proposal response is malformed")
@@ -1055,7 +1062,17 @@ class DerivAdapter(BrokerAdapter):
         sent_at = self.now()
         # 2. Buy at no more than the quoted ask. From here on a lost link = UNKNOWN.
         try:
-            reply = self._ws().request({"buy": proposal["id"], "price": float(ask)}, timeout=30)
+            # The contract itself, not the quote's id: Deriv answered every buy by
+            # proposal id with InvalidContractProposal (live, 2026-10-12). `price`
+            # is still the quoted ask, so Deriv refuses it if the price moved up.
+            reply = self._ws().request(
+                {
+                    "buy": "1",
+                    "price": float(ask),
+                    "parameters": self._contract_params(name, contract, limit_order),
+                },
+                timeout=30,
+            )
         except DerivApiError as exc:
             raise _map_api_error(exc) from exc
         except BrokerRateLimitError as exc:  # refused before sending

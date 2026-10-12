@@ -922,6 +922,18 @@ def test_a_forgotten_proposal_is_priced_again_and_bought_once(
     assert sum(1 for m in fake.requests if "buy" in m) == 2
 
 
+def test_contracts_are_bought_by_their_parameters_not_a_proposal_id(
+    deriv: DerivAdapter, fake: FakeDeriv
+) -> None:
+    """Deriv's buy schema: `buy: "1"` with `parameters` (underlying_symbol, …)."""
+    buy_rf(deriv)
+    sent = next(m for m in fake.requests if "buy" in m)
+    assert sent["buy"] == "1" and sent["price"] == 1.0
+    params = sent["parameters"]
+    assert params["underlying_symbol"] == "R_100" and params["contract_type"] == "CALL"
+    assert params["basis"] == "stake" and params["amount"] == 1.0 and "duration" in params
+
+
 def test_a_proposal_forgotten_twice_is_refused(deriv: DerivAdapter, fake: FakeDeriv) -> None:
     fake.forget_proposals = 2
     with pytest.raises(OrderRejectedError, match="InvalidContractProposal"):
