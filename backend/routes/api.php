@@ -120,6 +120,7 @@ Route::middleware(['auth:sanctum', 'active', 'approved', 'throttle:api'])->group
         Route::get('markets/quotes', [MarketController::class, 'quotes']);
         Route::get('markets/session', [MarketController::class, 'session']);
         Route::get('markets/contracts', [MarketController::class, 'contracts']);
+        Route::get('markets/candles', [MarketController::class, 'candles']);
         Route::get('markets/instruments/{symbol}', [MarketController::class, 'instrument']);
 
         // Trade (manual tickets always pass the risk engine)
@@ -179,6 +180,7 @@ Route::middleware(['auth:sanctum', 'active', 'approved', 'throttle:api'])->group
 
         // Analytics, notifications, audit
         Route::get('analytics/performance', [AnalyticsController::class, 'performance']);
+        Route::get('analytics/scorecard', [AnalyticsController::class, 'scorecard']);
         Route::get('notifications', [NotificationController::class, 'index']);
         Route::get('notifications/unread-count', [NotificationController::class, 'unreadCount']);
         Route::post('notifications/read', [NotificationController::class, 'markRead']);

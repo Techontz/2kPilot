@@ -1015,3 +1015,36 @@ export interface SystemStatus {
   engine_supervisor?: EngineSupervisor;
   engine_summary?: EngineSummary;
 }
+
+/** GET /analytics/scorecard — each strategy's real results on one account. */
+export type ScorecardVerdict = "TOO_EARLY" | "NO_EDGE" | "LOSING" | "PROFITABLE";
+
+export interface ScorecardRow {
+  strategy_id: string;
+  strategy: string;
+  symbol: string;
+  contract_family: ContractFamily;
+  trades: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  /** The win rate needed to make exactly nothing; null until it can be worked out. */
+  break_even_win_rate: number | null;
+  avg_win: number | null;
+  avg_loss: number | null;
+  /** Average net P/L per trade. */
+  expectancy: number;
+  net_pnl: number;
+  first_trade_at: string | null;
+  last_trade_at: string | null;
+  verdict: ScorecardVerdict;
+  verdict_text: string;
+  confidence_z: number | null;
+}
+
+export interface Scorecard {
+  account_id: string;
+  simulated: boolean;
+  min_trades: number;
+  rows: ScorecardRow[];
+}

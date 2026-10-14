@@ -10,7 +10,7 @@ export function BottomNav() {
   const pathname = usePathname();
   return (
     <nav aria-label="Main" className="safe-bottom fixed inset-x-0 bottom-0 z-40 border-t border-line/60 bg-[color-mix(in_oklab,var(--background)_88%,transparent)] backdrop-blur-xl backdrop-saturate-150 lg:hidden">
-      <ul className="mx-auto grid max-w-md grid-cols-4">
+      <ul className="mx-auto grid max-w-md grid-cols-5">
         {NAVIGATION.map(({ href, label, icon: Icon }) => {
           const active = isActive(pathname, href);
           return (

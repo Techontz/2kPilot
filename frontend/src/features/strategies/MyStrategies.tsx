@@ -22,6 +22,7 @@ import { useAction } from "@/lib/hooks";
 import type { Assignment, Strategy } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { EvaluationsSheet } from "./EvaluationsSheet";
+import { Scorecard } from "./Scorecard";
 import { exportStrategy } from "./exportStrategy";
 import type { StrategyActions } from "./StrategiesSection";
 import { StrategyInsights } from "./StrategyInsights";
@@ -49,6 +50,7 @@ export function MyStrategies({ strategies, actions, onAdd }: { strategies: Loade
   const templates = strategies.data.filter((s) => s.built_in && !isMine(s)).slice(0, 4);
   return (
     <div className="space-y-10">
+      <Scorecard />
       <section aria-labelledby="mine-title">
         <ShelfHeader id="mine-title" title="Your strategies" meta={`${list.length} ${list.length === 1 ? "strategy" : "strategies"}`} />
         <div className="grid items-start gap-4 xl:grid-cols-2">

@@ -3,9 +3,10 @@ import { LEGACY_REDIRECTS } from "../../../next.config";
 import { isActive, NAVIGATION } from "./nav";
 
 describe("navigation", () => {
-  it("has exactly the four sections, in order", () => {
+  it("has exactly the five sections, in order", () => {
     expect(NAVIGATION.map((n) => [n.label, n.href])).toEqual([
       ["Home", "/"],
+      ["Charts", "/charts"],
       ["Strategies", "/strategies"],
       ["History", "/history"],
       ["Settings", "/settings"],
@@ -20,7 +21,7 @@ describe("navigation", () => {
     expect(isActive("/settingsx", "/settings")).toBe(false);
   });
 
-  it("sends every legacy URL into one of the four sections", () => {
+  it("sends every legacy URL into one of the five sections", () => {
     const sections = NAVIGATION.map((n) => n.href);
     for (const r of LEGACY_REDIRECTS) {
       const path = r.destination.split("?")[0]!;

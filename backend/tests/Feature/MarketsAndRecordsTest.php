@@ -118,4 +118,18 @@ class MarketsAndRecordsTest extends TestCase
             ->assertJsonPath('broker_vault_configured', true)
             ->assertJsonPath('deriv_app_id_configured', false);
     }
+
+    public function test_candles_for_a_live_chart_come_from_the_engine_for_the_owner_only(): void
+    {
+        $account = $this->account();
+        $candle = ['time' => '2026-10-14T03:40:00+00:00', 'open' => '6500.1', 'high' => '6501', 'low' => '6499.5', 'close' => '6500.8', 'volume' => 0];
+        Http::fake(['engine.test/internal/accounts/*/candles*' => Http::response(['candles' => [$candle], 'simulated' => true])]);
+
+        $this->actingAs($this->me())->getJson("/api/markets/candles?account_id={$account->id}&symbol=R_10&timeframe=M1&count=120")
+            ->assertOk()->assertJsonPath('timeframe', 'M1')->assertJsonPath('candles.0.close', '6500.8');
+        Http::assertSent(fn (Request $r) => str_contains($r->url(), '/candles') && $r['symbol'] === 'R_10' && (int) $r['count'] === 120 && $r['timeframe'] === 'M1');
+        $this->getJson("/api/markets/candles?account_id={$account->id}&symbol=R_10&count=5000")->assertUnprocessable();
+
+        $this->actingAs($this->user())->getJson("/api/markets/candles?account_id={$account->id}&symbol=R_10")->assertForbidden();
+    }
 }

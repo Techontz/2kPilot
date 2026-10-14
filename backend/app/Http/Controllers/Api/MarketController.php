@@ -103,6 +103,29 @@ class MarketController extends Controller
         ]);
     }
 
+    /** Candles only, for a chart that refreshes every few seconds. */
+    public function candles(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'account_id' => ['required', 'uuid'],
+            'symbol' => ['required', 'string', 'max:40'],
+            'timeframe' => ['nullable', Rule::in(['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1'])],
+            'count' => ['nullable', 'integer', 'min:10', 'max:500'],
+        ]);
+        $account = TradingAccount::query()->findOrFail($data['account_id']);
+        $this->authorize('use', $account); // asks the broker: the owner only
+        $timeframe = $data['timeframe'] ?? 'M5';
+
+        return response()->json([
+            'symbol' => $data['symbol'],
+            'timeframe' => $timeframe,
+            'candles' => $this->engine->get("/internal/accounts/{$account->id}/candles", [
+                'symbol' => $data['symbol'], 'timeframe' => $timeframe, 'count' => $data['count'] ?? 300,
+            ])['candles'],
+            'simulated' => $account->isPaper(),
+        ]);
+    }
+
     /**
      * Which contracts the broker offers on a symbol (families, durations,
      * multipliers) and the default the dashboard should preselect.
