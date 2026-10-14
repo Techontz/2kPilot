@@ -1,6 +1,6 @@
 "use client";
 
-import { Download, FlaskConical, MoreHorizontal, Pencil, Play, SlidersHorizontal, Trash2 } from "lucide-react";
+import { Download, FlaskConical, MoreHorizontal, Pencil, Play, Settings2, SlidersHorizontal, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -24,6 +24,8 @@ import { cn } from "@/lib/utils";
 import { EvaluationsSheet } from "./EvaluationsSheet";
 import { Scorecard } from "./Scorecard";
 import { exportStrategy } from "./exportStrategy";
+import { ParametersDialog } from "./ParametersDialog";
+import { paramFields } from "./paramForm";
 import type { StrategyActions } from "./StrategiesSection";
 import { StrategyInsights } from "./StrategyInsights";
 import { isMine, isRuleBased, rulesText } from "./strategyUtils";
@@ -95,9 +97,12 @@ function StrategyCard({ strategy: s, actions }: { strategy: Strategy; actions: S
   const [expanded, setExpanded] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [explain, setExplain] = useState<Assignment | null>(null);
+  const [settings, setSettings] = useState(false);
   const action = useAction();
   const active = s.assignments.filter((a) => a.status === "ENABLED");
   const editable = isRuleBased(s) && (!s.built_in || isAdmin) && s.editable !== false;
+  // Your copy of a code strategy: its settings are edited in a dialog (rules have the builder).
+  const tunable = !isRuleBased(s) && isMine(s) && !s.built_in && paramFields(s).length > 0;
   const currencies = new Set((accounts ?? []).map((a) => a.currency));
   const currency = currencies.size === 1 ? [...currencies][0] : undefined;
   const demo = s.performance?.demo;
@@ -233,7 +238,9 @@ function StrategyCard({ strategy: s, actions }: { strategy: Strategy; actions: S
         <Button onClick={() => actions.activate(s)} className="max-sm:basis-full"><Play aria-hidden /> {active.length ? "Activate on another market" : "Activate"}</Button>
         <Button variant="outline" onClick={() => actions.test(s)}><FlaskConical aria-hidden /> Test on history</Button>
         {editable && <Button variant="ghost" asChild><Link href={`/strategies/${s.id}/edit`}><Pencil aria-hidden /> Edit</Link></Button>}
+        {tunable && <Button variant="ghost" onClick={() => setSettings(true)}><Settings2 aria-hidden /> Settings</Button>}
       </CardFooter>
+      {settings && <ParametersDialog strategy={s} open={settings} onOpenChange={setSettings} onSaved={actions.reload} />}
       <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title={`Delete ${s.name}?`} confirmLabel="Delete" destructive
         onConfirm={() => void remove()} busy={action.busy} error={action.error}>
         <p>If it has trades or tests, it is archived instead so your history stays complete. Deactivate it everywhere first.</p>
