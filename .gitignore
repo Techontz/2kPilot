@@ -55,3 +55,8 @@ data/
 Archive.zip
 trading-engine.zip
 releases/
+
+# Built release zips/APKs (uploaded by hand, never committed)
+/deploy/
+# Firebase iOS config: belongs in app/ios/Runner/ (git-ignored there), never in git
+/GoogleService-Info.plist
